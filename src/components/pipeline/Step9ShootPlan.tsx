@@ -20,6 +20,7 @@ import {
   ShootDayPlan,
   ShootPlan,
 } from '../../types/pipeline';
+import { PrintableCallSheetView } from './PrintableCallSheetView';
 
 interface Step9ShootPlanProps {
   project: PipelineProject;
@@ -36,6 +37,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
+  const [isPrintableOpen, setIsPrintableOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const liveHybridShots = useMemo(
@@ -192,6 +194,16 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
     } as Partial<ShootPlan>);
   };
 
+  if (isPrintableOpen) {
+    return (
+      <PrintableCallSheetView
+        project={project}
+        plan={plan}
+        onBack={() => setIsPrintableOpen(false)}
+      />
+    );
+  }
+
   return (
     <>
       {/* Screen Interactive Workspace */}
@@ -236,7 +248,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             {plan.hasGenerated && (
               <button
                 type="button"
-                onClick={() => window.print()}
+                onClick={() => setIsPrintableOpen(true)}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5" />
