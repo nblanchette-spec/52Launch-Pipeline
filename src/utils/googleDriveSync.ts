@@ -597,16 +597,23 @@ export async function uploadPdfToDriveServer(params: {
   }
 
   let pdfBase64: string;
-  if (typeof params.pdfBlob.arrayBuffer === 'function') {
-    const arrayBuffer = await params.pdfBlob.arrayBuffer();
-    pdfBase64 = `data:application/pdf;base64,${Buffer.from(arrayBuffer).toString('base64')}`;
-  } else if (typeof FileReader !== 'undefined') {
+  if (typeof FileReader !== 'undefined') {
     pdfBase64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ''));
       reader.onerror = () => reject(new Error('Could not encode PDF for Drive upload.'));
       reader.readAsDataURL(params.pdfBlob);
     });
+  } else if (typeof params.pdfBlob.arrayBuffer === 'function') {
+    const arrayBuffer = await params.pdfBlob.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    const b64 = typeof btoa === 'function' ? btoa(binary) : Buffer.from(arrayBuffer).toString('base64');
+    pdfBase64 = `data:application/pdf;base64,${b64}`;
   } else {
     throw new Error('Could not encode PDF for Drive upload.');
   }
