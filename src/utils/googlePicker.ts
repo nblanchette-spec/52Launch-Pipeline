@@ -5,44 +5,6 @@ declare global {
     gapi?: {
       load: (api: string, callback: () => void) => void;
     };
-    google?: {
-      picker?: {
-        PickerBuilder: new () => GooglePickerBuilder;
-        DocsView: new (viewId?: string) => GooglePickerDocsView;
-        ViewId: {
-          DOCS: string;
-          DOCS_IMAGES: string;
-          DOCS_VIDEOS: string;
-          FOLDERS: string;
-          PDFS: string;
-        };
-        DocsViewMode: {
-          LIST: string;
-          GRID: string;
-        };
-        Feature: {
-          MULTISELECT_ENABLED: string;
-          SUPPORT_DRIVES: string;
-          NAV_HIDDEN: string;
-        };
-        Action: {
-          PICKED: string;
-          CANCEL: string;
-        };
-        Response: {
-          ACTION: string;
-          DOCUMENTS: string;
-        };
-        Document: {
-          ID: string;
-          NAME: string;
-          MIME_TYPE: string;
-          URL: string;
-          ICON_URL: string;
-          SIZE_BYTES: string;
-        };
-      };
-    };
   }
 }
 

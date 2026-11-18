@@ -1,11 +1,3 @@
-import { initializeApp, getApps } from 'firebase/app';
-import {
-  getAuth,
-  signInWithPopup,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  User,
-} from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
 
@@ -16,83 +8,182 @@ export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const auth = getAuth(app);
-
-function createGoogleProvider(forceConsent = false): GoogleAuthProvider {
-  const p = new GoogleAuthProvider();
-  for (const scope of DRIVE_SCOPES) {
-    p.addScope(scope);
-  }
-  p.setCustomParameters({
-    include_granted_scopes: 'true',
-    prompt: forceConsent ? 'consent select_account' : 'select_account',
-  });
-  return p;
+export interface DriveUser {
+  email: string | null;
+  displayName?: string | null;
+  photoURL?: string | null;
 }
 
-// In-memory token caching only (never localStorage/sessionStorage)
-let isSigningIn = false;
+declare global {
+  interface Window {
+    google?: {
+      picker?: {
+        PickerBuilder: any;
+        DocsView: any;
+        ViewId: any;
+        DocsViewMode: any;
+        Feature: any;
+        Action: any;
+        Response: any;
+        Document: any;
+      };
+      accounts?: {
+        oauth2?: {
+          initTokenClient: (config: {
+            client_id: string;
+            scope: string;
+            callback: (response: { access_token?: string; error?: string; error_description?: string }) => void;
+          }) => {
+            requestAccessToken: (options?: { prompt?: string }) => void;
+          };
+        };
+      };
+    };
+  }
+}
+
+// In-memory token caching (never localStorage/sessionStorage)
 let cachedAccessToken: string | null = null;
-let cachedUser: User | null = null;
+let cachedUser: DriveUser | null = null;
+let authSuccessCallback: ((user: DriveUser, token: string) => void) | null = null;
+let authFailureCallback: (() => void) | null = null;
+
+function loadGsiScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.google?.accounts?.oauth2) {
+      resolve();
+      return;
+    }
+    const existing = document.getElementById('gsi-client-script');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', (e) => reject(e));
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = 'gsi-client-script';
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = (err) => reject(err);
+    document.head.appendChild(script);
+  });
+}
 
 export function initDriveAuth(
-  onAuthSuccess?: (user: User, token: string) => void,
+  onAuthSuccess?: (user: DriveUser, token: string) => void,
   onAuthFailure?: () => void
 ) {
-  return onAuthStateChanged(auth, (user: User | null) => {
-    cachedUser = user;
-    if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
-      }
-    } else {
-      cachedAccessToken = null;
-      if (onAuthFailure) onAuthFailure();
-    }
-  });
+  authSuccessCallback = onAuthSuccess || null;
+  authFailureCallback = onAuthFailure || null;
+
+  if (cachedAccessToken && cachedUser) {
+    if (onAuthSuccess) onAuthSuccess(cachedUser, cachedAccessToken);
+  } else {
+    if (onAuthFailure) onAuthFailure();
+  }
+
+  return () => {
+    // cleanup
+  };
 }
 
 export async function getGoogleDriveAccessToken(): Promise<string | null> {
   return cachedAccessToken;
 }
 
-export function getGoogleDriveUser(): User | null {
-  return cachedUser || auth.currentUser;
+export function getGoogleDriveUser(): DriveUser | null {
+  return cachedUser;
 }
 
 export function clearGoogleDriveToken(): void {
   cachedAccessToken = null;
+  cachedUser = null;
 }
 
 export async function signInWithGoogleDrive(forceConsent = false): Promise<{
-  user: User;
+  user: DriveUser;
   accessToken: string;
 }> {
-  try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, createGoogleProvider(forceConsent));
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error(
-        'Google sign-in succeeded, but no Drive access token was returned. Please try again and allow Google Drive permissions.'
-      );
+  await loadGsiScript();
+
+  return new Promise((resolve, reject) => {
+    try {
+      const clientId = (firebaseConfig as any).oAuthClientId;
+      if (!clientId) {
+        throw new Error('Missing oAuthClientId in firebase-applet-config.json');
+      }
+
+      const tokenClient = window.google?.accounts?.oauth2?.initTokenClient({
+        client_id: clientId,
+        scope: DRIVE_SCOPES.join(' '),
+        callback: async (resp: any) => {
+          if (resp.error) {
+            reject(
+              new Error(
+                resp.error_description || resp.error || 'Google OAuth authentication failed'
+              )
+            );
+            return;
+          }
+          const accessToken = resp.access_token;
+          if (!accessToken) {
+            reject(new Error('No access token returned from Google Drive.'));
+            return;
+          }
+
+          let userInfo: DriveUser = {
+            email: 'user@gmail.com',
+            displayName: 'Google User',
+            photoURL: undefined,
+          };
+          try {
+            const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (userRes.ok) {
+              const uData = await userRes.json();
+              userInfo = {
+                email: uData.email || 'user@gmail.com',
+                displayName: uData.name || 'Google User',
+                photoURL: uData.picture,
+              };
+            }
+          } catch {
+            // ignore
+          }
+
+          cachedAccessToken = accessToken;
+          cachedUser = userInfo;
+          if (authSuccessCallback) {
+            authSuccessCallback(userInfo, accessToken);
+          }
+          resolve({ user: userInfo, accessToken });
+        },
+      });
+
+      if (!tokenClient) {
+        throw new Error('Google Identity Services failed to initialize.');
+      }
+
+      if (forceConsent) {
+        tokenClient.requestAccessToken({ prompt: 'consent' });
+      } else {
+        tokenClient.requestAccessToken({ prompt: '' });
+      }
+    } catch (err) {
+      reject(err);
     }
-    cachedAccessToken = credential.accessToken;
-    cachedUser = result.user;
-    return { user: result.user, accessToken: cachedAccessToken };
-  } finally {
-    isSigningIn = false;
-  }
+  });
 }
 
 export async function logoutGoogleDrive(): Promise<void> {
-  await auth.signOut();
   cachedAccessToken = null;
   cachedUser = null;
+  if (authFailureCallback) {
+    authFailureCallback();
+  }
 }
 
 export function extractDriveFolderId(urlOrId?: string): string | null {
@@ -113,12 +204,13 @@ export function extractDriveFileId(urlOrId?: string): string | null {
   if (!urlOrId) return null;
   const trimmed = urlOrId.trim();
   if (!trimmed) return null;
-  // Ignore folder links so callers can distinguish folder vs file links
   if (/\/folders\//.test(trimmed)) return null;
   if (!trimmed.includes('/') && /^[a-zA-Z0-9_-]{10,}$/.test(trimmed)) {
     return trimmed;
   }
-  const fileMatch = trimmed.match(/\/(?:file|document|spreadsheets|presentation|drawings)\/d\/([a-zA-Z0-9_-]+)/);
+  const fileMatch = trimmed.match(
+    /\/(?:file|document|spreadsheets|presentation|drawings)\/d\/([a-zA-Z0-9_-]+)/
+  );
   if (fileMatch && fileMatch[1]) return fileMatch[1];
   const openMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (openMatch && openMatch[1]) return openMatch[1];
@@ -182,11 +274,9 @@ async function fetchFolderChildren(
         apiMessage = errJson.error.message;
       }
     } catch {
-      // ignore JSON parse error
+      // ignore
     }
-    throw new Error(
-      `Could not access Google Drive folder (${folderId}): ${apiMessage}`
-    );
+    throw new Error(`Could not access Google Drive folder (${folderId}): ${apiMessage}`);
   }
 
   const data = await res.json();
@@ -215,7 +305,6 @@ export async function listGoogleDriveFolderFiles(
       );
     }
 
-    // BFS up to depth 3 so subfolders and folder shortcuts are discovered
     const queue: Array<{ id: string; pathPrefix: string; depth: number }> = [
       { id: rootFolderId, pathPrefix: '', depth: 0 },
     ];
