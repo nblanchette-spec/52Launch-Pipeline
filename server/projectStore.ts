@@ -43,6 +43,7 @@ export async function saveDataUrlAsset(
   else if (mime.includes('webm')) ext = 'webm';
   else if (mime.includes('mpeg') || mime.includes('mp3')) ext = 'mp3';
   else if (mime.includes('wav')) ext = 'wav';
+  else if (mime.includes('pdf')) ext = 'pdf';
 
   const filename = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
   const filePath = path.join(assetsDir, filename);
@@ -139,7 +140,9 @@ export async function readAssetAsInlineData(
                   ? 'audio/mpeg'
                   : ext === '.wav'
                     ? 'audio/wav'
-                    : 'image/png';
+                    : ext === '.pdf'
+                      ? 'application/pdf'
+                      : 'image/png';
     return {
       data: buffer.toString('base64'),
       mimeType,
@@ -523,7 +526,9 @@ export async function exportProjectBackupBundle(projectId: string): Promise<{
                 ? 'audio/mpeg'
                 : ext === '.wav'
                   ? 'audio/wav'
-                  : 'image/png';
+                  : ext === '.pdf'
+                    ? 'application/pdf'
+                    : 'image/png';
       embeddedAssets[file] = `data:${mime};base64,${buf.toString('base64')}`;
     }
   } catch {
@@ -597,6 +602,18 @@ export async function importProjectBackupBundle(bundle: {
       ...v,
       audioUrl: rewriteUrl(v.audioUrl),
     })),
+    brandGuideDocuments: Array.isArray(incoming.brandGuideDocuments)
+      ? incoming.brandGuideDocuments.map((doc) => ({
+          ...doc,
+          url: rewriteUrl(doc.url) || doc.url,
+        }))
+      : incoming.brandGuideDocuments,
+    brandBible: incoming.brandBible
+      ? {
+          ...incoming.brandBible,
+          brandLogoUrl: rewriteUrl(incoming.brandBible.brandLogoUrl),
+        }
+      : incoming.brandBible,
     updatedAt: new Date().toISOString(),
   };
 

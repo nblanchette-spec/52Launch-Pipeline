@@ -39,6 +39,7 @@ import {
   ShieldCheck,
   FolderSync,
   RotateCcw,
+  ClipboardPaste,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -87,6 +88,7 @@ const WORKFLOW_TABS: Array<{
   { id: 'first_last_frame', label: 'Pair', icon: SplitSquareVertical },
   { id: 'keyframes_timeline', label: 'Timeline', icon: Clock },
   { id: 'reference_to_video', label: 'Ref / Multi', icon: Images },
+  { id: 'video_extend', label: 'Extend', icon: ArrowRight },
   { id: 'video_edit', label: 'V2V Edit', icon: Film },
   { id: 'video_reframe', label: 'Reframe', icon: Maximize2 },
 ];
@@ -148,6 +150,10 @@ function mapShotModelToStudioId(model: PipelineShot['model']): StudioModelId {
       return 'wan-3.0-prime';
     case 'luma':
       return 'luma-ray-3.2';
+    case 'veo':
+      return 'veo-3.1';
+    case 'omni':
+      return 'gemini-omni-flash';
     default:
       return 'seedance-2.0';
   }
@@ -200,6 +206,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [isDraggingSourceVideo, setIsDraggingSourceVideo] = useState(false);
+  const [pasteHintTarget, setPasteHintTarget] = useState<'start' | 'end' | null>(null);
   const [upscaleModalOpen, setUpscaleModalOpen] = useState(false);
   const [drivePickerTarget, setDrivePickerTarget] = useState<
     | { kind: 'start' }
@@ -218,6 +225,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const startInputRef = useRef<HTMLInputElement>(null);
   const endInputRef = useRef<HTMLInputElement>(null);
+  const startBoxRef = useRef<HTMLDivElement>(null);
+  const endBoxRef = useRef<HTMLDivElement>(null);
   const sourceVideoInputRef = useRef<HTMLInputElement>(null);
   const refImagesInputRef = useRef<HTMLInputElement>(null);
   const refElementsInputRef = useRef<HTMLInputElement>(null);
@@ -545,6 +554,58 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     }
   };
 
+  const extractImageFileFromClipboardEvent = (
+    e: React.ClipboardEvent<HTMLElement>
+  ): File | null => {
+    const items = Array.from(e.clipboardData?.items || []);
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+    const files = Array.from(e.clipboardData?.files || []);
+    return files.find((f) => f.type.startsWith('image/')) || null;
+  };
+
+  const handleFramePasteEvent = async (
+    target: 'start' | 'end',
+    e: React.ClipboardEvent<HTMLElement>
+  ) => {
+    const imageFile = extractImageFileFromClipboardEvent(e);
+    if (!imageFile) return;
+    e.preventDefault();
+    setPasteHintTarget(null);
+    await handleImageUpload(target, [imageFile]);
+  };
+
+  const handlePasteButtonClick = async (target: 'start' | 'end') => {
+    setErrorMsg(null);
+    setPasteHintTarget(null);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const ext = imgType.split('/')[1]?.split('+')[0] || 'png';
+            const file = new File([blob], `pasted-${target}.${ext}`, { type: imgType });
+            await handleImageUpload(target, [file]);
+            return;
+          }
+        }
+        setErrorMsg('Clipboard does not contain an image. Copy an image first (e.g. from Google Flow) and paste.');
+        return;
+      }
+    } catch {
+      // Fallback for iframe permission restrictions
+    }
+    const refBox = target === 'start' ? startBoxRef.current : endBoxRef.current;
+    refBox?.focus();
+    setPasteHintTarget(target);
+  };
+
   const uploadMediaViaServer = async (file: File, prefix: string): Promise<string> => {
     const dataUrl = await fileToDataUrl(file);
     const resp = await fetch('/api/pipeline/upload-media', {
@@ -706,7 +767,13 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
   const handleExtendFromCurrent = () => {
     if (!shot.videoUrl) return;
-    if (model.workflowModes.includes('reference_to_video')) {
+    if (model.workflowModes.includes('video_extend') && model.family === 'veo') {
+      setSourceVideoUrl(shot.videoUrl);
+      handleModeSelect('video_extend');
+    } else if (model.workflowModes.includes('video_edit') && model.family === 'gemini-omni') {
+      setSourceVideoUrl(shot.videoUrl);
+      handleModeSelect('video_edit');
+    } else if (model.workflowModes.includes('reference_to_video')) {
       setReferenceVideos((prev) =>
         prev.includes(shot.videoUrl!)
           ? prev
@@ -862,6 +929,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   onChange={(e) => handleModelSelect(e.target.value as StudioModelId)}
                   className="w-full appearance-none bg-white border border-[#D8D8DF] rounded-xl pl-3 pr-9 py-2.5 text-xs font-semibold text-[#111114] focus:outline-none focus:border-[#C6202F] cursor-pointer"
                 >
+                  <optgroup label="Google DeepMind">
+                    <option value="veo-3.1">Google Veo 3.1 (720p–4K, Audio, T2V, I2V, Refs &amp; Extend)</option>
+                    <option value="veo-3.1-fast">Google Veo 3.1 Fast (Rapid 720p–4K, Audio, I2V &amp; Extend)</option>
+                    <option value="gemini-omni-flash">Google Gemini Omni Flash (T2V, Ref &amp; V2V Edit + Audio)</option>
+                  </optgroup>
                   <optgroup label="ByteDance Seedance">
                     <option value="seedance-2.0">Seedance 2.0 Fast (Lowest Cost · 480p–720p)</option>
                     <option value="seedance-2.5">Seedance 2.5 (1080p, 30s, 30 refs)</option>
@@ -890,11 +962,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               <p className="text-[10px] text-[#6E6E7A]">{model.tagline}</p>
             </div>
 
-            {/* Version Pills only when a provider family has multiple versions (Seedance) */}
+            {/* Version Pills only when a provider family has multiple versions (Seedance / Google Veo) */}
             {family.modelIds.length > 1 && (
               <div className="space-y-1.5">
                 <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
-                  Seedance Engine Tier
+                  {family.label} Engine Tier
                 </label>
                 <div
                   className="grid gap-1.5 p-1 bg-white rounded-xl border border-[#E2E2E6]"
@@ -982,6 +1054,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => void handlePasteButtonClick('start')}
+                            className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                            title="Paste image from clipboard (Google Flow / screenshot)"
+                          >
+                            <ClipboardPaste className="w-3 h-3" />
+                            Paste
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setDrivePickerTarget({ kind: 'start' })}
                             className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                           >
@@ -1019,8 +1100,19 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         }}
                       />
                       <div
+                        ref={startBoxRef}
+                        tabIndex={0}
                         onClick={() => startInputRef.current?.click()}
-                        className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
+                        onPaste={(e) => void handleFramePasteEvent('start', e)}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const files = Array.from(e.dataTransfer.files || []).filter((f) =>
+                            f.type.startsWith('image/')
+                          );
+                          if (files.length) void handleImageUpload('start', files);
+                        }}
+                        className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 focus:outline-none focus:border-[#C6202F] bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
                       >
                         {startFrameUrl ? (
                           <img
@@ -1032,10 +1124,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         ) : (
                           <div className="text-center p-4 text-[#5A5A66] text-xs">
                             <UploadCloud className="w-5 h-5 mx-auto mb-1 text-[#C6202F]" />
-                            Drop opening image or browse
+                            Drop, browse, or paste (Ctrl+V / Cmd+V) opening image
                           </div>
                         )}
                       </div>
+                      {pasteHintTarget === 'start' && (
+                        <div className="text-[11px] text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] rounded-lg px-2.5 py-1.5">
+                          Box focused — press <strong className="font-mono">Ctrl+V / Cmd+V</strong> now to paste your clipboard image.
+                        </div>
+                      )}
                     </div>
 
                     {(workflowMode === 'first_last_frame' ||
@@ -1048,6 +1145,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               : 'End Frame (Optional)'}
                           </span>
                           <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handlePasteButtonClick('end')}
+                              className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                              title="Paste image from clipboard (Google Flow / screenshot)"
+                            >
+                              <ClipboardPaste className="w-3 h-3" />
+                              Paste
+                            </button>
                             <button
                               type="button"
                               onClick={() => setDrivePickerTarget({ kind: 'end' })}
@@ -1079,8 +1185,19 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           }}
                         />
                         <div
+                          ref={endBoxRef}
+                          tabIndex={0}
                           onClick={() => endInputRef.current?.click()}
-                          className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
+                          onPaste={(e) => void handleFramePasteEvent('end', e)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const files = Array.from(e.dataTransfer.files || []).filter((f) =>
+                              f.type.startsWith('image/')
+                            );
+                            if (files.length) void handleImageUpload('end', files);
+                          }}
+                          className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 focus:outline-none focus:border-[#C6202F] bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
                         >
                           {endFrameUrl ? (
                             <img
@@ -1093,11 +1210,16 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <div className="text-center p-4 text-[#5A5A66] text-xs">
                               <UploadCloud className="w-5 h-5 mx-auto mb-1 text-[#C6202F]" />
                               {workflowMode === 'first_last_frame'
-                                ? 'Drop target ending image or browse'
-                                : 'Optional closing keyframe (end_image_url)'}
+                                ? 'Drop, browse, or paste (Ctrl+V / Cmd+V) closing image'
+                                : 'Optional closing keyframe (browse or paste Ctrl+V / Cmd+V)'}
                             </div>
                           )}
                         </div>
+                        {pasteHintTarget === 'end' && (
+                          <div className="text-[11px] text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] rounded-lg px-2.5 py-1.5">
+                            Box focused — press <strong className="font-mono">Ctrl+V / Cmd+V</strong> now to paste your clipboard image.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1245,18 +1367,24 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   </div>
                 )}
 
-                {/* Dedicated Drag-and-Drop Source Video Uploader for V2V Edit / Reframe */}
-                {(workflowMode === 'video_edit' || workflowMode === 'video_reframe') && (
+                {/* Dedicated Drag-and-Drop Source Video Uploader for V2V Edit / Reframe / Veo Extend */}
+                {(workflowMode === 'video_edit' ||
+                  workflowMode === 'video_reframe' ||
+                  (workflowMode === 'video_extend' && model.family === 'veo')) && (
                   <div className="space-y-3 p-3 rounded-xl bg-white border border-[#E2E2E6]">
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
                           <Film className="w-3.5 h-3.5 text-[#891A23]" />
-                          {workflowMode === 'video_reframe'
-                            ? 'Source Video to Reframe'
-                            : model.family === 'kling'
-                              ? 'Source Video to Edit (3–30s)'
-                              : 'Source Video to Restyle'}
+                          {workflowMode === 'video_extend'
+                            ? 'Source Video to Extend'
+                            : workflowMode === 'video_reframe'
+                              ? 'Source Video to Reframe'
+                              : model.family === 'kling'
+                                ? 'Source Video to Edit (3–30s)'
+                                : model.family === 'gemini-omni'
+                                  ? 'Source Video to Edit (Omni Flash)'
+                                  : 'Source Video to Restyle'}
                         </span>
                         <div className="flex items-center gap-2">
                           <button
@@ -1461,7 +1589,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                 {/* Unified Multi-Reference / Video & Ref Tray */}
                 {(workflowMode === 'reference_to_video' ||
-                  workflowMode === 'video_extend') && (
+                  (workflowMode === 'video_extend' && model.family !== 'veo')) && (
                   <div className="space-y-3 p-3 rounded-xl bg-white border border-[#E2E2E6]">
                     {/* Clickable Prompt Tag Chips (@Image1, @Element1, @Video1) */}
                     {promptChips.length > 0 && (
@@ -1484,7 +1612,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       </div>
                     )}
 
-                    {/* Reference Videos */}
+                    {/* Reference Videos (hidden when model supports 0 ref videos, e.g. Veo 3.1 R2V) */}
+                    {model.maxReferenceVideos > 0 && (
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
@@ -1636,9 +1765,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         </div>
                       )}
                     </div>
+                    )}
 
                     {/* Reference Images (@Image1, @Image2...) */}
-                    <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
+                    <div className={`space-y-1.5 ${model.maxReferenceVideos > 0 ? 'pt-2.5 border-t border-[#E2E2E6]' : ''}`}>
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
                           <Images className="w-3.5 h-3.5 text-[#891A23]" />
@@ -2198,7 +2328,9 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
               {(model.family === 'seedance' ||
                 model.family === 'flux-3' ||
-                model.family === 'kling') && (
+                model.family === 'kling' ||
+                model.family === 'veo' ||
+                model.family === 'gemini-omni') && (
                 <button
                   type="button"
                   disabled={busy}

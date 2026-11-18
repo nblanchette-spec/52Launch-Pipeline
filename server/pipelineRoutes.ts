@@ -16,7 +16,9 @@ import {
   saveProject,
 } from './projectStore';
 import {
+  BrandGuideDocument,
   ExternalUpscaleItem,
+  ExtractedStyleGuide,
   FrameCheckResult,
   PipelineProject,
   PipelineShot,
@@ -27,6 +29,7 @@ import {
   VoScriptLine,
   VoStudioSettings,
 } from '../src/types/pipeline';
+import { extractImagesFromPdfBuffer } from './pdfAssetExtractor';
 import {
   buildFalVideoRequest,
   buildTopazUpscaleRequest,
@@ -57,7 +60,7 @@ import {
   TopazUpscaleMode,
 } from '../src/utils/videoStudioCatalog';
 
-const GEMINI_MODEL = 'gemini-4-hydrogen';
+const GEMINI_MODEL = 'gemini-3.8-flash';
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -190,7 +193,11 @@ function appendShotClipHistory(
               ? 'wan-3.0-prime'
               : shot.model === 'luma'
                 ? 'luma-ray-3.2'
-                : 'seedance-2.0',
+                : shot.model === 'veo'
+                  ? 'veo-3.1'
+                  : shot.model === 'omni'
+                    ? 'gemini-omni-flash'
+                    : 'seedance-2.0',
       workflowMode: shot.frameImageUrl ? 'image_to_video' : 'text_to_video',
       prompt: shot.videoPrompt || shot.scene || '',
       negativePrompt: shot.negativePrompt || '',
@@ -242,7 +249,16 @@ export function createPipelineRouter(): Router {
   // Create new project from New Project Form
   router.post('/projects', async (req, res) => {
     try {
-      const { client, product, intake, initialPhotoDataUrls, googleDriveFolderUrl } = req.body;
+      const {
+        client,
+        product,
+        intake,
+        initialPhotoDataUrls,
+        googleDriveFolderUrl,
+        extractedStyleGuide,
+        stagedGuidePdfs,
+        initialLogoDataUrl,
+      } = req.body;
       if (!client || !product?.name) {
         return res
           .status(400)
@@ -272,6 +288,65 @@ export function createPipelineRouter(): Router {
         }
       }
 
+      const brandGuideDocuments: BrandGuideDocument[] = [];
+      if (Array.isArray(stagedGuidePdfs)) {
+        for (let i = 0; i < stagedGuidePdfs.length; i++) {
+          const pdfItem = stagedGuidePdfs[i];
+          if (pdfItem?.dataUrl && pdfItem.dataUrl.startsWith('data:application/pdf')) {
+            const savedPdf = await saveDataUrlAsset(id, pdfItem.dataUrl, 'guide');
+            brandGuideDocuments.push({
+              id: `guide-${Date.now()}-${i}`,
+              name: pdfItem.name || `Brand Guide ${i + 1}.pdf`,
+              url: savedPdf.url,
+              mimeType: 'application/pdf',
+              extractedAt: now,
+              graphicCount: typeof pdfItem.graphicCount === 'number' ? pdfItem.graphicCount : undefined,
+            });
+          }
+        }
+      }
+
+      let savedLogoUrl: string | null = null;
+      if (typeof initialLogoDataUrl === 'string' && initialLogoDataUrl.startsWith('data:image/')) {
+        const savedLogo = await saveDataUrlAsset(id, initialLogoDataUrl, 'logo');
+        savedLogoUrl = savedLogo.url;
+      }
+
+      const normalizedGuide: ExtractedStyleGuide | null =
+        extractedStyleGuide && typeof extractedStyleGuide === 'object'
+          ? {
+              summary: String(extractedStyleGuide.summary || '').trim(),
+              palette: String(extractedStyleGuide.palette || '').trim(),
+              paletteHexes: Array.isArray(extractedStyleGuide.paletteHexes)
+                ? extractedStyleGuide.paletteHexes.map((h: string) => String(h).trim()).filter(Boolean)
+                : [],
+              typography: String(extractedStyleGuide.typography || '').trim(),
+              lighting: String(extractedStyleGuide.lighting || '').trim(),
+              lensAndFraming: String(extractedStyleGuide.lensAndFraming || '').trim(),
+              grade: String(extractedStyleGuide.grade || '').trim(),
+              visualStyleNotes: String(extractedStyleGuide.visualStyleNotes || '').trim(),
+              productVisualRules: String(extractedStyleGuide.productVisualRules || '').trim(),
+              brandLogoNotes: String(extractedStyleGuide.brandLogoNotes || '').trim(),
+              bannedElements: Array.isArray(extractedStyleGuide.bannedElements)
+                ? extractedStyleGuide.bannedElements.map((b: string) => String(b).trim()).filter(Boolean)
+                : [],
+              sourceFileNames: Array.isArray(extractedStyleGuide.sourceFileNames)
+                ? extractedStyleGuide.sourceFileNames.map((n: string) => String(n).trim()).filter(Boolean)
+                : [],
+            }
+          : null;
+
+      const paletteFromGuide = normalizedGuide
+        ? [
+            normalizedGuide.palette,
+            normalizedGuide.paletteHexes.length > 0
+              ? `Hexes: ${normalizedGuide.paletteHexes.join(', ')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' — ')
+        : '';
+
       const project: PipelineProject = {
         id,
         createdAt: now,
@@ -294,16 +369,24 @@ export function createPipelineRouter(): Router {
             intake?.shootLocationDatesBudgetNotes || ''
           ).trim(),
         },
+        brandGuideDocuments,
+        extractedStyleGuide: normalizedGuide,
         brandBible: {
           positioning: '',
           audience: '',
           toneOfVoice: { adjectives: [], guidance: '' },
-          visualStyle: { palette: '', typography: '', lighting: '', lensAndFraming: '', grade: '' },
-          brandLogoUrl: null,
-          brandLogoCaption: '',
+          visualStyle: {
+            palette: paletteFromGuide,
+            typography: normalizedGuide?.typography || '',
+            lighting: normalizedGuide?.lighting || '',
+            lensAndFraming: normalizedGuide?.lensAndFraming || '',
+            grade: normalizedGuide?.grade || '',
+          },
+          brandLogoUrl: savedLogoUrl,
+          brandLogoCaption: normalizedGuide?.brandLogoNotes || '',
           characters: [],
-          productRules: '',
-          bannedList: [],
+          productRules: normalizedGuide?.productVisualRules || '',
+          bannedList: normalizedGuide?.bannedElements || [],
           claimsAllowed: [],
           claimsToFlag: [],
           hasGenerated: false,
@@ -486,15 +569,47 @@ export function createPipelineRouter(): Router {
         }
       }
 
+      if (project.brandBible?.brandLogoUrl) {
+        const logoInline = await readAssetAsInlineData(project.id, project.brandBible.brandLogoUrl);
+        if (logoInline) {
+          parts.push({ text: '--- Attached Brand Logo Reference ---' });
+          parts.push({ inlineData: logoInline });
+        }
+      }
+
+      if (Array.isArray(project.brandGuideDocuments)) {
+        for (const doc of project.brandGuideDocuments.slice(0, 4)) {
+          const docInline = await readAssetAsInlineData(project.id, doc.url);
+          if (docInline) {
+            parts.push({ text: `--- Attached Client Brand / Style Guide PDF: ${doc.name} ---` });
+            parts.push({ inlineData: docInline });
+          }
+        }
+      }
+
+      const guideBlock = project.extractedStyleGuide
+        ? `\nEXTRACTED STYLE GUIDE DATA (preserve exact hex codes, fonts, and rules):
+- Summary: ${project.extractedStyleGuide.summary || 'N/A'}
+- Palette: ${project.extractedStyleGuide.palette || 'N/A'}
+- Hex Swatches: ${project.extractedStyleGuide.paletteHexes.join(', ') || 'None extracted'}
+- Typography: ${project.extractedStyleGuide.typography || 'N/A'}
+- Lighting: ${project.extractedStyleGuide.lighting || 'N/A'}
+- Lens & Framing: ${project.extractedStyleGuide.lensAndFraming || 'N/A'}
+- Grade: ${project.extractedStyleGuide.grade || 'N/A'}
+- Product Visual Rules: ${project.extractedStyleGuide.productVisualRules || 'N/A'}
+- Brand Logo Usage Notes: ${project.extractedStyleGuide.brandLogoNotes || 'N/A'}
+- Banned Elements: ${project.extractedStyleGuide.bannedElements.join(', ') || 'None'}\n`
+        : '';
+
       const prompt = `You are the brand strategist for 52Launch.
-From the client intake and the attached real product photos produce a complete Brand Bible:
+From the client intake, attached brand/style guide PDFs, and real product photos produce a complete Brand Bible:
 - positioning: one sharp sentence
 - audience: clear description of who this is for
 - toneOfVoice: 3-5 adjectives plus clear guidance
-- visualStyle: palette (include any brand color hex codes if present), typography (primary/display/body fonts and type treatment), lighting, lensAndFraming, grade
+- visualStyle: palette (MUST include all brand color #HEX codes if present in guide PDFs or extracted data), typography (primary/display/body fonts and type treatment), lighting, lensAndFraming, grade
 - characters: array of key on-screen people (name plus a FIXED short visual descriptor that will be pasted word for word into every prompt)
-- productRules: how the product must look, based ONLY on the intake and photos, never invented features
-- bannedList: specific visual tropes, clichés, or forbidden elements
+- productRules: how the product must look, based ONLY on the intake, style guides, and photos, never invented features
+- bannedList: specific visual tropes, clichés, or forbidden elements (include any off-brand rules from the style guide)
 - claimsAllowed: ONLY claims listed below as provable
 - claimsToFlag: any client idea that implies an unproven claim (empty array if none)
 
@@ -516,7 +631,8 @@ CLIENT & PRODUCT INTAKE:
 - Shoot Location / Dates / Budget Notes: ${
         project.intake.shootLocationDatesBudgetNotes || 'Not specified'
       }
-- Attached Product Photos Count: ${project.product.photos.length}`;
+- Attached Product Photos Count: ${project.product.photos.length}
+- Attached Style Guide PDFs Count: ${project.brandGuideDocuments?.length || 0}${guideBlock}`;
 
       parts.push({ text: prompt });
 
@@ -693,7 +809,11 @@ APPROVED BRAND BIBLE:
 - Product Rules: ${project.brandBible.productRules}
 - Claims Allowed (STRICT): ${project.brandBible.claimsAllowed.join(' | ') || 'None'}
 - Claims Flagged: ${project.brandBible.claimsToFlag.join(' | ') || 'None'}
-- Banned List: ${project.brandBible.bannedList.join(', ')}`;
+- Banned List: ${project.brandBible.bannedList.join(', ')}${
+        project.extractedStyleGuide
+          ? `\n\nSTYLE GUIDE NOTES:\n- Summary: ${project.extractedStyleGuide.summary}\n- Visual Style Notes: ${project.extractedStyleGuide.visualStyleNotes}`
+          : ''
+      }`;
 
       const response = await withGeminiRetry(() =>
         ai.models.generateContent({
@@ -841,7 +961,7 @@ Each shot must include:
 - durationSec: number in seconds (AI clips max 20, prefer 3-8)
 - scene: plain English, ONE action per shot
 - route: strictly "ai_video", "live", or "hybrid"
-- model: strictly "flux3", "seedance", or "none" ("none" for live shots)
+- model: strictly "flux3", "seedance", "veo", "omni", or "none" ("none" for live shots)
 - productInFrame: true or false
 - framePrompt: a plain-English still image prompt, REQUIRED for EVERY shot including live ones (where it serves as a reference frame for the crew); repeat the brand bible character descriptors WORD FOR WORD whenever a character appears; describe composition, lighting and lens; wherever the real product appears write "[PRODUCT PLACEHOLDER: composite real product here]" instead of describing the product's look
 - shootDirection: for "live" and "hybrid" shots, specify camera position and movement, lens, lighting, talent and product handling, props; leave empty string "" for "ai_video" shots
@@ -852,7 +972,7 @@ Each shot must include:
 ROUTING & MODEL RULES:
 - Product hero shots and close-ups of the real product's features and function default to "live" or "hybrid".
 - Environments, mood, B-roll and lifestyle context default to "ai_video".
-- Use "flux3" for shots that benefit from native audio or longer duration; use "seedance" for tight motion-controlled shots.
+- Use "flux3", "veo" (Google Veo 3.1), or "omni" (Google Gemini Omni Flash) for shots that benefit from native audio, dialogue/foley realism, or multi-reference continuity; use "seedance" for tight motion-controlled shots.
 - Never invent product behavior that is not in the brand bible. Use NO claim outside "claimsAllowed".
 
 BRAND BIBLE CHARACTERS (repeat word for word in frame prompts):
@@ -868,7 +988,11 @@ BRAND BIBLE VISUAL STYLE & RULES:
 - Visual Style: ${JSON.stringify(project.brandBible.visualStyle)}
 - Product Rules: ${project.brandBible.productRules}
 - Claims Allowed: ${project.brandBible.claimsAllowed.join(' | ')}
-- Banned List: ${project.brandBible.bannedList.join(', ')}
+- Banned List: ${project.brandBible.bannedList.join(', ')}${
+        project.extractedStyleGuide
+          ? `\n- Style Guide Hex Palette: ${project.extractedStyleGuide.paletteHexes.join(', ') || 'None'}\n- Style Guide Visual Notes: ${project.extractedStyleGuide.visualStyleNotes || project.extractedStyleGuide.summary}`
+          : ''
+      }
 
 APPROVED CREATIVE BRIEF:
 - Objective: ${project.creativeBrief.objective}
@@ -931,7 +1055,10 @@ APPROVED CREATIVE BRIEF:
           const model =
             route === 'live'
               ? 'none'
-              : s.model === 'flux3' || s.model === 'seedance'
+              : s.model === 'flux3' ||
+                  s.model === 'seedance' ||
+                  s.model === 'veo' ||
+                  s.model === 'omni'
                 ? s.model
                 : 'seedance';
           return {
@@ -1223,7 +1350,7 @@ BRAND BIBLE:
           text: `You are a Commercial Video Prompt Director for 52Launch.
 Write the video prompt and negative prompt for shot ${shot.id} using the attached start frame (if present).
 
-MODEL TARGET: ${shot.model === 'flux3' ? 'Flux 3' : shot.model}
+MODEL TARGET: ${shot.model === 'flux3' ? 'Flux 3' : shot.model === 'veo' ? 'Google Veo 3.1' : shot.model === 'omni' ? 'Google Gemini Omni Flash' : shot.model}
 DURATION: ${shot.durationSec} seconds
 SCENE: ${shot.scene}
 HAS VOICEOVER LINE: ${shot.voLine ? `YES ("${shot.voLine}")` : 'NO'}
@@ -1233,8 +1360,8 @@ BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
 STRICT RULES:
 1. Describe MOTION, CAMERA, and TIMING only. Keep it concise — add ONE clean line preserving the start frame's framing, wardrobe, and lighting.
 2. ${
-            shot.model === 'flux3'
-              ? `Flux 3 generates native audio: describe realistic ambient sound matching the scene${
+            shot.model === 'flux3' || shot.model === 'veo' || shot.model === 'omni'
+              ? `${shot.model === 'veo' ? 'Google Veo 3.1' : shot.model === 'omni' ? 'Google Gemini Omni Flash' : 'Flux 3'} generates native audio: describe realistic ambient sound matching the scene${
                   shot.voLine
                     ? ', and explicitly state "no dialogue" because voiceover is recorded separately.'
                     : '.'
@@ -1290,7 +1417,7 @@ STRICT RULES:
             }
           }
           shotSpecs.push(
-            `- Shot ${shot.id} | Model: ${shot.model === 'flux3' ? 'Flux 3 (native audio; state "no dialogue" if VO present)' : shot.model} | Duration: ${shot.durationSec}s | Product in frame: ${shot.productInFrame ? 'YES' : 'NO'} | VO: ${shot.voLine ? `"${shot.voLine}"` : 'NONE'} | Scene: ${shot.scene}`
+            `- Shot ${shot.id} | Model: ${shot.model === 'flux3' ? 'Flux 3 (native audio; state "no dialogue" if VO present)' : shot.model === 'veo' ? 'Google Veo 3.1 (native audio; state "no dialogue" if VO present)' : shot.model === 'omni' ? 'Google Gemini Omni Flash (native audio; state "no dialogue" if VO present)' : shot.model} | Duration: ${shot.durationSec}s | Product in frame: ${shot.productInFrame ? 'YES' : 'NO'} | VO: ${shot.voLine ? `"${shot.voLine}"` : 'NONE'} | Scene: ${shot.scene}`
           );
         }
 
@@ -1302,7 +1429,7 @@ BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
 
 STRICT RULES FOR EVERY SHOT:
 1. Describe MOTION, CAMERA, and TIMING only. Add ONE clean sentence preserving the start frame's framing, wardrobe, and lighting.
-2. For Flux 3 shots with VO, include realistic ambient SFX and explicitly state "no dialogue". For other models keep it crisp: one camera move + one clear subject action.
+2. For Flux 3, Google Veo 3.1, and Gemini Omni Flash shots with VO, include realistic ambient SFX and explicitly state "no dialogue". For other models keep it crisp: one camera move + one clear subject action.
 3. For negativePrompt: include common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS items from the Brand Bible banned list.
 4. Return the exact "shotId" for every shot listed.
 
@@ -1541,7 +1668,14 @@ ${shotSpecs.join('\n')}`,
     }
 
     const effectiveModelId: StudioModelId =
-      modelId || (shot.model === 'flux3' ? 'flux-3' : 'seedance-2.0');
+      modelId ||
+      (shot.model === 'flux3'
+        ? 'flux-3'
+        : shot.model === 'veo'
+          ? 'veo-3.1'
+          : shot.model === 'omni'
+            ? 'gemini-omni-flash'
+            : 'seedance-2.0');
     const effectiveWorkflow: StudioWorkflowMode = workflowMode || 'image_to_video';
     const effectiveQualityTier: StudioQualityTier = qualityTier || 'draft';
     const effectiveNeg =
@@ -1621,7 +1755,11 @@ ${shotSpecs.join('\n')}`,
               ? 'wan'
               : effectiveModelId === 'luma-ray-3.2'
                 ? 'luma'
-                : 'seedance';
+                : effectiveModelId === 'veo-3.1' || effectiveModelId === 'veo-3.1-fast'
+                  ? 'veo'
+                  : effectiveModelId === 'gemini-omni-flash'
+                    ? 'omni'
+                    : 'seedance';
 
       const newClipItem: ShotClipHistoryItem = {
         id: `clip-${Date.now()}`,
@@ -2012,7 +2150,11 @@ ${shotSpecs.join('\n')}`,
             ? 'wan-3.0-prime'
             : shot.model === 'luma'
               ? 'luma-ray-3.2'
-              : 'seedance-2.5';
+              : shot.model === 'veo'
+                ? 'veo-3.1'
+                : shot.model === 'omni'
+                  ? 'gemini-omni-flash'
+                  : 'seedance-2.5';
     let chosenEndpoint: string = modelId;
 
     try {
@@ -3103,7 +3245,7 @@ ${shotsText}`;
       const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> = [];
 
       // Attach PDFs and images directly for Gemini multimodal inspection
-      for (const inline of extracted.inlineParts.slice(0, 12)) {
+      for (const inline of extracted.inlineParts.slice(0, 14)) {
         parts.push({ text: `--- Attached File: ${inline.fileName} ---` });
         parts.push({
           inlineData: {
@@ -3113,28 +3255,44 @@ ${shotsText}`;
         });
       }
 
-      const prompt = `You are an expert Executive Producer at 52Launch Production Studio.
-Analyze the ACTUAL contents of the attached Google Drive files and documents below and extract accurate commercial production intake details.
+      const prompt = `You are an expert Executive Producer & Brand Design Director at 52Launch Production Studio.
+Analyze the ACTUAL contents of the attached Google Drive files, PDF style guides, brand books, and embedded graphics below and extract accurate commercial production intake AND complete visual style-guide details.
 
 STRICT RULES:
-- Extract information ONLY from the provided file contents, PDFs, spreadsheets, docs, and product images.
+- Extract information ONLY from the provided file contents, PDFs, spreadsheets, docs, and extracted graphics/images.
 - NEVER invent, guess, or fabricate a fictional product or company.
 - If a detail (such as shoot dates or budget) is not present in the linked files, write "Not specified in linked Drive files" rather than making anything up.
 - For "provableClaims", extract specific factual product claims or specs explicitly stated in the documents.
+- Carefully extract ALL brand/style guide specifications from PDFs or decks: exact #HEX color codes, color palette names, display & body font families/typography rules, photography lighting, lens/framing guidelines, color grading, logo usage rules, product appearance rules, and any explicitly forbidden visual elements.
+- If one of the attached image filenames looks like a brand logo/wordmark/badge, put that exact filename in "styleGuide.logoFileName".
 
 EXTRACTED DOCUMENT CONTENTS & ASSET CATALOG:
 ${extracted.textSummaries.join('\n\n')}
 
 Return a JSON object with:
-- "client": string (actual client/company name from the documents)
-- "productName": string (actual product name from the documents)
-- "productDescription": string (accurate 2-4 sentence summary based on the files and product images)
-- "provableClaims": string[] (factual claims/specs directly supported by the documents)
-- "audience": string (target audience stated or strongly evidenced in the documents)
-- "tone": string (brand tone / visual & voice direction from the style guide or docs)
-- "clientMarketingIdeas": string (marketing angles, campaign structure, or hooks found in the docs)
-- "videosWanted": string (deliverables, formats, durations, or aspect ratios specified in the docs)
-- "shootLocationDatesBudgetNotes": string (shoot logistics, dates, locations, or budget notes from the docs)`;
+- "client": string
+- "productName": string
+- "productDescription": string (accurate 2-4 sentence summary)
+- "provableClaims": string[]
+- "audience": string
+- "tone": string
+- "clientMarketingIdeas": string
+- "videosWanted": string
+- "shootLocationDatesBudgetNotes": string
+- "styleGuide": {
+    "summary": string (brief 1-2 sentence summary of the brand/style guide rules),
+    "palette": string (color palette description),
+    "paletteHexes": string[] (exact #RRGGBB hex codes found in the PDFs/guides, e.g. ["#C6202F", "#111114"]),
+    "typography": string (display/body fonts and type hierarchy rules),
+    "lighting": string (photography/cinematography lighting rules),
+    "lensAndFraming": string (composition, lens, aspect ratio or framing guidelines),
+    "grade": string (color grading / finish guidance),
+    "visualStyleNotes": string (additional layout, graphic motif, or aesthetic rules from the guide),
+    "productVisualRules": string (how product/packaging/logo must appear on camera),
+    "brandLogoNotes": string (logo clearspace, color variants, placement rules),
+    "bannedElements": string[] (do-nots / clichés / forbidden graphics from the guide),
+    "logoFileName": string (filename of extracted graphic most likely to be the main brand logo, or "")
+  }`;
 
       parts.push({ text: prompt });
 
@@ -3156,6 +3314,23 @@ Return a JSON object with:
               clientMarketingIdeas: { type: Type.STRING },
               videosWanted: { type: Type.STRING },
               shootLocationDatesBudgetNotes: { type: Type.STRING },
+              styleGuide: {
+                type: Type.OBJECT,
+                properties: {
+                  summary: { type: Type.STRING },
+                  palette: { type: Type.STRING },
+                  paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  typography: { type: Type.STRING },
+                  lighting: { type: Type.STRING },
+                  lensAndFraming: { type: Type.STRING },
+                  grade: { type: Type.STRING },
+                  visualStyleNotes: { type: Type.STRING },
+                  productVisualRules: { type: Type.STRING },
+                  brandLogoNotes: { type: Type.STRING },
+                  bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  logoFileName: { type: Type.STRING },
+                },
+              },
             },
             required: [
               'client',
@@ -3173,13 +3348,46 @@ Return a JSON object with:
         })
       );
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsedRaw = JSON.parse((response.text ?? '{}').trim());
+      const rawGuide = parsedRaw.styleGuide || {};
+      const extractedStyleGuide: ExtractedStyleGuide = {
+        summary: String(rawGuide.summary || '').trim(),
+        palette: String(rawGuide.palette || '').trim(),
+        paletteHexes: Array.isArray(rawGuide.paletteHexes)
+          ? rawGuide.paletteHexes
+              .map((h: string) => String(h).trim())
+              .filter((h: string) => /^#?[0-9a-fA-F]{3,8}$/.test(h))
+              .map((h: string) => (h.startsWith('#') ? h.toUpperCase() : `#${h.toUpperCase()}`))
+          : [],
+        typography: String(rawGuide.typography || '').trim(),
+        lighting: String(rawGuide.lighting || '').trim(),
+        lensAndFraming: String(rawGuide.lensAndFraming || '').trim(),
+        grade: String(rawGuide.grade || '').trim(),
+        visualStyleNotes: String(rawGuide.visualStyleNotes || '').trim(),
+        productVisualRules: String(rawGuide.productVisualRules || '').trim(),
+        brandLogoNotes: String(rawGuide.brandLogoNotes || '').trim(),
+        bannedElements: Array.isArray(rawGuide.bannedElements)
+          ? rawGuide.bannedElements.map((b: string) => String(b).trim()).filter(Boolean)
+          : [],
+        sourceFileNames: fileList.map((f) => f.name).filter(Boolean),
+      };
+      const parsed = {
+        client: parsedRaw.client || '',
+        productName: parsedRaw.productName || '',
+        productDescription: parsedRaw.productDescription || '',
+        provableClaims: Array.isArray(parsedRaw.provableClaims) ? parsedRaw.provableClaims : [],
+        audience: parsedRaw.audience || '',
+        tone: parsedRaw.tone || '',
+        clientMarketingIdeas: parsedRaw.clientMarketingIdeas || '',
+        videosWanted: parsedRaw.videosWanted || '',
+        shootLocationDatesBudgetNotes: parsedRaw.shootLocationDatesBudgetNotes || '',
+      };
 
-      // Import extracted image files from Drive into Product Photos (up to 8 images)
+      // Import extracted images & PDF embedded graphics (up to 16)
       const importedPhotos: Array<{ id: string; url: string; caption: string }> = [];
       const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
 
-      for (const img of extracted.imageFiles.slice(0, 8)) {
+      for (const img of extracted.imageFiles.slice(0, 16)) {
         if (project) {
           const alreadyImported = project.product.photos.some(
             (p) => p.caption === img.fileName
@@ -3211,12 +3419,120 @@ Return a JSON object with:
         }
       }
 
+      // Detect likely brand logo among extracted graphics
+      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
+      let suggestedLogoUrl: string | undefined;
+      let suggestedLogoDataUrl: string | undefined;
+      if (project) {
+        const allPool = [...project.product.photos, ...importedPhotos];
+        const logoCandidate =
+          allPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          allPool.find((p) => /logo|wordmark|brandmark|badge|emblem/i.test(p.caption));
+        if (logoCandidate) {
+          suggestedLogoUrl = logoCandidate.url;
+        }
+      } else {
+        const logoCandidateData =
+          importedPhotoDataUrls.find(
+            (p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)
+          ) ||
+          importedPhotoDataUrls.find((p) =>
+            /logo|wordmark|brandmark|badge|emblem/i.test(p.caption)
+          );
+        if (logoCandidateData) {
+          suggestedLogoDataUrl = logoCandidateData.dataUrl;
+        }
+      }
+
+      // Save or stage the source PDFs (Brand Guides / Decks)
+      const newGuideDocs: BrandGuideDocument[] = [];
+      const stagedGuidePdfs: Array<{ name: string; dataUrl: string; graphicCount?: number }> = [];
+      const nowIso = new Date().toISOString();
+
+      for (const pdf of extracted.pdfBuffers.slice(0, 6)) {
+        const buf = Buffer.from(pdf.data, 'base64');
+        const gCount = extracted.imageFiles.filter((img) =>
+          img.fileName.toLowerCase().startsWith(
+            pdf.fileName.replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 32).toLowerCase()
+          )
+        ).length;
+        if (project) {
+          const existingDoc = (project.brandGuideDocuments || []).some(
+            (d) => d.name === pdf.fileName
+          );
+          if (!existingDoc) {
+            const savedPdf = await saveBufferAsset(project.id, buf, 'guide', 'pdf');
+            newGuideDocs.push({
+              id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              name: pdf.fileName,
+              url: savedPdf.url,
+              mimeType: 'application/pdf',
+              extractedAt: nowIso,
+              graphicCount: gCount,
+            });
+          }
+        } else if (buf.length <= 14 * 1024 * 1024) {
+          stagedGuidePdfs.push({
+            name: pdf.fileName,
+            dataUrl: `data:application/pdf;base64,${pdf.data}`,
+            graphicCount: gCount,
+          });
+        }
+      }
+
       if (project) {
         project.googleDriveFolderUrls = urls;
         if (urls.length > 0) project.googleDriveFolderUrl = urls[0];
         if (importedPhotos.length > 0) {
           project.product.photos = [...project.product.photos, ...importedPhotos];
         }
+        if (newGuideDocs.length > 0) {
+          project.brandGuideDocuments = [
+            ...(project.brandGuideDocuments || []),
+            ...newGuideDocs,
+          ];
+        }
+        project.extractedStyleGuide = extractedStyleGuide;
+
+        // Pre-fill empty Brand Bible fields so extracted PDF info carries directly into Step 2
+        const paletteText = [
+          extractedStyleGuide.palette,
+          extractedStyleGuide.paletteHexes.length > 0
+            ? `Hexes: ${extractedStyleGuide.paletteHexes.join(', ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' — ');
+        if (!project.brandBible.visualStyle.palette && paletteText) {
+          project.brandBible.visualStyle.palette = paletteText;
+        }
+        if (!project.brandBible.visualStyle.typography && extractedStyleGuide.typography) {
+          project.brandBible.visualStyle.typography = extractedStyleGuide.typography;
+        }
+        if (!project.brandBible.visualStyle.lighting && extractedStyleGuide.lighting) {
+          project.brandBible.visualStyle.lighting = extractedStyleGuide.lighting;
+        }
+        if (!project.brandBible.visualStyle.lensAndFraming && extractedStyleGuide.lensAndFraming) {
+          project.brandBible.visualStyle.lensAndFraming = extractedStyleGuide.lensAndFraming;
+        }
+        if (!project.brandBible.visualStyle.grade && extractedStyleGuide.grade) {
+          project.brandBible.visualStyle.grade = extractedStyleGuide.grade;
+        }
+        if (!project.brandBible.productRules && extractedStyleGuide.productVisualRules) {
+          project.brandBible.productRules = extractedStyleGuide.productVisualRules;
+        }
+        if (
+          project.brandBible.bannedList.length === 0 &&
+          extractedStyleGuide.bannedElements.length > 0
+        ) {
+          project.brandBible.bannedList = extractedStyleGuide.bannedElements;
+        }
+        if (!project.brandBible.brandLogoUrl && suggestedLogoUrl) {
+          project.brandBible.brandLogoUrl = suggestedLogoUrl;
+          project.brandBible.brandLogoCaption =
+            extractedStyleGuide.brandLogoNotes || 'Extracted from brand guide';
+        }
+
         project.lockedDriveReferences = fileList.map((f) => ({
           fileId: f.id,
           name: f.name,
@@ -3225,14 +3541,20 @@ Return a JSON object with:
           folderUrl: f.folderUrl,
           selected: true,
         }));
-        project.googleDriveSyncedAt = new Date().toISOString();
-        project.updatedAt = new Date().toISOString();
+        project.googleDriveSyncedAt = nowIso;
+        project.updatedAt = nowIso;
         await saveProject(project);
       }
 
       res.json({
         success: true,
         parsed,
+        styleGuide: extractedStyleGuide,
+        brandGuideDocuments: project?.brandGuideDocuments || newGuideDocs,
+        stagedGuidePdfs,
+        suggestedLogoUrl,
+        suggestedLogoDataUrl,
+        extractedGraphicCount: extracted.imageFiles.length,
         analyzedFiles: extracted.analyzedFiles,
         importedPhotos,
         importedPhotoDataUrls,
@@ -3244,6 +3566,373 @@ Return a JSON object with:
       }
       res.status(500).json({
         error: formatGeminiError(err, 'Could not parse Google Drive files.'),
+      });
+    }
+  });
+
+  // Parse local uploaded PDF style guides / brand books (extracts structured info + embedded graphics)
+  router.post('/pipeline/parse-local-guides', async (req, res) => {
+    try {
+      const { projectId, files } = req.body as {
+        projectId?: string;
+        files?: Array<{ name: string; dataUrl: string }>;
+      };
+
+      const incoming = Array.isArray(files) ? files.slice(0, 6) : [];
+      if (incoming.length === 0) {
+        return res.status(400).json({ error: 'Upload at least one PDF style or brand guide.' });
+      }
+
+      const project =
+        projectId && projectId !== 'new' ? await getProject(projectId) : null;
+      if (projectId && projectId !== 'new' && !project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+
+      const ai = getGeminiClient();
+      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> = [];
+      const extractedGraphics: Array<{
+        id: string;
+        fileName: string;
+        mimeType: string;
+        ext: 'jpg' | 'png';
+        data: string;
+        sourcePdf: string;
+      }> = [];
+      const validPdfs: Array<{ name: string; dataUrl: string; buffer: Buffer; graphicCount: number }> = [];
+      const analyzedFiles: Array<{ name: string; status: string }> = [];
+      const warnings: string[] = [];
+
+      for (const item of incoming) {
+        const rawName = String(item?.name || 'Brand Guide.pdf').trim();
+        const dataUrl = String(item?.dataUrl || '');
+        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (!match) {
+          warnings.push(`Skipped "${rawName}" (invalid PDF encoding).`);
+          continue;
+        }
+        const pdfBuf = Buffer.from(match[2], 'base64');
+        if (pdfBuf.length > 14 * 1024 * 1024) {
+          warnings.push(`Skipped "${rawName}" because it exceeds 14 MB.`);
+          continue;
+        }
+
+        const pdfName = rawName.toLowerCase().endsWith('.pdf') ? rawName : `${rawName}.pdf`;
+        parts.push({ text: `--- Uploaded PDF Guide: ${pdfName} ---` });
+        parts.push({
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: match[2],
+          },
+        });
+
+        let gCount = 0;
+        try {
+          const embedded = extractImagesFromPdfBuffer(pdfBuf, pdfName, 10);
+          gCount = embedded.length;
+          for (const g of embedded) {
+            if (extractedGraphics.length >= 16) break;
+            const b64 = g.buffer.toString('base64');
+            extractedGraphics.push({
+              id: g.id,
+              fileName: g.name,
+              mimeType: g.mimeType,
+              ext: g.ext,
+              data: b64,
+              sourcePdf: pdfName,
+            });
+            parts.push({ text: `--- Embedded Graphic from ${pdfName}: ${g.name} ---` });
+            parts.push({
+              inlineData: {
+                mimeType: g.mimeType,
+                data: b64,
+              },
+            });
+          }
+        } catch {
+          // Non-fatal: Gemini still reads the full PDF inline
+        }
+
+        validPdfs.push({ name: pdfName, dataUrl, buffer: pdfBuf, graphicCount: gCount });
+        analyzedFiles.push({
+          name: pdfName,
+          status:
+            gCount > 0
+              ? `Analyzed PDF (${gCount} extracted graphic${gCount === 1 ? '' : 's'})`
+              : 'Analyzed PDF document',
+        });
+      }
+
+      if (validPdfs.length === 0) {
+        return res.status(400).json({
+          error: warnings[0] || 'None of the uploaded PDFs could be processed.',
+          warnings,
+        });
+      }
+
+      const prompt = `You are an expert Executive Producer & Brand Design Director at 52Launch Production Studio.
+Analyze the attached PDF brand guide(s) / style guide(s) and extracted embedded graphics. Extract BOTH commercial intake fields AND complete visual style-guide details.
+
+STRICT RULES:
+- Extract information ONLY from the attached PDFs and embedded images.
+- NEVER fabricate details not supported by the PDFs. Leave unmentioned intake fields empty string "" or state "Not specified in uploaded PDF".
+- Extract ALL exact #RRGGBB hex codes, typography families/weights, lighting, lens/framing, grade, logo rules, product rules, and banned visual elements.
+- If one of the embedded graphic filenames looks like the brand logo/wordmark/badge, put that exact filename in "styleGuide.logoFileName".
+
+Return JSON with:
+- "client": string
+- "productName": string
+- "productDescription": string
+- "provableClaims": string[]
+- "audience": string
+- "tone": string
+- "clientMarketingIdeas": string
+- "videosWanted": string
+- "shootLocationDatesBudgetNotes": string
+- "styleGuide": {
+    "summary": string,
+    "palette": string,
+    "paletteHexes": string[],
+    "typography": string,
+    "lighting": string,
+    "lensAndFraming": string,
+    "grade": string,
+    "visualStyleNotes": string,
+    "productVisualRules": string,
+    "brandLogoNotes": string,
+    "bannedElements": string[],
+    "logoFileName": string
+  }`;
+
+      parts.push({ text: prompt });
+
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: { parts },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                client: { type: Type.STRING },
+                productName: { type: Type.STRING },
+                productDescription: { type: Type.STRING },
+                provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
+                audience: { type: Type.STRING },
+                tone: { type: Type.STRING },
+                clientMarketingIdeas: { type: Type.STRING },
+                videosWanted: { type: Type.STRING },
+                shootLocationDatesBudgetNotes: { type: Type.STRING },
+                styleGuide: {
+                  type: Type.OBJECT,
+                  properties: {
+                    summary: { type: Type.STRING },
+                    palette: { type: Type.STRING },
+                    paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    typography: { type: Type.STRING },
+                    lighting: { type: Type.STRING },
+                    lensAndFraming: { type: Type.STRING },
+                    grade: { type: Type.STRING },
+                    visualStyleNotes: { type: Type.STRING },
+                    productVisualRules: { type: Type.STRING },
+                    brandLogoNotes: { type: Type.STRING },
+                    bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    logoFileName: { type: Type.STRING },
+                  },
+                },
+              },
+              required: [
+                'client',
+                'productName',
+                'productDescription',
+                'provableClaims',
+                'audience',
+                'tone',
+                'clientMarketingIdeas',
+                'videosWanted',
+                'shootLocationDatesBudgetNotes',
+              ],
+            },
+          },
+        })
+      );
+
+      const parsedRaw = JSON.parse((response.text ?? '{}').trim());
+      const rawGuide = parsedRaw.styleGuide || {};
+      const extractedStyleGuide: ExtractedStyleGuide = {
+        summary: String(rawGuide.summary || '').trim(),
+        palette: String(rawGuide.palette || '').trim(),
+        paletteHexes: Array.isArray(rawGuide.paletteHexes)
+          ? rawGuide.paletteHexes
+              .map((h: string) => String(h).trim())
+              .filter((h: string) => /^#?[0-9a-fA-F]{3,8}$/.test(h))
+              .map((h: string) => (h.startsWith('#') ? h.toUpperCase() : `#${h.toUpperCase()}`))
+          : [],
+        typography: String(rawGuide.typography || '').trim(),
+        lighting: String(rawGuide.lighting || '').trim(),
+        lensAndFraming: String(rawGuide.lensAndFraming || '').trim(),
+        grade: String(rawGuide.grade || '').trim(),
+        visualStyleNotes: String(rawGuide.visualStyleNotes || '').trim(),
+        productVisualRules: String(rawGuide.productVisualRules || '').trim(),
+        brandLogoNotes: String(rawGuide.brandLogoNotes || '').trim(),
+        bannedElements: Array.isArray(rawGuide.bannedElements)
+          ? rawGuide.bannedElements.map((b: string) => String(b).trim()).filter(Boolean)
+          : [],
+        sourceFileNames: validPdfs.map((p) => p.name),
+      };
+
+      const parsed = {
+        client: parsedRaw.client || '',
+        productName: parsedRaw.productName || '',
+        productDescription: parsedRaw.productDescription || '',
+        provableClaims: Array.isArray(parsedRaw.provableClaims) ? parsedRaw.provableClaims : [],
+        audience: parsedRaw.audience || '',
+        tone: parsedRaw.tone || '',
+        clientMarketingIdeas: parsedRaw.clientMarketingIdeas || '',
+        videosWanted: parsedRaw.videosWanted || '',
+        shootLocationDatesBudgetNotes: parsedRaw.shootLocationDatesBudgetNotes || '',
+      };
+
+      const importedPhotos: Array<{ id: string; url: string; caption: string }> = [];
+      const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+      const newGuideDocs: BrandGuideDocument[] = [];
+      const stagedGuidePdfs: Array<{ name: string; dataUrl: string; graphicCount?: number }> = [];
+      const nowIso = new Date().toISOString();
+
+      for (const g of extractedGraphics) {
+        if (project) {
+          const already = project.product.photos.some((p) => p.caption === g.fileName);
+          if (!already) {
+            const savedImg = await saveBufferAsset(
+              project.id,
+              Buffer.from(g.data, 'base64'),
+              'product',
+              g.ext
+            );
+            importedPhotos.push({
+              id: `photo-pdf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              url: savedImg.url,
+              caption: g.fileName,
+            });
+          }
+        } else {
+          importedPhotoDataUrls.push({
+            dataUrl: `data:${g.mimeType};base64,${g.data}`,
+            caption: g.fileName,
+          });
+        }
+      }
+
+      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
+      let suggestedLogoUrl: string | undefined;
+      let suggestedLogoDataUrl: string | undefined;
+
+      if (project) {
+        const allPool = [...project.product.photos, ...importedPhotos];
+        const logoHit =
+          allPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          allPool.find((p) => /logo|wordmark|brandmark|badge|emblem/i.test(p.caption));
+        if (logoHit) suggestedLogoUrl = logoHit.url;
+
+        for (const p of validPdfs) {
+          const savedPdf = await saveBufferAsset(project.id, p.buffer, 'guide', 'pdf');
+          newGuideDocs.push({
+            id: `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: p.name,
+            url: savedPdf.url,
+            mimeType: 'application/pdf',
+            extractedAt: nowIso,
+            graphicCount: p.graphicCount,
+          });
+        }
+
+        if (importedPhotos.length > 0) {
+          project.product.photos = [...project.product.photos, ...importedPhotos];
+        }
+        if (newGuideDocs.length > 0) {
+          project.brandGuideDocuments = [
+            ...(project.brandGuideDocuments || []),
+            ...newGuideDocs,
+          ];
+        }
+        project.extractedStyleGuide = extractedStyleGuide;
+
+        const paletteText = [
+          extractedStyleGuide.palette,
+          extractedStyleGuide.paletteHexes.length > 0
+            ? `Hexes: ${extractedStyleGuide.paletteHexes.join(', ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' — ');
+        if (!project.brandBible.visualStyle.palette && paletteText) {
+          project.brandBible.visualStyle.palette = paletteText;
+        }
+        if (!project.brandBible.visualStyle.typography && extractedStyleGuide.typography) {
+          project.brandBible.visualStyle.typography = extractedStyleGuide.typography;
+        }
+        if (!project.brandBible.visualStyle.lighting && extractedStyleGuide.lighting) {
+          project.brandBible.visualStyle.lighting = extractedStyleGuide.lighting;
+        }
+        if (!project.brandBible.visualStyle.lensAndFraming && extractedStyleGuide.lensAndFraming) {
+          project.brandBible.visualStyle.lensAndFraming = extractedStyleGuide.lensAndFraming;
+        }
+        if (!project.brandBible.visualStyle.grade && extractedStyleGuide.grade) {
+          project.brandBible.visualStyle.grade = extractedStyleGuide.grade;
+        }
+        if (!project.brandBible.productRules && extractedStyleGuide.productVisualRules) {
+          project.brandBible.productRules = extractedStyleGuide.productVisualRules;
+        }
+        if (
+          project.brandBible.bannedList.length === 0 &&
+          extractedStyleGuide.bannedElements.length > 0
+        ) {
+          project.brandBible.bannedList = extractedStyleGuide.bannedElements;
+        }
+        if (!project.brandBible.brandLogoUrl && suggestedLogoUrl) {
+          project.brandBible.brandLogoUrl = suggestedLogoUrl;
+          project.brandBible.brandLogoCaption =
+            extractedStyleGuide.brandLogoNotes || 'Extracted from brand guide PDF';
+        }
+        project.updatedAt = nowIso;
+        await saveProject(project);
+      } else {
+        const logoHitData =
+          importedPhotoDataUrls.find(
+            (p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)
+          ) ||
+          importedPhotoDataUrls.find((p) =>
+            /logo|wordmark|brandmark|badge|emblem/i.test(p.caption)
+          );
+        if (logoHitData) suggestedLogoDataUrl = logoHitData.dataUrl;
+
+        for (const p of validPdfs) {
+          stagedGuidePdfs.push({
+            name: p.name,
+            dataUrl: p.dataUrl,
+            graphicCount: p.graphicCount,
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        parsed,
+        styleGuide: extractedStyleGuide,
+        brandGuideDocuments: project?.brandGuideDocuments || newGuideDocs,
+        stagedGuidePdfs,
+        suggestedLogoUrl,
+        suggestedLogoDataUrl,
+        extractedGraphicCount: extractedGraphics.length,
+        analyzedFiles,
+        importedPhotos,
+        importedPhotoDataUrls,
+        warnings,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: formatGeminiError(err, 'Could not parse uploaded PDF style guide.'),
       });
     }
   });

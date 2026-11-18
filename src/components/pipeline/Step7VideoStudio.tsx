@@ -32,6 +32,10 @@ function formatShotModelLabel(model: PipelineShot['model']): string {
   switch (model) {
     case 'flux3':
       return 'FLUX 3';
+    case 'veo':
+      return 'Google Veo 3.1';
+    case 'omni':
+      return 'Gemini Omni Flash';
     case 'kling':
       return 'Kling 4.0';
     case 'wan':
@@ -232,7 +236,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
             Motion Prompts &amp; Video Studio
           </h1>
           <p className="text-sm text-[#5A5A66] mt-1">
-            Generate with FLUX 3, Seedance, Kling 4.0, Wan 3.0 Prime, or Luma Ray 3.2,
+            Generate with FLUX 3, Seedance, Google Veo 3.1, Google Gemini Omni Flash, Kling 4.0, Wan 3.0 Prime, or Luma Ray 3.2,
             then upscale any clip to H.264 Premiere-ready quality via Topaz Video.
           </p>
         </div>

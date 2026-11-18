@@ -7,11 +7,13 @@ import {
   User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
 
 export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
@@ -543,10 +545,30 @@ export interface ParsedDriveIntakeResult {
     videosWanted: string;
     shootLocationDatesBudgetNotes: string;
   };
+  styleGuide?: ExtractedStyleGuide;
+  brandGuideDocuments?: BrandGuideDocument[];
+  stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
+  suggestedLogoUrl?: string;
+  suggestedLogoDataUrl?: string;
+  extractedGraphicCount?: number;
   analyzedFiles: Array<{ name: string; status: string }>;
   importedPhotos?: Array<{ id: string; url: string; caption: string }>;
   importedPhotoDataUrls?: Array<{ dataUrl: string; caption: string }>;
   warnings?: string[];
+}
+
+export async function parseLocalStyleGuidePdfs(
+  projectId: string,
+  files: Array<{ name: string; dataUrl: string }>
+): Promise<ParsedDriveIntakeResult> {
+  const resp = await fetch('/api/pipeline/parse-local-guides', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, files }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || 'Could not parse PDF style guide.');
+  return data;
 }
 
 export async function parseGoogleDriveFolder(

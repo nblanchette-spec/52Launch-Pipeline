@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import { PipelineProject } from '../src/types/pipeline';
 import { readAssetAsInlineData } from './projectStore';
+import { extractImagesFromPdfBuffer } from './pdfAssetExtractor';
 
 export interface DriveFileDescriptor {
   id: string;
@@ -24,6 +25,11 @@ export interface ExtractedDriveContent {
     fileId: string;
     fileName: string;
     mimeType: string;
+    data: string; // base64
+  }>;
+  pdfBuffers: Array<{
+    fileId: string;
+    fileName: string;
     data: string; // base64
   }>;
   analyzedFiles: Array<{ name: string; status: string }>;
@@ -211,8 +217,45 @@ export async function downloadAndExtractDriveFiles(
     textSummaries: [],
     inlineParts: [],
     imageFiles: [],
+    pdfBuffers: [],
     analyzedFiles: [],
     warnings: [],
+  };
+
+  const attachPdfGraphicsAndBuffer = (
+    pdfBuf: Buffer,
+    pdfFileId: string,
+    pdfFileName: string,
+    label: string
+  ): number => {
+    const normalizedName = pdfFileName.toLowerCase().endsWith('.pdf')
+      ? pdfFileName
+      : `${pdfFileName}.pdf`;
+    result.pdfBuffers.push({
+      fileId: pdfFileId,
+      fileName: normalizedName,
+      data: pdfBuf.toString('base64'),
+    });
+    try {
+      const embedded = extractImagesFromPdfBuffer(pdfBuf, normalizedName, 10);
+      for (const g of embedded) {
+        const b64 = g.buffer.toString('base64');
+        result.imageFiles.push({
+          fileId: g.id,
+          fileName: g.name,
+          mimeType: g.mimeType,
+          data: b64,
+        });
+        result.inlineParts.push({
+          fileName: `${label} > ${g.name}`,
+          mimeType: g.mimeType,
+          data: b64,
+        });
+      }
+      return embedded.length;
+    } catch {
+      return 0;
+    }
   };
 
   const MAX_TEXT_CHARS = 45000;
@@ -275,8 +318,14 @@ export async function downloadAndExtractDriveFiles(
               mimeType: 'application/pdf',
               data: pdfBuf.toString('base64'),
             });
+            const graphicCount = attachPdfGraphicsAndBuffer(pdfBuf, fileId, file.name, fileLabel);
             result.textSummaries.push(`=== ATTACHED GOOGLE DOC (AS PDF): ${fileLabel} ===`);
-            result.analyzedFiles.push({ name: file.name, status: 'Analyzed Google Doc PDF' });
+            result.analyzedFiles.push({
+              name: file.name,
+              status: graphicCount > 0
+                ? `Analyzed Google Doc PDF (${graphicCount} extracted graphic${graphicCount === 1 ? '' : 's'})`
+                : 'Analyzed Google Doc PDF',
+            });
             continue;
           }
         }
@@ -298,8 +347,14 @@ export async function downloadAndExtractDriveFiles(
                 mimeType: 'application/pdf',
                 data: pdfBuf.toString('base64'),
               });
+              const graphicCount = attachPdfGraphicsAndBuffer(pdfBuf, fileId, file.name, fileLabel);
               result.textSummaries.push(`=== ATTACHED GOOGLE DOC (VISUAL PDF): ${fileLabel} ===`);
-              result.analyzedFiles.push({ name: file.name, status: 'Analyzed visual Google Doc' });
+              result.analyzedFiles.push({
+                name: file.name,
+                status: graphicCount > 0
+                  ? `Analyzed visual Google Doc (${graphicCount} extracted graphic${graphicCount === 1 ? '' : 's'})`
+                  : 'Analyzed visual Google Doc',
+              });
               continue;
             }
           }
@@ -356,10 +411,16 @@ export async function downloadAndExtractDriveFiles(
               mimeType: 'application/pdf',
               data: pdfBuf.toString('base64'),
             });
+            const graphicCount = attachPdfGraphicsAndBuffer(pdfBuf, fileId, file.name, fileLabel);
             if (!text) {
               result.textSummaries.push(`=== ATTACHED GOOGLE SLIDES (PDF): ${fileLabel} ===`);
             }
-            result.analyzedFiles.push({ name: file.name, status: 'Analyzed Google Slides (text + visual)' });
+            result.analyzedFiles.push({
+              name: file.name,
+              status: graphicCount > 0
+                ? `Analyzed Google Slides (text + ${graphicCount} extracted graphic${graphicCount === 1 ? '' : 's'})`
+                : 'Analyzed Google Slides (text + visual)',
+            });
             continue;
           }
         }
@@ -435,15 +496,23 @@ export async function downloadAndExtractDriveFiles(
         continue;
       }
 
-      // PDF -> pass directly to Gemini as inlineData
+      // PDF -> pass directly to Gemini as inlineData + extract embedded graphics
       if (mime === 'application/pdf' || lowerName.endsWith('.pdf')) {
         result.inlineParts.push({
           fileName: fileLabel,
           mimeType: 'application/pdf',
           data: buffer.toString('base64'),
         });
-        result.textSummaries.push(`=== ATTACHED PDF DOCUMENT: ${fileLabel} ===`);
-        result.analyzedFiles.push({ name: file.name, status: 'Analyzed PDF document' });
+        const graphicCount = attachPdfGraphicsAndBuffer(buffer, fileId, file.name, fileLabel);
+        result.textSummaries.push(
+          `=== ATTACHED PDF DOCUMENT: ${fileLabel}${graphicCount > 0 ? ` (${graphicCount} embedded graphic${graphicCount === 1 ? '' : 's'} extracted)` : ''} ===`
+        );
+        result.analyzedFiles.push({
+          name: file.name,
+          status: graphicCount > 0
+            ? `Analyzed PDF (${graphicCount} extracted graphic${graphicCount === 1 ? '' : 's'})`
+            : 'Analyzed PDF document',
+        });
         continue;
       }
 

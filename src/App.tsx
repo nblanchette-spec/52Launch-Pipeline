@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
+  ExtractedStyleGuide,
   PipelineProject,
   PipelineStepNumber,
   ProjectSummary,
@@ -194,6 +195,9 @@ export default function App() {
       shootLocationDatesBudgetNotes: string;
     };
     initialPhotoDataUrls: Array<{ dataUrl: string; caption: string }>;
+    extractedStyleGuide?: ExtractedStyleGuide | null;
+    stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
+    initialLogoDataUrl?: string | null;
     googleDriveFolderUrls?: string[];
     googleDriveDestinationFolderId?: string;
     googleDriveDestinationFolderUrl?: string;

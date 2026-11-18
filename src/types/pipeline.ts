@@ -7,6 +7,8 @@ export type VideoModelOption =
   | 'kling'
   | 'wan'
   | 'luma'
+  | 'veo'
+  | 'omni'
   | 'none';
 export type ShotStatus =
   | 'Draft'
@@ -290,6 +292,30 @@ export interface GenerationLogEntry {
   notes?: string;
 }
 
+export interface BrandGuideDocument {
+  id: string;
+  name: string;
+  url: string;
+  mimeType: string;
+  extractedAt: string;
+  graphicCount?: number;
+}
+
+export interface ExtractedStyleGuide {
+  summary: string;
+  palette: string;
+  paletteHexes: string[];
+  typography: string;
+  lighting: string;
+  lensAndFraming: string;
+  grade: string;
+  visualStyleNotes: string;
+  productVisualRules: string;
+  brandLogoNotes: string;
+  bannedElements: string[];
+  sourceFileNames: string[];
+}
+
 export interface PipelineProject {
   id: string;
   createdAt: string;
@@ -297,6 +323,8 @@ export interface PipelineProject {
   client: string;
   product: ProductInfo;
   intake: IntakeInfo;
+  brandGuideDocuments?: BrandGuideDocument[];
+  extractedStyleGuide?: ExtractedStyleGuide | null;
   brandBible: BrandBible;
   creativeBrief: CreativeBriefPipeline;
   shots: PipelineShot[];

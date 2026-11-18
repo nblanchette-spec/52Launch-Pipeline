@@ -4,9 +4,19 @@ export type StudioModelId =
   | 'flux-3'
   | 'kling-4.0'
   | 'wan-3.0-prime'
-  | 'luma-ray-3.2';
+  | 'luma-ray-3.2'
+  | 'veo-3.1'
+  | 'veo-3.1-fast'
+  | 'gemini-omni-flash';
 
-export type StudioModelFamily = 'seedance' | 'flux-3' | 'kling' | 'wan' | 'luma';
+export type StudioModelFamily =
+  | 'seedance'
+  | 'flux-3'
+  | 'kling'
+  | 'wan'
+  | 'luma'
+  | 'veo'
+  | 'gemini-omni';
 
 export type StudioWorkflowMode =
   | 'text_to_video'
@@ -355,6 +365,127 @@ export const STUDIO_MODELS: Record<StudioModelId, StudioModelSpec> = {
       reframe: 'luma/agent/ray/v3.2/reframe',
     },
   },
+  'veo-3.1': {
+    id: 'veo-3.1',
+    family: 'veo',
+    label: 'Google Veo 3.1',
+    tagline: 'Google DeepMind · 720p–4K, native audio, T2V, I2V, Refs & Extend',
+    resolutions: ['720p', '1080p', '2160p'],
+    resolutionsByMode: {
+      text_to_video: ['720p', '1080p', '2160p'],
+      image_to_video: ['720p', '1080p', '2160p'],
+      first_last_frame: ['720p', '1080p', '2160p'],
+      reference_to_video: ['720p', '1080p', '2160p'],
+      video_extend: ['720p'],
+    },
+    resolutionSelectable: true,
+    aspectRatios: ['auto', '16:9', '9:16'],
+    aspectRatiosByMode: {
+      text_to_video: ['16:9', '9:16'],
+      reference_to_video: ['16:9', '9:16'],
+    },
+    minDuration: 4,
+    maxDuration: 8,
+    durations: [4, 6, 8],
+    durationFormat: 'string_s',
+    workflowModes: [
+      'text_to_video',
+      'image_to_video',
+      'first_last_frame',
+      'reference_to_video',
+      'video_extend',
+    ],
+    supportsTaskMode: false,
+    supportsSeed: true,
+    supportsSafetyTolerance: false,
+    supportsDraftEnhance: false,
+    supportsOptionalEndFrameInI2V: true,
+    maxReferenceImages: 3,
+    maxReferenceVideos: 0,
+    maxTimelineFrames: 0,
+    draftResolution: '720p',
+    finalResolution: '1080p',
+    endpoints: {
+      textToVideo: 'fal-ai/veo3.1',
+      imageToVideo: 'fal-ai/veo3.1/image-to-video',
+      firstLastToVideo: 'fal-ai/veo3.1/first-last-frame-to-video',
+      referenceToVideo: 'fal-ai/veo3.1/reference-to-video',
+      extendVideo: 'fal-ai/veo3.1/extend-video',
+    },
+  },
+  'veo-3.1-fast': {
+    id: 'veo-3.1-fast',
+    family: 'veo',
+    label: 'Google Veo 3.1 Fast',
+    tagline: 'Google DeepMind · Rapid & lower-cost 720p–4K, Audio, I2V & Extend',
+    resolutions: ['720p', '1080p', '2160p'],
+    resolutionsByMode: {
+      text_to_video: ['720p', '1080p', '2160p'],
+      image_to_video: ['720p', '1080p', '2160p'],
+      first_last_frame: ['720p', '1080p', '2160p'],
+      video_extend: ['720p'],
+    },
+    resolutionSelectable: true,
+    aspectRatios: ['auto', '16:9', '9:16'],
+    aspectRatiosByMode: {
+      text_to_video: ['16:9', '9:16'],
+    },
+    minDuration: 4,
+    maxDuration: 8,
+    durations: [4, 6, 8],
+    durationFormat: 'string_s',
+    workflowModes: [
+      'text_to_video',
+      'image_to_video',
+      'first_last_frame',
+      'video_extend',
+    ],
+    supportsTaskMode: false,
+    supportsSeed: true,
+    supportsSafetyTolerance: false,
+    supportsDraftEnhance: false,
+    supportsOptionalEndFrameInI2V: true,
+    maxReferenceImages: 0,
+    maxReferenceVideos: 0,
+    maxTimelineFrames: 0,
+    draftResolution: '720p',
+    finalResolution: '1080p',
+    endpoints: {
+      textToVideo: 'fal-ai/veo3.1/fast',
+      imageToVideo: 'fal-ai/veo3.1/fast/image-to-video',
+      firstLastToVideo: 'fal-ai/veo3.1/fast/first-last-frame-to-video',
+      extendVideo: 'fal-ai/veo3.1/fast/extend-video',
+    },
+  },
+  'gemini-omni-flash': {
+    id: 'gemini-omni-flash',
+    family: 'gemini-omni',
+    label: 'Google Gemini Omni Flash',
+    tagline: 'Google DeepMind · Text-to-Video, Reference-to-Video & V2V Edit + Audio',
+    resolutions: ['720p', '1080p'],
+    resolutionSelectable: true,
+    aspectRatios: ['auto', '16:9', '9:16', '1:1'],
+    minDuration: 4,
+    maxDuration: 8,
+    durations: [4, 6, 8],
+    durationFormat: 'string_s',
+    workflowModes: ['text_to_video', 'reference_to_video', 'video_edit'],
+    supportsTaskMode: false,
+    supportsSeed: true,
+    supportsSafetyTolerance: false,
+    supportsDraftEnhance: false,
+    maxReferenceImages: 3,
+    maxReferenceVideos: 1,
+    maxTimelineFrames: 0,
+    draftResolution: '720p',
+    finalResolution: '1080p',
+    endpoints: {
+      textToVideo: 'google/gemini-omni-flash',
+      imageToVideo: 'google/gemini-omni-flash/reference-to-video',
+      referenceToVideo: 'google/gemini-omni-flash/reference-to-video',
+      videoEdit: 'google/gemini-omni-flash/edit',
+    },
+  },
 };
 
 export interface StudioFamilyInfo {
@@ -400,6 +531,20 @@ export const STUDIO_MODEL_FAMILIES: Record<StudioModelFamily, StudioFamilyInfo> 
     tagline: '540p–1080p, Video-to-Video Restyle & Reframe outpaint',
     modelIds: ['luma-ray-3.2'],
     defaultModelId: 'luma-ray-3.2',
+  },
+  veo: {
+    id: 'veo',
+    label: 'Google Veo 3.1',
+    tagline: 'Google DeepMind · 720p–4K cinema renders with synchronized audio',
+    modelIds: ['veo-3.1', 'veo-3.1-fast'],
+    defaultModelId: 'veo-3.1',
+  },
+  'gemini-omni': {
+    id: 'gemini-omni',
+    label: 'Google Gemini Omni Flash',
+    tagline: 'Google DeepMind · Multimodal T2V, Reference & V2V Edit via Fal.ai',
+    modelIds: ['gemini-omni-flash'],
+    defaultModelId: 'gemini-omni-flash',
   },
 };
 
@@ -503,6 +648,21 @@ export function estimateStudioCostUsd(params: {
 
   if (params.modelId === 'luma-ray-3.2') {
     const rate = res === '1080p' ? 0.14 : res === '720p' ? 0.09 : 0.05;
+    return Math.round(rate * dur * 100) / 100;
+  }
+
+  if (params.modelId === 'veo-3.1') {
+    const rate = params.nativeAudio === false ? 0.2 : 0.4;
+    return Math.round(rate * dur * 100) / 100;
+  }
+
+  if (params.modelId === 'veo-3.1-fast') {
+    const rate = params.nativeAudio === false ? 0.1 : 0.15;
+    return Math.round(rate * dur * 100) / 100;
+  }
+
+  if (params.modelId === 'gemini-omni-flash') {
+    const rate = params.nativeAudio === false ? 0.1 : 0.18;
     return Math.round(rate * dur * 100) / 100;
   }
 

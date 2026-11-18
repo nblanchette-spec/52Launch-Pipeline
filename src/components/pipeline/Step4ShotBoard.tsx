@@ -13,6 +13,7 @@ import {
   Printer,
   Package,
   FolderSync,
+  ClipboardPaste,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -45,6 +46,9 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [uploadingShotId, setUploadingShotId] = useState<string | null>(null);
   const [drivePickerShotId, setDrivePickerShotId] = useState<string | null>(null);
+  const [pasteNoticeShotId, setPasteNoticeShotId] = useState<string | null>(null);
+  const frameInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
+  const frameBoxRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
   const totalDuration = project.shots.reduce(
     (sum, s) => sum + (Number(s.durationSec) || 0),
@@ -169,6 +173,46 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
     } catch {
       // Clipboard fallback ignored
     }
+  };
+
+  const extractClipboardImageFile = (clipboardData: DataTransfer | null): File | null => {
+    if (!clipboardData) return null;
+    const items = Array.from(clipboardData.items || []);
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+    const files = Array.from(clipboardData.files || []);
+    return files.find((f) => f.type.startsWith('image/')) || null;
+  };
+
+  const handlePasteFromClipboardButton = async (shotId: string) => {
+    setErrorMsg(null);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const ext = imgType.includes('jpeg') ? 'jpg' : imgType.includes('webp') ? 'webp' : 'png';
+            const file = new File([blob], `google-flow-${shotId}.${ext}`, { type: imgType });
+            await handleUploadFrame(shotId, file);
+            return;
+          }
+        }
+        setPasteNoticeShotId(shotId);
+        frameBoxRefs.current[shotId]?.focus();
+        setErrorMsg('No image found on clipboard. Copy an image from Google Flow first, or press Ctrl+V / Cmd+V in the box.');
+        return;
+      }
+    } catch {
+      // Clipboard.read may be blocked inside iframe — guide user to press Ctrl+V / Cmd+V directly on focused box
+    }
+    setPasteNoticeShotId(shotId);
+    frameBoxRefs.current[shotId]?.focus();
   };
 
   const triggerGenerate = async (force = false) => {
@@ -422,7 +466,57 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                 <div className="p-5 grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6">
                   {/* Left Column: Click-to-upload Frame Image + Route / Model */}
                   <div className="space-y-3">
-                    <label className="block aspect-video bg-[#F6F6F7] border border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer transition-colors">
+                    <input
+                      ref={(el) => {
+                        frameInputRefs.current[shot.id] = el;
+                      }}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void handleUploadFrame(shot.id, file);
+                        e.target.value = '';
+                      }}
+                    />
+                    <div
+                      ref={(el) => {
+                        frameBoxRefs.current[shot.id] = el;
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Upload or paste frame for ${shot.id}`}
+                      onClick={() => frameInputRefs.current[shot.id]?.click()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          frameInputRefs.current[shot.id]?.click();
+                        }
+                      }}
+                      onPaste={(e) => {
+                        const imgFile = extractClipboardImageFile(e.clipboardData);
+                        if (imgFile) {
+                          e.preventDefault();
+                          setPasteNoticeShotId(null);
+                          void handleUploadFrame(shot.id, imgFile);
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const dropped = Array.from(e.dataTransfer.files || []).find((f) =>
+                          f.type.startsWith('image/')
+                        );
+                        if (dropped) void handleUploadFrame(shot.id, dropped);
+                      }}
+                      className={`aspect-video bg-[#F6F6F7] border border-dashed rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer transition-colors focus:outline-none ${
+                        pasteNoticeShotId === shot.id
+                          ? 'border-[#C6202F] ring-2 ring-[#C6202F]/35'
+                          : 'border-[#E2E2E6] hover:border-[#C6202F]/70 focus:border-[#C6202F]'
+                      }`}
+                    >
                       {shot.frameImageUrl ? (
                         <>
                           <img
@@ -431,8 +525,8 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             referrerPolicy="no-referrer"
                             className="w-full h-full object-cover"
                           />
-                          <div className="absolute inset-0 bg-black/55 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-medium text-white">
-                            Click to replace frame
+                          <div className="absolute inset-0 bg-black/55 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-medium text-white px-3 text-center">
+                            Click to replace or paste (Ctrl+V / Cmd+V)
                           </div>
                         </>
                       ) : (
@@ -447,33 +541,41 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                               ? 'Uploading frame...'
                               : shot.route === 'live'
                                 ? 'Upload crew reference frame'
-                                : 'Upload Google Flow frame'}
+                                : 'Upload or paste Google Flow frame'}
                           </div>
                           <div className="text-[11px] text-[#6E6E7A]">
-                            Click to choose image
+                            Click to browse, drop file, or press Ctrl+V / Cmd+V
                           </div>
                         </div>
                       )}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) void handleUploadFrame(shot.id, file);
-                          e.target.value = '';
-                        }}
-                      />
-                    </label>
+                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() => setDrivePickerShotId(shot.id)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
-                    >
-                      <FolderSync className="w-3.5 h-3.5" />
-                      Pick frame from Google Drive
-                    </button>
+                    {pasteNoticeShotId === shot.id && (
+                      <div className="text-[11px] text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] rounded px-2.5 py-1">
+                        Frame box focused — press Ctrl+V (or Cmd+V) to paste your copied Google Flow image.
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={isUploading}
+                        onClick={() => void handlePasteFromClipboardButton(shot.id)}
+                        className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors"
+                        title="Paste Google Flow image from clipboard"
+                      >
+                        <ClipboardPaste className="w-3.5 h-3.5 text-[#C6202F]" />
+                        Paste image
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDrivePickerShotId(shot.id)}
+                        className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                      >
+                        <FolderSync className="w-3.5 h-3.5" />
+                        Google Drive
+                      </button>
+                    </div>
 
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
@@ -509,6 +611,8 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           >
                             <option value="flux3">Flux 3</option>
                             <option value="seedance">Seedance</option>
+                            <option value="veo">Google Veo 3.1</option>
+                            <option value="omni">Google Gemini Omni Flash</option>
                             <option value="kling">Kling 4.0</option>
                             <option value="wan">Wan 3.0 Prime</option>
                             <option value="luma">Luma Ray 3.2</option>

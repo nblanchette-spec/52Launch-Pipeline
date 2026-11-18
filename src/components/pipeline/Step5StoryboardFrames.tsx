@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   AlertCircle,
   FolderSync,
+  ClipboardPaste,
 } from 'lucide-react';
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
@@ -32,6 +33,9 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
   const [drivePickerShotId, setDrivePickerShotId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pasteHintShotId, setPasteHintShotId] = useState<string | null>(null);
+  const frameInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
+  const frameBoxRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
   const aiHybridShots = project.shots.filter((s) => s.route !== 'live');
   const uploadedAiHybridCount = aiHybridShots.filter((s) =>
@@ -93,6 +97,46 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
     } catch {
       // Ignore clipboard failure
     }
+  };
+
+  const extractClipboardImageFile = (clipboardData: DataTransfer | null): File | null => {
+    if (!clipboardData) return null;
+    const items = Array.from(clipboardData.items || []);
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+    const files = Array.from(clipboardData.files || []);
+    return files.find((f) => f.type.startsWith('image/')) || null;
+  };
+
+  const handlePasteFromClipboardButton = async (shotId: string) => {
+    setErrorMsg(null);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const ext = imgType.includes('jpeg') ? 'jpg' : imgType.includes('webp') ? 'webp' : 'png';
+            const file = new File([blob], `google-flow-${shotId}.${ext}`, { type: imgType });
+            await handleUploadFrame(shotId, file);
+            return;
+          }
+        }
+        setPasteHintShotId(shotId);
+        frameBoxRefs.current[shotId]?.focus();
+        setErrorMsg('No image found on clipboard. Copy an image from Google Flow first, or press Ctrl+V / Cmd+V in the box.');
+        return;
+      }
+    } catch {
+      // Fallback: focus the paste target box
+    }
+    setPasteHintShotId(shotId);
+    frameBoxRefs.current[shotId]?.focus();
   };
 
   return (
@@ -213,8 +257,58 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                 </div>
               </div>
 
-              {/* Click-to-upload Frame Area */}
-              <label className="block aspect-video bg-[#F6F6F7] border-b border-[#E2E2E6] relative flex items-center justify-center cursor-pointer hover:bg-[#0E1217] transition-colors overflow-hidden">
+              {/* Click / Paste / Drop Frame Area */}
+              <input
+                ref={(el) => {
+                  frameInputRefs.current[shot.id] = el;
+                }}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleUploadFrame(shot.id, f);
+                  e.target.value = '';
+                }}
+              />
+              <div
+                ref={(el) => {
+                  frameBoxRefs.current[shot.id] = el;
+                }}
+                tabIndex={0}
+                role="button"
+                aria-label={`Upload or paste frame for ${shot.id}`}
+                onClick={() => frameInputRefs.current[shot.id]?.click()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    frameInputRefs.current[shot.id]?.click();
+                  }
+                }}
+                onPaste={(e) => {
+                  const imgFile = extractClipboardImageFile(e.clipboardData);
+                  if (imgFile) {
+                    e.preventDefault();
+                    setPasteHintShotId(null);
+                    void handleUploadFrame(shot.id, imgFile);
+                  }
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const dropped = Array.from(e.dataTransfer.files || []).find((f) =>
+                    f.type.startsWith('image/')
+                  );
+                  if (dropped) void handleUploadFrame(shot.id, dropped);
+                }}
+                className={`aspect-video bg-[#F6F6F7] border-b relative flex items-center justify-center cursor-pointer transition-colors overflow-hidden focus:outline-none ${
+                  pasteHintShotId === shot.id
+                    ? 'border-[#C6202F] ring-2 ring-inset ring-[#C6202F]/40'
+                    : 'border-[#E2E2E6] hover:bg-[#EAEAEF]'
+                }`}
+              >
                 {shot.frameImageUrl ? (
                   <>
                     <img
@@ -224,7 +318,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                       className="w-full h-full object-cover"
                     />
                     <div className="absolute inset-0 bg-black/55 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-semibold text-white">
-                      Click to replace frame image
+                      Click to replace or paste (Ctrl+V / Cmd+V)
                     </div>
                   </>
                 ) : (
@@ -238,36 +332,43 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                       {isUploading
                         ? 'Saving frame...'
                         : shot.route === 'live'
-                          ? 'Click to upload crew reference frame (optional)'
-                          : 'Click to upload frame from Google Flow'}
+                          ? 'Click or paste crew reference frame (optional)'
+                          : 'Click, drop, or paste frame from Google Flow'}
                     </div>
                     <div className="text-[11px] text-[#6E6E7A]">
-                      No file naming needed — click anywhere in this box
+                      Click anywhere to browse, drag an image, or press Ctrl+V / Cmd+V
                     </div>
                   </div>
                 )}
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) void handleUploadFrame(shot.id, f);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
+              </div>
 
-              <div className="px-4 py-2 bg-[#FBFBFC] border-b border-[#E2E2E6] flex items-center justify-between text-[11px]">
+              {pasteHintShotId === shot.id && (
+                <div className="px-4 py-1.5 bg-[#FDF4F5] border-b border-[#EABAC0] text-[11px] text-[#891A23]">
+                  Frame box focused — press Ctrl+V (or Cmd+V) to paste your Google Flow image.
+                </div>
+              )}
+
+              <div className="px-4 py-2 bg-[#FBFBFC] border-b border-[#E2E2E6] flex flex-wrap items-center justify-between gap-2 text-[11px]">
                 <span className="text-[#6E6E7A]">Frame source</span>
-                <button
-                  type="button"
-                  onClick={() => setDrivePickerShotId(shot.id)}
-                  className="inline-flex items-center gap-1.5 text-[#891A23] hover:text-[#891A23] font-medium cursor-pointer"
-                >
-                  <FolderSync className="w-3.5 h-3.5" />
-                  Pick frame from Google Drive
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={isUploading}
+                    onClick={() => void handlePasteFromClipboardButton(shot.id)}
+                    className="inline-flex items-center gap-1 text-[#24242B] hover:text-[#C6202F] font-medium cursor-pointer"
+                  >
+                    <ClipboardPaste className="w-3.5 h-3.5 text-[#C6202F]" />
+                    Paste image
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDrivePickerShotId(shot.id)}
+                    className="inline-flex items-center gap-1.5 text-[#891A23] hover:text-[#891A23] font-medium cursor-pointer"
+                  >
+                    <FolderSync className="w-3.5 h-3.5" />
+                    Pick frame from Google Drive
+                  </button>
+                </div>
               </div>
 
               {/* Scene & Copyable Frame Prompt */}

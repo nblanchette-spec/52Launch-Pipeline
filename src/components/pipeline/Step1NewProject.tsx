@@ -10,17 +10,23 @@ import {
   CheckCircle2,
   ExternalLink,
   Sparkles,
-  CheckSquare,
-  Square,
-  RefreshCw,
+  X,
   LogOut,
   FileText,
   Folder,
   FolderPlus,
   HardDrive,
   Check,
+  Palette,
+  Award,
+  BookOpen,
 } from 'lucide-react';
-import { PipelineProject, ProductPhoto } from '../../types/pipeline';
+import {
+  BrandGuideDocument,
+  ExtractedStyleGuide,
+  PipelineProject,
+  ProductPhoto,
+} from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
 import {
   getGoogleDriveAccessToken,
@@ -31,10 +37,13 @@ import {
   syncProjectToDriveServer,
   listGoogleDriveFolderFiles,
   parseGoogleDriveFolder,
+  parseLocalStyleGuidePdfs,
+  ParsedDriveIntakeResult,
   createDriveFolderOnDrive,
   DriveFileItem,
   ImportedDriveAsset,
 } from '../../utils/googleDriveSync';
+import { openGooglePicker } from '../../utils/googlePicker';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step1NewProjectProps {
@@ -55,6 +64,9 @@ interface Step1NewProjectProps {
       shootLocationDatesBudgetNotes: string;
     };
     initialPhotoDataUrls: Array<{ dataUrl: string; caption: string }>;
+    extractedStyleGuide?: ExtractedStyleGuide | null;
+    stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
+    initialLogoDataUrl?: string | null;
     googleDriveFolderUrls?: string[];
     googleDriveDestinationFolderId?: string;
     googleDriveDestinationFolderUrl?: string;
@@ -108,7 +120,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const [driveToken, setDriveToken] = useState<string | null>(null);
   const [driveUserEmail, setDriveUserEmail] = useState<string | null>(null);
   const [isConnectingDrive, setIsConnectingDrive] = useState(false);
-  const [isListingFiles, setIsListingFiles] = useState(false);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [isParsingDrive, setIsParsingDrive] = useState(false);
   const [driveSyncStatus, setDriveSyncStatus] = useState<
@@ -146,12 +157,10 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const isFakeLegacyFileId = (id: string) =>
     /^file-[123](-|$)/.test(id) || /^fallback-/.test(id);
 
-  const [liveFilesLoaded, setLiveFilesLoaded] = useState(false);
-
   const [driveFiles, setDriveFiles] = useState<DriveFileItem[]>(() => {
     if (isNewMode || !existingProject?.lockedDriveReferences?.length) return [];
     return existingProject.lockedDriveReferences
-      .filter((r) => r.fileId && !isFakeLegacyFileId(r.fileId))
+      .filter((r) => r.selected && r.fileId && !isFakeLegacyFileId(r.fileId))
       .map((r) => ({
         id: r.fileId,
         name: r.name,
@@ -203,6 +212,26 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // PDF Brand & Style Guide intake state
+  const [brandGuideDocuments, setBrandGuideDocuments] = useState<BrandGuideDocument[]>(
+    isNewMode ? [] : existingProject?.brandGuideDocuments || []
+  );
+  const [stagedGuidePdfs, setStagedGuidePdfs] = useState<
+    Array<{ name: string; dataUrl: string; graphicCount?: number }>
+  >([]);
+  const [extractedStyleGuide, setExtractedStyleGuide] = useState<ExtractedStyleGuide | null>(
+    isNewMode ? null : existingProject?.extractedStyleGuide || null
+  );
+  const [initialLogoDataUrl, setInitialLogoDataUrl] = useState<string | null>(null);
+  const [existingLogoUrl, setExistingLogoUrl] = useState<string | null>(
+    isNewMode ? null : existingProject?.brandBible?.brandLogoUrl || null
+  );
+  const [isParsingLocalGuide, setIsParsingLocalGuide] = useState(false);
+  const [isOpeningPicker, setIsOpeningPicker] = useState(false);
+  const [localGuideStatus, setLocalGuideStatus] = useState<string | null>(null);
+  const [isDraggingGuidePdf, setIsDraggingGuidePdf] = useState(false);
+  const guideFileInputRef = useRef<HTMLInputElement>(null);
+
   // Sync Firebase Auth listener & existing token on mount
   useEffect(() => {
     getGoogleDriveAccessToken().then((token) => {
@@ -242,6 +271,18 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       if (existingProject.googleDriveSyncStatus) {
         setDriveSyncStatus(existingProject.googleDriveSyncStatus);
       }
+      if (existingProject.brandGuideDocuments) {
+        setBrandGuideDocuments(existingProject.brandGuideDocuments);
+      }
+      if (existingProject.extractedStyleGuide !== undefined) {
+        setExtractedStyleGuide(existingProject.extractedStyleGuide || null);
+      }
+      if (existingProject.brandBible?.brandLogoUrl !== undefined) {
+        setExistingLogoUrl(existingProject.brandBible.brandLogoUrl || null);
+      }
+      if (existingProject.product?.photos) {
+        setExistingPhotos(existingProject.product.photos);
+      }
     }
   }, [
     isNewMode,
@@ -250,51 +291,11 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     existingProject?.googleDriveDestinationFolderName,
     existingProject?.googleDriveBackupFolderUrl,
     existingProject?.googleDriveSyncStatus,
+    existingProject?.brandGuideDocuments,
+    existingProject?.extractedStyleGuide,
+    existingProject?.brandBible?.brandLogoUrl,
+    existingProject?.product?.photos,
   ]);
-
-  const loadFolderFiles = async (urls: string[], token: string): Promise<DriveFileItem[]> => {
-    const validUrls = urls.map((u) => u.trim()).filter(Boolean);
-    if (validUrls.length === 0) {
-      setDriveFiles([]);
-      setLiveFilesLoaded(false);
-      return [];
-    }
-
-    setDriveErrorMsg(null);
-    setIsListingFiles(true);
-    try {
-      const files = await listGoogleDriveFolderFiles(validUrls, token);
-      setDriveFiles(files);
-      setLiveFilesLoaded(true);
-      if (files.length === 0) {
-        setDriveErrorMsg(
-          'Connected folder(s) returned 0 files. Verify the folder link and ensure your signed-in Google account can view its contents.'
-        );
-      }
-      return files;
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Could not list Google Drive folder files.';
-      setDriveErrorMsg(msg);
-      if (
-        msg.toLowerCase().includes('expired') ||
-        msg.toLowerCase().includes('permission')
-      ) {
-        setDriveToken(null);
-      }
-      return [];
-    } finally {
-      setIsListingFiles(false);
-    }
-  };
-
-  // Auto-list files when folder URLs or token change
-  useEffect(() => {
-    const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
-    if (driveToken && validUrls.length > 0) {
-      void loadFolderFiles(validUrls, driveToken);
-    }
-  }, [driveToken, googleDriveFolderUrls.join('|')]);
 
   // Persist googleDriveFolderUrls only when they genuinely differ from saved project
   useEffect(() => {
@@ -318,10 +319,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       const res = await signInWithGoogleDrive(forceConsent);
       setDriveToken(res.accessToken);
       setDriveUserEmail(res.user.email || null);
-      const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
-      if (validUrls.length > 0) {
-        await loadFolderFiles(validUrls, res.accessToken);
-      }
     } catch (err) {
       setDriveErrorMsg(
         err instanceof Error ? err.message : 'Could not sign in with Google.'
@@ -336,13 +333,376 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     setDriveToken(null);
     setDriveUserEmail(null);
     setDriveStatusNote(null);
-    setLiveFilesLoaded(false);
+  };
+
+  const applyParsedIntakeResult = async (
+    result: ParsedDriveIntakeResult,
+    sourceLabel: string,
+    opts?: {
+      validUrls?: string[];
+      allFiles?: DriveFileItem[];
+      lockedIds?: Record<string, boolean>;
+    }
+  ) => {
+    const { parsed } = result;
+    if (parsed.client) setClient(parsed.client);
+    if (parsed.productName) setProductName(parsed.productName);
+    if (parsed.productDescription) setProductDescription(parsed.productDescription);
+    if (Array.isArray(parsed.provableClaims) && parsed.provableClaims.length > 0) {
+      setClaims(parsed.provableClaims);
+    }
+    if (parsed.audience) setAudience(parsed.audience);
+    if (parsed.tone) setTone(parsed.tone);
+    if (parsed.clientMarketingIdeas) setClientMarketingIdeas(parsed.clientMarketingIdeas);
+    if (parsed.videosWanted) setVideosWanted(parsed.videosWanted);
+    if (parsed.shootLocationDatesBudgetNotes) setShootNotes(parsed.shootLocationDatesBudgetNotes);
+
+    if (result.styleGuide) {
+      setExtractedStyleGuide(result.styleGuide);
+    }
+
+    if (Array.isArray(result.stagedGuidePdfs) && result.stagedGuidePdfs.length > 0) {
+      setStagedGuidePdfs((prev) => {
+        const seen = new Set(prev.map((d) => d.name));
+        const additions = result.stagedGuidePdfs!.filter((d) => !seen.has(d.name));
+        return [...prev, ...additions];
+      });
+    }
+
+    if (Array.isArray(result.brandGuideDocuments) && result.brandGuideDocuments.length > 0) {
+      setBrandGuideDocuments((prev) => {
+        const seen = new Set(prev.map((d) => d.url || d.name));
+        const additions = result.brandGuideDocuments!.filter(
+          (d) => !seen.has(d.url || d.name)
+        );
+        return [...prev, ...additions];
+      });
+    }
+
+    let nextPhotos = existingPhotos;
+    if (
+      (isNewMode || !existingProject) &&
+      Array.isArray(result.importedPhotoDataUrls) &&
+      result.importedPhotoDataUrls.length > 0
+    ) {
+      setStagedPhotos((prev) => {
+        const existingCaptions = new Set(prev.map((p) => p.caption));
+        const additions = result
+          .importedPhotoDataUrls!.filter((img) => !existingCaptions.has(img.caption))
+          .map((img, idx) => ({
+            id: `intake-staged-${Date.now()}-${idx}`,
+            dataUrl: img.dataUrl,
+            caption: img.caption,
+          }));
+        return [...prev, ...additions];
+      });
+    } else if (
+      existingProject &&
+      Array.isArray(result.importedPhotos) &&
+      result.importedPhotos.length > 0
+    ) {
+      const seenUrls = new Set(existingPhotos.map((p) => p.url));
+      const uniqueAdditions = result.importedPhotos.filter((p) => !seenUrls.has(p.url));
+      if (uniqueAdditions.length > 0) {
+        nextPhotos = [...existingPhotos, ...uniqueAdditions];
+        setExistingPhotos(nextPhotos);
+      }
+    }
+
+    let nextLogoUrl = existingLogoUrl;
+    if ((isNewMode || !existingProject) && result.suggestedLogoDataUrl && !initialLogoDataUrl) {
+      setInitialLogoDataUrl(result.suggestedLogoDataUrl);
+    } else if (existingProject && result.suggestedLogoUrl && !existingLogoUrl) {
+      nextLogoUrl = result.suggestedLogoUrl;
+      setExistingLogoUrl(result.suggestedLogoUrl);
+    }
+
+    if (existingProject) {
+      const mergedDocs = (() => {
+        const prev = existingProject.brandGuideDocuments || [];
+        const add = result.brandGuideDocuments || [];
+        const seen = new Set(prev.map((d) => d.url || d.name));
+        return [...prev, ...add.filter((d) => !seen.has(d.url || d.name))];
+      })();
+
+      const mergedBrandBible = {
+        ...existingProject.brandBible,
+        brandLogoUrl: existingProject.brandBible.brandLogoUrl || nextLogoUrl || undefined,
+        positioning:
+          existingProject.brandBible.positioning ||
+          result.styleGuide?.summary ||
+          existingProject.brandBible.positioning,
+        visualStyle: {
+          ...existingProject.brandBible.visualStyle,
+          palette:
+            existingProject.brandBible.visualStyle.palette ||
+            result.styleGuide?.palette ||
+            '',
+          typography:
+            existingProject.brandBible.visualStyle.typography ||
+            result.styleGuide?.typography ||
+            '',
+          lighting:
+            existingProject.brandBible.visualStyle.lighting ||
+            result.styleGuide?.lighting ||
+            '',
+          lensAndFraming:
+            existingProject.brandBible.visualStyle.lensAndFraming ||
+            result.styleGuide?.lensAndFraming ||
+            '',
+          grade:
+            existingProject.brandBible.visualStyle.grade ||
+            result.styleGuide?.grade ||
+            '',
+        },
+        productRules:
+          existingProject.brandBible.productRules ||
+          result.styleGuide?.productVisualRules ||
+          '',
+      };
+
+      await onUpdateProject({
+        ...existingProject,
+        client: parsed.client || existingProject.client,
+        product: {
+          ...existingProject.product,
+          name: parsed.productName || existingProject.product.name,
+          description:
+            parsed.productDescription || existingProject.product.description,
+          provableClaims:
+            parsed.provableClaims?.length
+              ? parsed.provableClaims
+              : existingProject.product.provableClaims,
+          photos: nextPhotos,
+        },
+        intake: {
+          audience: parsed.audience || existingProject.intake.audience,
+          tone: parsed.tone || existingProject.intake.tone,
+          clientMarketingIdeas:
+            parsed.clientMarketingIdeas || existingProject.intake.clientMarketingIdeas,
+          videosWanted: parsed.videosWanted || existingProject.intake.videosWanted,
+          shootLocationDatesBudgetNotes:
+            parsed.shootLocationDatesBudgetNotes ||
+            existingProject.intake.shootLocationDatesBudgetNotes,
+        },
+        brandGuideDocuments: mergedDocs,
+        extractedStyleGuide: result.styleGuide || existingProject.extractedStyleGuide || null,
+        brandBible: mergedBrandBible,
+        ...(opts?.validUrls
+          ? {
+              googleDriveFolderUrls: opts.validUrls,
+              googleDriveFolderUrl: opts.validUrls[0],
+            }
+          : {}),
+        ...(opts?.allFiles && opts.allFiles.length > 0
+          ? {
+              lockedDriveReferences: opts.allFiles.map((f) => ({
+                fileId: f.id,
+                name: f.name,
+                mimeType: f.mimeType,
+                webViewLink: f.webViewLink,
+                folderUrl: f.folderUrl,
+                selected: opts.lockedIds ? Boolean(opts.lockedIds[f.id]) : true,
+              })),
+            }
+          : {}),
+      });
+    }
+
+    const importedCount =
+      (result.importedPhotos?.length || 0) +
+      (result.importedPhotoDataUrls?.length || 0);
+    const pdfCount = result.extractedGraphicCount ?? 0;
+    const summaryText = `Analyzed ${result.analyzedFiles.length} ${sourceLabel} file(s)${
+      importedCount > 0
+        ? ` and imported ${importedCount} image(s)${pdfCount > 0 ? ` (${pdfCount} extracted from PDF graphics)` : ''}`
+        : ''
+    }.${result.warnings?.length ? ` Note: ${result.warnings.join(' ')}` : ''}`;
+
+    return summaryText;
+  };
+
+  const ensureDriveToken = async (): Promise<string> => {
+    if (driveToken) return driveToken;
+    const authRes = await signInWithGoogleDrive(false);
+    setDriveToken(authRes.accessToken);
+    setDriveUserEmail(authRes.user.email || null);
+    return authRes.accessToken;
+  };
+
+  const handlePickSaveFolderWithPicker = async () => {
+    setDriveErrorMsg(null);
+    setIsOpeningPicker(true);
+    try {
+      const token = await ensureDriveToken();
+      const picked = await openGooglePicker({
+        accessToken: token,
+        mode: 'folders',
+        multiSelect: false,
+        title: 'Select Save Destination Folder in Google Drive',
+      });
+      if (picked && picked.length > 0) {
+        const folder = picked[0];
+        handleSelectDestinationFolder({
+          id: folder.id,
+          name: folder.name,
+          url:
+            folder.webViewLink ||
+            `https://drive.google.com/drive/folders/${folder.id}`,
+        });
+      }
+    } catch (err) {
+      setDriveErrorMsg(
+        err instanceof Error ? err.message : 'Could not open Google Picker.'
+      );
+    } finally {
+      setIsOpeningPicker(false);
+    }
+  };
+
+  const handlePickSourceFolderWithPicker = async () => {
+    setDriveErrorMsg(null);
+    setIsOpeningPicker(true);
+    try {
+      const token = await ensureDriveToken();
+      const picked = await openGooglePicker({
+        accessToken: token,
+        mode: 'folders',
+        multiSelect: true,
+        title: 'Pick Source Folder(s) from Google Drive',
+      });
+      if (picked && picked.length > 0) {
+        const newUrls = picked.map(
+          (f) => f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`
+        );
+        const merged = Array.from(
+          new Set([...googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean), ...newUrls])
+        );
+        setGoogleDriveFolderUrls(merged.length > 0 ? merged : ['']);
+        setDriveStatusNote(`Added ${picked.length} source folder(s) via Google Picker.`);
+      }
+    } catch (err) {
+      setDriveErrorMsg(
+        err instanceof Error ? err.message : 'Could not open Google Picker.'
+      );
+    } finally {
+      setIsOpeningPicker(false);
+    }
+  };
+
+  const handlePickFilesWithPicker = async (autoParse: boolean) => {
+    setDriveErrorMsg(null);
+    setLocalGuideStatus(null);
+    setIsOpeningPicker(true);
+    try {
+      const token = await ensureDriveToken();
+      const picked = await openGooglePicker({
+        accessToken: token,
+        mode: 'files',
+        mediaFilter: 'pdf_and_docs',
+        multiSelect: true,
+        title: 'Pick PDF Brand Guides, Briefs & Assets from Google Drive',
+      });
+      if (!picked || picked.length === 0) return;
+
+      const pickedDriveItems: DriveFileItem[] = picked.map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        webViewLink: f.webViewLink,
+      }));
+
+      setDriveFiles((prev) => {
+        const seen = new Set(prev.map((p) => p.id));
+        const additions = pickedDriveItems.filter((p) => !seen.has(p.id));
+        return [...prev, ...additions];
+      });
+      setLockedFileIds((prev) => {
+        const next = { ...prev };
+        pickedDriveItems.forEach((f) => {
+          next[f.id] = true;
+        });
+        return next;
+      });
+      if (autoParse) {
+        setIsParsingDrive(true);
+        try {
+          const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
+          const result = await parseGoogleDriveFolder(
+            existingProject?.id || 'new',
+            validUrls,
+            pickedDriveItems,
+            token
+          );
+          const note = await applyParsedIntakeResult(result, 'Google Picker', {
+            validUrls: validUrls.length ? validUrls : undefined,
+          });
+          setDriveStatusNote(note);
+          setLocalGuideStatus(note);
+        } finally {
+          setIsParsingDrive(false);
+        }
+      } else {
+        setDriveStatusNote(`Selected ${pickedDriveItems.length} file(s) from Google Picker.`);
+      }
+    } catch (err) {
+      setDriveErrorMsg(
+        err instanceof Error ? err.message : 'Could not pick files with Google Picker.'
+      );
+    } finally {
+      setIsOpeningPicker(false);
+    }
+  };
+
+  const handleLocalGuideUpload = async (files: File[]) => {
+    const pdfFiles = files.filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+    );
+    if (pdfFiles.length === 0) {
+      setErrorMsg('Please select at least one PDF brand/style guide file.');
+      return;
+    }
+
+    setErrorMsg(null);
+    setLocalGuideStatus(null);
+    setIsParsingLocalGuide(true);
+
+    try {
+      const payloads = await Promise.all(
+        pdfFiles.map(
+          (file) =>
+            new Promise<{ name: string; dataUrl: string }>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () =>
+                resolve({ name: file.name, dataUrl: String(reader.result || '') });
+              reader.onerror = () =>
+                reject(new Error(`Could not read PDF file: ${file.name}`));
+              reader.readAsDataURL(file);
+            })
+        )
+      );
+
+      const result = await parseLocalStyleGuidePdfs(
+        existingProject?.id || 'new',
+        payloads
+      );
+      const summary = await applyParsedIntakeResult(result, 'PDF guide');
+      setLocalGuideStatus(summary);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Could not extract information and graphics from PDF.'
+      );
+    } finally {
+      setIsParsingLocalGuide(false);
+    }
   };
 
   const handleAutoParseDrive = async () => {
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
-    if (validUrls.length === 0) {
-      setDriveErrorMsg('Enter at least one Google Drive folder URL first.');
+    const selectedFiles = driveFiles.filter((f) => Boolean(lockedFileIds[f.id]));
+
+    if (validUrls.length === 0 && selectedFiles.length === 0) {
+      setDriveErrorMsg('Enter at least one Google Drive folder URL or pick files via Google Picker first.');
       return;
     }
 
@@ -353,28 +713,24 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
     try {
       let token = driveToken;
-      let currentFiles = driveFiles;
-
       if (!token) {
         const authRes = await signInWithGoogleDrive(true);
         token = authRes.accessToken;
         setDriveToken(token);
         setDriveUserEmail(authRes.user.email || null);
-        currentFiles = await loadFolderFiles(validUrls, token);
-      } else if (!liveFilesLoaded || currentFiles.length === 0) {
-        currentFiles = await loadFolderFiles(validUrls, token);
       }
 
-      if (currentFiles.length === 0) {
+      let filesToAnalyze: DriveFileItem[] = selectedFiles;
+      if (filesToAnalyze.length === 0 && validUrls.length > 0) {
+        filesToAnalyze = await listGoogleDriveFolderFiles(validUrls, token);
+      }
+
+      if (filesToAnalyze.length === 0) {
         setDriveErrorMsg(
-          'No files were found in the linked Google Drive folder(s). Verify the folder URL(s) and check that you have access.'
+          'No files were found in the linked Google Drive folder(s). Verify the folder URL(s) or pick specific files with Google Picker.'
         );
         return;
       }
-
-      const explicitlyLocked = currentFiles.filter((f) => lockedFileIds[f.id]);
-      const filesToAnalyze =
-        explicitlyLocked.length > 0 ? explicitlyLocked : currentFiles;
 
       const result = await parseGoogleDriveFolder(
         existingProject?.id || 'new',
@@ -383,107 +739,12 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
         token
       );
 
-      const { parsed } = result;
-      if (parsed.client) setClient(parsed.client);
-      if (parsed.productName) setProductName(parsed.productName);
-      if (parsed.productDescription) setProductDescription(parsed.productDescription);
-      if (Array.isArray(parsed.provableClaims) && parsed.provableClaims.length > 0) {
-        setClaims(parsed.provableClaims);
-      }
-      if (parsed.audience) setAudience(parsed.audience);
-      if (parsed.tone) setTone(parsed.tone);
-      if (parsed.clientMarketingIdeas)
-        setClientMarketingIdeas(parsed.clientMarketingIdeas);
-      if (parsed.videosWanted) setVideosWanted(parsed.videosWanted);
-      if (parsed.shootLocationDatesBudgetNotes)
-        setShootNotes(parsed.shootLocationDatesBudgetNotes);
-
-      // Import extracted Drive product photos into gallery
-      if (
-        (isNewMode || !existingProject) &&
-        Array.isArray(result.importedPhotoDataUrls) &&
-        result.importedPhotoDataUrls.length > 0
-      ) {
-        setStagedPhotos((prev) => {
-          const existingCaptions = new Set(prev.map((p) => p.caption));
-          const additions = result
-            .importedPhotoDataUrls!.filter((img) => !existingCaptions.has(img.caption))
-            .map((img, idx) => ({
-              id: `drive-staged-${Date.now()}-${idx}`,
-              dataUrl: img.dataUrl,
-              caption: img.caption,
-            }));
-          return [...prev, ...additions];
-        });
-      } else if (
-        existingProject &&
-        Array.isArray(result.importedPhotos) &&
-        result.importedPhotos.length > 0
-      ) {
-        setExistingPhotos((prev) => [...prev, ...result.importedPhotos!]);
-      }
-
-      // Mark analyzed files as locked if none were manually locked yet
-      if (explicitlyLocked.length === 0) {
-        const nextMap: Record<string, boolean> = {};
-        filesToAnalyze.forEach((f) => {
-          nextMap[f.id] = true;
-        });
-        setLockedFileIds(nextMap);
-      }
-
-      const importedCount =
-        (result.importedPhotos?.length || 0) +
-        (result.importedPhotoDataUrls?.length || 0);
-      setDriveStatusNote(
-        `Analyzed ${result.analyzedFiles.length} real Drive file(s)${
-          importedCount > 0 ? ` and imported ${importedCount} product image(s)` : ''
-        }.${result.warnings?.length ? ` Note: ${result.warnings.join(' ')}` : ''}`
-      );
-
-      if (existingProject) {
-        const updatedPhotos =
-          result.importedPhotos && result.importedPhotos.length > 0
-            ? [...existingProject.product.photos, ...result.importedPhotos]
-            : existingProject.product.photos;
-
-        await onUpdateProject({
-          ...existingProject,
-          client: parsed.client || existingProject.client,
-          product: {
-            ...existingProject.product,
-            name: parsed.productName || existingProject.product.name,
-            description:
-              parsed.productDescription || existingProject.product.description,
-            provableClaims:
-              parsed.provableClaims?.length
-                ? parsed.provableClaims
-                : existingProject.product.provableClaims,
-            photos: updatedPhotos,
-          },
-          intake: {
-            audience: parsed.audience || existingProject.intake.audience,
-            tone: parsed.tone || existingProject.intake.tone,
-            clientMarketingIdeas:
-              parsed.clientMarketingIdeas || existingProject.intake.clientMarketingIdeas,
-            videosWanted: parsed.videosWanted || existingProject.intake.videosWanted,
-            shootLocationDatesBudgetNotes:
-              parsed.shootLocationDatesBudgetNotes ||
-              existingProject.intake.shootLocationDatesBudgetNotes,
-          },
-          googleDriveFolderUrls: validUrls,
-          googleDriveFolderUrl: validUrls[0],
-          lockedDriveReferences: currentFiles.map((f) => ({
-            fileId: f.id,
-            name: f.name,
-            mimeType: f.mimeType,
-            webViewLink: f.webViewLink,
-            folderUrl: f.folderUrl,
-            selected:
-              explicitlyLocked.length > 0 ? Boolean(lockedFileIds[f.id]) : true,
-          })),
-        });
-      }
+      const summaryNote = await applyParsedIntakeResult(result, 'Drive', {
+        validUrls,
+        allFiles: selectedFiles,
+        lockedIds: lockedFileIds,
+      });
+      setDriveStatusNote(summaryNote);
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Could not analyze Google Drive files.';
@@ -705,13 +966,14 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
     const cleanedClaims = claims.map((c) => c.trim()).filter(Boolean);
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
-    const lockedReferences = driveFiles.map((f) => ({
+    const selectedOnly = driveFiles.filter((f) => Boolean(lockedFileIds[f.id]));
+    const lockedReferences = selectedOnly.map((f) => ({
       fileId: f.id,
       name: f.name,
       mimeType: f.mimeType,
       webViewLink: f.webViewLink,
       folderUrl: f.folderUrl,
-      selected: Boolean(lockedFileIds[f.id]),
+      selected: true,
     }));
 
     setIsSaving(true);
@@ -735,6 +997,9 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             dataUrl: p.dataUrl,
             caption: p.caption,
           })),
+          extractedStyleGuide,
+          stagedGuidePdfs,
+          initialLogoDataUrl,
           googleDriveFolderUrls: validUrls,
           googleDriveDestinationFolderId: destinationFolderId,
           googleDriveDestinationFolderUrl: destinationFolderUrl,
@@ -757,6 +1022,12 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             clientMarketingIdeas: clientMarketingIdeas.trim(),
             videosWanted: videosWanted.trim(),
             shootLocationDatesBudgetNotes: shootNotes.trim(),
+          },
+          brandGuideDocuments,
+          extractedStyleGuide,
+          brandBible: {
+            ...existingProject.brandBible,
+            brandLogoUrl: existingLogoUrl ?? existingProject.brandBible.brandLogoUrl,
           },
           googleDriveFolderUrls: validUrls,
           googleDriveFolderUrl: validUrls[0] || undefined,
@@ -781,7 +1052,16 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     }
   };
 
-  const selectedLockedCount = driveFiles.filter((f) => lockedFileIds[f.id]).length;
+  const selectedDriveFiles = driveFiles.filter((f) => Boolean(lockedFileIds[f.id]));
+
+  const handleRemoveSelectedDriveFile = (fileId: string) => {
+    setDriveFiles((prev) => prev.filter((f) => f.id !== fileId));
+    setLockedFileIds((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  };
 
   return (
     <div className="max-w-[1120px] mx-auto px-6 py-7 space-y-6">
@@ -962,10 +1242,23 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  disabled={isOpeningPicker}
+                  onClick={() => void handlePickSaveFolderWithPicker()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] disabled:opacity-50 rounded-lg cursor-pointer transition-colors shadow-sm"
+                >
+                  {isOpeningPicker ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                  ) : (
+                    <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
+                  )}
+                  Google Picker
+                </button>
+                <button
+                  type="button"
                   onClick={() => setDestinationPickerOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] rounded-lg cursor-pointer transition-colors shadow-sm"
                 >
-                  <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
+                  <FolderSync className="w-3.5 h-3.5 text-[#C6202F]" />
                   Browse Company Drive
                 </button>
                 <button
@@ -1035,49 +1328,38 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
           </div>
         </section>
 
-        {/* Google Drive Asset Sources & Key File Locking Section */}
-        <section className="bg-white border border-[#E2E2E6] rounded-xl p-6 space-y-4">
+        {/* Unified Brand Assets, Style Guides & Intake Sources */}
+        <section className="bg-white border border-[#E2E2E6] rounded-xl p-6 space-y-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold text-[#111114] flex items-center gap-2">
-                <FolderSync className="w-5 h-5 text-[#C6202F]" />
-                Google Drive Intake Sources &amp; Key File Locking
+                <BookOpen className="w-5 h-5 text-[#C6202F]" />
+                Brand Assets, Style Guides &amp; Source Files
               </h2>
               <p className="text-xs text-[#5A5A66] mt-0.5">
-                Browse company Drive folders or paste links to pull client briefs, product decks, and scripts into intake.
+                Link Google Drive folders or pick files, extract info &amp; graphics from PDF brand guides, and attach product photos.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            {(googleDriveFolderUrls.some((u) => u.trim()) || selectedDriveFiles.length > 0) && (
               <button
                 type="button"
-                onClick={() => setSourceFolderPickerOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#111114] bg-[#F6F6F7] hover:bg-[#EAEAEF] border border-[#D5D5DC] rounded-lg cursor-pointer transition-colors shadow-sm"
+                disabled={isParsingDrive || isSyncingDrive}
+                onClick={() => void handleAutoParseDrive()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer transition-colors shadow"
               >
-                <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
-                Browse Company Drive to Add Folders
+                {isParsingDrive ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                {isParsingDrive
+                  ? 'Reading & Analyzing Files...'
+                  : selectedDriveFiles.length > 0
+                    ? `Auto-Fill from ${selectedDriveFiles.length} Selected File${selectedDriveFiles.length > 1 ? 's' : ''}`
+                    : 'Auto-Fill Intake from Drive'}
               </button>
-
-              {googleDriveFolderUrls.some((u) => u.trim()) && (
-                <button
-                  type="button"
-                  disabled={isParsingDrive || isSyncingDrive}
-                  onClick={() => void handleAutoParseDrive()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer transition-colors shadow"
-                >
-                  {isParsingDrive ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Sparkles className="w-3.5 h-3.5" />
-                  )}
-                  {isParsingDrive
-                    ? 'Reading & Analyzing Files...'
-                    : selectedLockedCount > 0
-                      ? `Auto-Fill from ${selectedLockedCount} Locked File${selectedLockedCount > 1 ? 's' : ''}`
-                      : 'Auto-Fill Intake from Drive'}
-                </button>
-              )}
-            </div>
+            )}
           </div>
 
           {driveErrorMsg && (
@@ -1092,29 +1374,44 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             </div>
           )}
 
-          <div className="space-y-3 pt-2">
-            <div className="flex items-center justify-between">
-              <label className="block text-xs font-medium text-[#3A3A44]">
-                Google Drive Source Folder URLs
-              </label>
-              <div className="flex items-center gap-3">
-                {driveToken && googleDriveFolderUrls.some((u) => u.trim()) && (
-                  <button
-                    type="button"
-                    disabled={isListingFiles}
-                    onClick={() => void loadFolderFiles(googleDriveFolderUrls, driveToken)}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[#3A3A44] hover:text-[#891A23] cursor-pointer"
-                  >
-                    <RefreshCw
-                      className={`w-3.5 h-3.5 ${isListingFiles ? 'animate-spin' : ''}`}
-                    />
-                    Refresh Files
-                  </button>
-                )}
+          {/* 1. Google Drive Reference Sources & Selected Files */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
+                <FolderSync className="w-4 h-4 text-[#C6202F]" />
+                Google Drive Sources
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isOpeningPicker || isParsingDrive}
+                  onClick={() => void handlePickFilesWithPicker(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white hover:bg-[#FDF4F5] border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] disabled:opacity-50 rounded-lg cursor-pointer transition-colors"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#C6202F]" />
+                  Pick Files (Picker)
+                </button>
+                <button
+                  type="button"
+                  disabled={isOpeningPicker}
+                  onClick={() => void handlePickSourceFolderWithPicker()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white hover:bg-[#F6F6F7] border border-[#D5D5DC] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors"
+                >
+                  <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
+                  Pick Folder (Picker)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceFolderPickerOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-[#F6F6F7] hover:bg-[#EAEAEF] border border-[#D5D5DC] rounded-lg cursor-pointer transition-colors"
+                >
+                  <FolderSync className="w-3.5 h-3.5 text-[#C6202F]" />
+                  Browse Drive
+                </button>
                 <button
                   type="button"
                   onClick={() => setGoogleDriveFolderUrls((prev) => [...prev, ''])}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-[#C6202F] hover:text-[#891A23] cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#C6202F] hover:text-[#891A23] cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   Add folder URL
@@ -1135,7 +1432,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                       );
                     }}
                     placeholder={`https://drive.google.com/drive/folders/folder-${idx + 1}...`}
-                    className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3.5 py-2 text-sm text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] font-mono text-xs"
+                    className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3.5 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] font-mono"
                   />
                   {googleDriveFolderUrls.length > 1 && (
                     <button
@@ -1144,6 +1441,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                         setGoogleDriveFolderUrls((prev) => prev.filter((_, i) => i !== idx))
                       }
                       className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                      aria-label="Remove folder URL"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1151,98 +1449,415 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                 </div>
               ))}
             </div>
-          </div>
 
-          {isListingFiles && (
-            <div className="flex items-center gap-2 pt-3 border-t border-[#E2E2E6] text-xs text-[#5A5A66]">
-              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
-              Reading files from linked Google Drive folder(s)...
-            </div>
-          )}
-
-          {!isListingFiles && driveFiles.length > 0 && (
-            <div className="space-y-2 pt-3 border-t border-[#E2E2E6]">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-medium text-[#3A3A44]">
-                  Select Specific Files to Lock as Key References ({driveFiles.length} found):
+            {selectedDriveFiles.length > 0 && (
+              <div className="pt-2 space-y-2">
+                <div className="text-[11px] font-semibold text-[#5A5A66] uppercase tracking-wider">
+                  Selected Reference Files ({selectedDriveFiles.length})
                 </div>
-                <div className="flex gap-2 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const all: Record<string, boolean> = {};
-                      driveFiles.forEach((f) => (all[f.id] = true));
-                      setLockedFileIds(all);
-                    }}
-                    className="text-[#C6202F] hover:underline cursor-pointer"
-                  >
-                    Lock All
-                  </button>
-                  <span className="text-[#8A8A96]">|</span>
-                  <button
-                    type="button"
-                    onClick={() => setLockedFileIds({})}
-                    className="text-[#5A5A66] hover:underline cursor-pointer"
-                  >
-                    Unlock All
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto pr-1">
-                {driveFiles.map((file) => {
-                  const isLocked = Boolean(lockedFileIds[file.id]);
-                  return (
+                <div className="flex flex-wrap gap-2">
+                  {selectedDriveFiles.map((file) => (
                     <div
                       key={file.id}
-                      onClick={() =>
-                        setLockedFileIds((prev) => ({
-                          ...prev,
-                          [file.id]: !prev[file.id],
-                        }))
-                      }
-                      className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 text-xs cursor-pointer transition-colors ${
-                        isLocked
-                          ? 'bg-[#FDF4F5] border-[#C6202F]/55 text-[#891A23]'
-                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
-                      }`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] text-xs text-[#891A23]"
                     >
-                      <div className="flex items-center gap-2 min-w-0">
-                        {isLocked ? (
-                          <CheckSquare className="w-4 h-4 text-[#C6202F] shrink-0" />
-                        ) : (
-                          <Square className="w-4 h-4 text-[#8A8A96] shrink-0" />
-                        )}
-                        <div className="min-w-0">
-                          <div className="truncate font-medium flex items-center gap-1">
-                            <FileText className="w-3 h-3 text-[#6E6E7A] shrink-0" />
-                            <span className="truncate">{file.name}</span>
-                          </div>
-                          {file.folderPath && (
-                            <div className="text-[10px] text-[#6E6E7A] truncate">
-                              {file.folderPath}
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                      <FileText className="w-3.5 h-3.5 text-[#C6202F] shrink-0" />
+                      <span className="font-medium max-w-[240px] truncate">{file.name}</span>
                       {file.webViewLink && (
                         <a
                           href={file.webViewLink}
                           target="_blank"
                           rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[#C6202F] hover:text-[#891A23] shrink-0"
+                          className="text-[#C6202F] hover:text-[#111114] ml-0.5"
                           title="Open in Google Drive"
                         >
-                          <ExternalLink className="w-3.5 h-3.5" />
+                          <ExternalLink className="w-3 h-3" />
                         </a>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSelectedDriveFile(file.id)}
+                        className="ml-0.5 text-[#891A23] hover:text-[#111114] cursor-pointer"
+                        aria-label={`Remove ${file.name}`}
+                        title="Remove selected file"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 2. Brand & Style Guide PDFs */}
+          <div className="pt-5 border-t border-[#EAEAEF] space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
+                  <Palette className="w-4 h-4 text-[#C6202F]" />
+                  Brand &amp; Style Guide PDFs
+                </div>
+                <p className="text-[11px] text-[#5A5A66] mt-0.5">
+                  Extracts typography, hex swatches, lighting/lens rules, and embedded raster graphics into your asset library.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isOpeningPicker || isParsingDrive}
+                  onClick={() => void handlePickFilesWithPicker(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] disabled:opacity-50 rounded-lg cursor-pointer transition-colors"
+                >
+                  <FolderSync className="w-3.5 h-3.5" />
+                  Pick PDFs (Picker)
+                </button>
+                <button
+                  type="button"
+                  disabled={isParsingLocalGuide}
+                  onClick={() => guideFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#111114] hover:bg-[#24242B] disabled:opacity-50 rounded-lg cursor-pointer transition-colors"
+                >
+                  {isParsingLocalGuide ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  {isParsingLocalGuide ? 'Extracting PDF...' : 'Upload PDF Guide(s)'}
+                </button>
+                <input
+                  ref={guideFileInputRef}
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (files.length > 0) void handleLocalGuideUpload(files);
+                    e.target.value = '';
+                  }}
+                />
+              </div>
+            </div>
+
+            <div
+              onClick={() => !isParsingLocalGuide && guideFileInputRef.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingGuidePdf(true);
+              }}
+              onDragLeave={() => setIsDraggingGuidePdf(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDraggingGuidePdf(false);
+                const files = Array.from(e.dataTransfer.files || []);
+                if (files.length > 0) void handleLocalGuideUpload(files);
+              }}
+              className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-colors ${
+                isDraggingGuidePdf
+                  ? 'border-[#C6202F] bg-[#FDF4F5]'
+                  : 'border-[#E2E2E6] hover:border-[#C6202F]/60 bg-[#FBFBFC]'
+              }`}
+            >
+              {isParsingLocalGuide ? (
+                <div className="flex items-center justify-center gap-2 text-xs text-[#891A23] font-medium">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Reading PDF structure, color codes, rules, and extracting embedded graphics...
+                </div>
+              ) : (
+                <div className="text-xs text-[#5A5A66]">
+                  <span className="font-semibold text-[#111114]">Drag &amp; drop PDF brand/style guide(s) here</span> or click to browse local PDFs
+                </div>
+              )}
+            </div>
+
+            {localGuideStatus && (
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-xs text-emerald-900">
+                {localGuideStatus}
+              </div>
+            )}
+
+            {(brandGuideDocuments.length > 0 || stagedGuidePdfs.length > 0) && (
+              <div className="flex flex-wrap gap-2">
+                {brandGuideDocuments.map((doc) => (
+                  <a
+                    key={doc.id || doc.url}
+                    href={doc.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] text-xs text-[#111114]"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#C6202F]" />
+                    <span className="font-medium">{doc.name}</span>
+                    {typeof doc.graphicCount === 'number' && doc.graphicCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded bg-white border border-[#E2E2E6] text-[10px] font-mono text-[#5A5A66]">
+                        {doc.graphicCount} graphics
+                      </span>
+                    )}
+                    <ExternalLink className="w-3 h-3 text-[#6E6E7A]" />
+                  </a>
+                ))}
+                {stagedGuidePdfs.map((doc, idx) => (
+                  <div
+                    key={`${doc.name}-${idx}`}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] text-xs text-[#891A23]"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#C6202F]" />
+                    <span className="font-medium">{doc.name}</span>
+                    {typeof doc.graphicCount === 'number' && doc.graphicCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded bg-white border border-[#EABAC0] text-[10px] font-mono">
+                        {doc.graphicCount} graphics
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setStagedGuidePdfs((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="ml-1 text-[#891A23] hover:text-[#111114] cursor-pointer"
+                      aria-label={`Remove ${doc.name}`}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {extractedStyleGuide && (
+              <div className="p-4 rounded-xl bg-[#FBFBFC] border border-[#E2E2E6] space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-semibold text-[#111114] flex items-center gap-1.5">
+                    <Palette className="w-4 h-4 text-[#C6202F]" />
+                    Extracted Brand &amp; Style Guide Specifications
+                  </div>
+                  {extractedStyleGuide.sourceFileNames?.length > 0 && (
+                    <span className="text-[11px] text-[#6E6E7A]">
+                      Sources: {extractedStyleGuide.sourceFileNames.join(', ')}
+                    </span>
+                  )}
+                </div>
+
+                {extractedStyleGuide.summary && (
+                  <p className="text-[#3A3A44] leading-relaxed">{extractedStyleGuide.summary}</p>
+                )}
+
+                {extractedStyleGuide.paletteHexes?.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold text-[#5A5A66]">Palette:</span>
+                    {extractedStyleGuide.paletteHexes.map((hex) => (
+                      <div
+                        key={hex}
+                        className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white border border-[#E2E2E6] font-mono text-[11px]"
+                      >
+                        <span
+                          className="w-3 h-3 rounded-sm border border-black/15 shrink-0"
+                          style={{ backgroundColor: hex }}
+                        />
+                        <span>{hex}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  {extractedStyleGuide.typography && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Typography
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.typography}</div>
+                    </div>
+                  )}
+                  {extractedStyleGuide.lighting && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Lighting Direction
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.lighting}</div>
+                    </div>
+                  )}
+                  {extractedStyleGuide.lensAndFraming && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Lens &amp; Framing
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.lensAndFraming}</div>
+                    </div>
+                  )}
+                  {extractedStyleGuide.grade && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Color Grade
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.grade}</div>
+                    </div>
+                  )}
+                  {extractedStyleGuide.brandLogoNotes && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Logo Guidelines
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.brandLogoNotes}</div>
+                    </div>
+                  )}
+                  {extractedStyleGuide.productVisualRules && (
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-[#6E6E7A]">
+                        Product &amp; Brand Rules
+                      </div>
+                      <div className="text-[#24242B] mt-0.5">{extractedStyleGuide.productVisualRules}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 3. Product Photos & Extracted Graphics */}
+          <div className="pt-5 border-t border-[#EAEAEF] space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
+                  <ImageIcon className="w-4 h-4 text-[#C6202F]" />
+                  Product Photos &amp; Brand Graphics
+                  {displayedPhotos.length > 0 && (
+                    <span className="text-[11px] font-mono font-normal text-[#6E6E7A]">
+                      ({displayedPhotos.length})
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-[#5A5A66] mt-0.5">
+                  Upload local product photos, pick from Drive, or mark any imported graphic as your primary Brand Logo.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPhotoPickerOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                >
+                  <FolderSync className="w-3.5 h-3.5" />
+                  Pick from Google Drive
+                </button>
+                <button
+                  type="button"
+                  disabled={isUploadingPhoto}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
+                >
+                  {isUploadingPhoto ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
+                  )}
+                  {isUploadingPhoto ? 'Uploading...' : 'Upload photos'}
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => void handlePhotoSelect(e)}
+              />
+            </div>
+
+            {displayedPhotos.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                {displayedPhotos.map((p, idx) => {
+                  const imgSrc = (p as ProductPhoto).url || (p as { dataUrl: string }).dataUrl;
+                  const isLogo =
+                    isNewMode || !existingProject
+                      ? initialLogoDataUrl === imgSrc
+                      : existingLogoUrl === imgSrc;
+                  return (
+                    <div
+                      key={p.id || idx}
+                      className={`bg-[#F6F6F7] border rounded-lg overflow-hidden flex flex-col aspect-square relative group ${
+                        isLogo ? 'border-[#C6202F] ring-2 ring-[#C6202F]/30' : 'border-[#E2E2E6]'
+                      }`}
+                    >
+                      <img
+                        src={imgSrc}
+                        alt={p.caption || `Product ${idx + 1}`}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isNewMode || !existingProject) {
+                            setInitialLogoDataUrl(isLogo ? null : imgSrc);
+                          } else {
+                            const nextLogo = isLogo ? null : imgSrc;
+                            setExistingLogoUrl(nextLogo);
+                            void onUpdateProject({
+                              ...existingProject,
+                              brandBible: {
+                                ...existingProject.brandBible,
+                                brandLogoUrl: nextLogo,
+                                brandLogoCaption: nextLogo ? p.caption || 'Brand Logo' : undefined,
+                              },
+                            });
+                          }
+                        }}
+                        className={`absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold cursor-pointer transition-all ${
+                          isLogo
+                            ? 'bg-[#C6202F] text-white shadow'
+                            : 'bg-black/75 text-white/90 hover:bg-[#C6202F] opacity-0 group-hover:opacity-100'
+                        }`}
+                      >
+                        <Award className="w-3 h-3" />
+                        {isLogo ? 'Brand Logo' : 'Set as Logo'}
+                      </button>
+                      {p.caption && (
+                        <div className="absolute bottom-0 inset-x-0 bg-black/75 px-2 py-1 text-[10px] text-white truncate">
+                          {p.caption}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isNewMode || !existingProject) {
+                            if (initialLogoDataUrl === imgSrc) setInitialLogoDataUrl(null);
+                            setStagedPhotos((prev) => prev.filter((_, i) => i !== idx));
+                          } else {
+                            const next = existingPhotos.filter((_, i) => i !== idx);
+                            setExistingPhotos(next);
+                            const clearedLogo = existingLogoUrl === imgSrc ? null : existingLogoUrl;
+                            if (existingLogoUrl === imgSrc) setExistingLogoUrl(null);
+                            void onUpdateProject({
+                              ...existingProject,
+                              product: { ...existingProject.product, photos: next },
+                              brandBible: {
+                                ...existingProject.brandBible,
+                                brandLogoUrl: clearedLogo,
+                              },
+                            });
+                          }
+                        }}
+                        className="absolute top-2 right-2 p-1.5 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded-md opacity-0 group-hover:opacity-100 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   );
                 })}
               </div>
-            </div>
-          )}
+            ) : (
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 bg-[#FBFBFC] rounded-xl p-6 text-center cursor-pointer transition-colors"
+              >
+                <ImageIcon className="w-7 h-7 text-[#8A8A96] mx-auto mb-1.5" />
+                <div className="text-xs font-medium text-[#3A3A44]">
+                  Click to upload product photos (PNG, JPG or WEBP up to 10MB)
+                </div>
+              </div>
+            )}
+          </div>
         </section>
 
         {/* Client & Product Core */}
@@ -1337,116 +1952,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               ))}
             </div>
           </div>
-        </section>
-
-        {/* Product Photos */}
-        <section className="bg-white border border-[#E2E2E6] rounded-xl p-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-base font-semibold text-[#111114]">Product Photos</h2>
-              <p className="text-xs text-[#5A5A66] mt-0.5">
-                Upload local product photos or pick them directly from your Google Drive folders or links.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setPhotoPickerOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
-              >
-                <FolderSync className="w-4 h-4" />
-                Pick from Google Drive
-              </button>
-              <button
-                type="button"
-                disabled={isUploadingPhoto}
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
-              >
-                {isUploadingPhoto ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
-                ) : (
-                  <Upload className="w-4 h-4 text-[#C6202F]" />
-                )}
-                {isUploadingPhoto ? 'Uploading...' : 'Upload photos'}
-              </button>
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={(e) => void handlePhotoSelect(e)}
-            />
-          </div>
-
-          {displayedPhotos.length > 0 ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-              {displayedPhotos.map((p, idx) => (
-                <div
-                  key={p.id || idx}
-                  className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg overflow-hidden flex flex-col aspect-square relative group"
-                >
-                  <img
-                    src={(p as ProductPhoto).url || (p as { dataUrl: string }).dataUrl}
-                    alt={p.caption || `Product ${idx + 1}`}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                  {p.caption && (
-                    <div className="absolute bottom-0 inset-x-0 bg-black/75 px-2 py-1 text-[10px] text-white truncate">
-                      {p.caption}
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isNewMode || !existingProject) {
-                        setStagedPhotos((prev) => prev.filter((_, i) => i !== idx));
-                      } else {
-                        const next = existingPhotos.filter((_, i) => i !== idx);
-                        setExistingPhotos(next);
-                        void onUpdateProject({
-                          ...existingProject,
-                          product: { ...existingProject.product, photos: next },
-                        });
-                      }
-                    }}
-                    className="absolute top-2 right-2 p-1.5 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 bg-[#F6F6F7] rounded-xl p-8 text-center cursor-pointer transition-colors"
-            >
-              <ImageIcon className="w-8 h-8 text-[#8A8A96] mx-auto mb-2" />
-              <div className="text-xs font-medium text-[#3A3A44]">
-                Click to upload product photos or drag and drop
-              </div>
-              <div className="text-[11px] text-[#6E6E7A] mt-1">
-                PNG, JPG or WEBP up to 10MB each
-              </div>
-              <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setPhotoPickerOpen(true);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer"
-                >
-                  <FolderSync className="w-3.5 h-3.5" />
-                  Browse Product Photos in Google Drive
-                </button>
-              </div>
-            </div>
-          )}
         </section>
 
         {/* Campaign Intake & Creative Direction */}

@@ -476,7 +476,239 @@ export async function buildFalVideoRequest(
     };
   }
 
-  // 5. Seedance (2.5 or 2.0 Fast) — preserved intact
+  // 5. Google DeepMind Veo 3.1 / Veo 3.1 Fast (T2V / I2V / First-Last / Reference / Extend)
+  if (model.family === 'veo') {
+    const veoRes: StudioResolution =
+      resolvedResolution === '2160p'
+        ? '2160p'
+        : resolvedResolution === '1080p'
+          ? '1080p'
+          : '720p';
+    const apiRes = veoRes === '2160p' ? '4k' : veoRes;
+    const veoDur = [4, 6, 8].reduce(
+      (best, cand) =>
+        Math.abs(cand - clampedDuration) < Math.abs(best - clampedDuration) ? cand : best,
+      6
+    );
+    const mappedAspect =
+      params.aspectRatio === '9:16' || params.aspectRatio === 'auto'
+        ? params.aspectRatio
+        : '16:9';
+
+    const base: Record<string, unknown> = {
+      prompt: params.prompt.trim(),
+      duration: `${veoDur}s`,
+      aspect_ratio: mappedAspect,
+      resolution: apiRes,
+      generate_audio: params.nativeAudio,
+      seed: params.seed,
+      ...(trimmedNeg ? { negative_prompt: trimmedNeg } : {}),
+    };
+
+    if (params.workflowMode === 'first_last_frame') {
+      const [start, end] = await Promise.all([
+        uploadMediaRefToFal(params.projectId, params.startFrameUrl),
+        uploadMediaRefToFal(params.projectId, params.endFrameUrl),
+      ]);
+      if (!start || !end) {
+        throw new Error('Google Veo 3.1 First/Last Frame mode requires both a start and end frame.');
+      }
+      return {
+        endpointId: model.endpoints.firstLastToVideo || model.endpoints.imageToVideo,
+        input: {
+          ...base,
+          first_frame_url: start,
+          last_frame_url: end,
+        },
+        resolvedResolution: veoRes,
+        clampedDuration: veoDur,
+      };
+    }
+
+    if (params.workflowMode === 'image_to_video') {
+      const start = await uploadMediaRefToFal(params.projectId, params.startFrameUrl);
+      if (!start) {
+        throw new Error('Google Veo 3.1 Image-to-Video requires a start frame image.');
+      }
+      if (params.endFrameUrl && model.endpoints.firstLastToVideo) {
+        const end = await uploadMediaRefToFal(params.projectId, params.endFrameUrl);
+        if (end) {
+          return {
+            endpointId: model.endpoints.firstLastToVideo,
+            input: {
+              ...base,
+              first_frame_url: start,
+              last_frame_url: end,
+            },
+            resolvedResolution: veoRes,
+            clampedDuration: veoDur,
+          };
+        }
+      }
+      return {
+        endpointId: model.endpoints.imageToVideo,
+        input: {
+          ...base,
+          image_url: start,
+        },
+        resolvedResolution: veoRes,
+        clampedDuration: veoDur,
+      };
+    }
+
+    if (params.workflowMode === 'reference_to_video') {
+      const rawRefs =
+        params.referenceImages && params.referenceImages.length > 0
+          ? params.referenceImages
+          : params.startFrameUrl
+            ? [params.startFrameUrl]
+            : [];
+      const refImgs = (
+        await Promise.all(
+          rawRefs.slice(0, Math.max(1, model.maxReferenceImages)).map((r) =>
+            uploadMediaRefToFal(params.projectId, r)
+          )
+        )
+      ).filter((u): u is string => Boolean(u));
+
+      if (refImgs.length === 0) {
+        throw new Error('Google Veo 3.1 Reference-to-Video requires at least one reference image (up to 3).');
+      }
+      return {
+        endpointId: model.endpoints.referenceToVideo || 'fal-ai/veo3.1/reference-to-video',
+        input: {
+          ...base,
+          duration: '8s',
+          aspect_ratio: mappedAspect === 'auto' ? '16:9' : mappedAspect,
+          image_urls: refImgs,
+        },
+        resolvedResolution: veoRes,
+        clampedDuration: 8,
+      };
+    }
+
+    if (params.workflowMode === 'video_extend') {
+      const vidCandidate = params.sourceVideoUrl || params.referenceVideos?.[0];
+      const videoUrl = await uploadMediaRefToFal(params.projectId, vidCandidate);
+      if (!videoUrl) {
+        throw new Error('Google Veo 3.1 Extend Video requires a source video clip.');
+      }
+      return {
+        endpointId: model.endpoints.extendVideo || 'fal-ai/veo3.1/fast/extend-video',
+        input: {
+          ...base,
+          resolution: apiRes,
+          video_url: videoUrl,
+        },
+        resolvedResolution: veoRes,
+        clampedDuration: veoDur,
+      };
+    }
+
+    return {
+      endpointId: model.endpoints.textToVideo,
+      input: {
+        ...base,
+        aspect_ratio: mappedAspect === 'auto' ? '16:9' : mappedAspect,
+      },
+      resolvedResolution: veoRes,
+      clampedDuration: veoDur,
+    };
+  }
+
+  // 6. Google Gemini Omni Flash (T2V / Reference-to-Video / V2V Edit via Fal.ai)
+  if (model.family === 'gemini-omni') {
+    const omniRes: StudioResolution =
+      resolvedResolution === '1080p' ? '1080p' : '720p';
+    const omniDur = [4, 6, 8].reduce(
+      (best, cand) =>
+        Math.abs(cand - clampedDuration) < Math.abs(best - clampedDuration) ? cand : best,
+      6
+    );
+    const mappedAspect =
+      params.aspectRatio === '9:16' ||
+      params.aspectRatio === '1:1' ||
+      params.aspectRatio === 'auto'
+        ? params.aspectRatio
+        : '16:9';
+
+    const base: Record<string, unknown> = {
+      prompt: params.prompt.trim(),
+      aspect_ratio: mappedAspect,
+      duration: `${omniDur}s`,
+      resolution: omniRes,
+      generate_audio: params.nativeAudio,
+      seed: params.seed,
+      ...(trimmedNeg ? { negative_prompt: trimmedNeg } : {}),
+    };
+
+    if (params.workflowMode === 'video_edit' || params.workflowMode === 'video_extend') {
+      const vidCandidate = params.sourceVideoUrl || params.referenceVideos?.[0];
+      const videoUrl = await uploadMediaRefToFal(params.projectId, vidCandidate);
+      if (!videoUrl) {
+        throw new Error(
+          'Google Gemini Omni Flash Video-to-Video Edit requires a source video clip.'
+        );
+      }
+      return {
+        endpointId: model.endpoints.videoEdit || 'google/gemini-omni-flash/edit',
+        input: {
+          ...base,
+          video_url: videoUrl,
+        },
+        resolvedResolution: omniRes,
+        clampedDuration: omniDur,
+      };
+    }
+
+    if (
+      params.workflowMode === 'reference_to_video' ||
+      params.workflowMode === 'image_to_video'
+    ) {
+      const rawRefs =
+        params.referenceImages && params.referenceImages.length > 0
+          ? params.referenceImages
+          : params.startFrameUrl
+            ? [params.startFrameUrl]
+            : [];
+      const refImgs = (
+        await Promise.all(
+          rawRefs.slice(0, Math.max(1, model.maxReferenceImages)).map((r) =>
+            uploadMediaRefToFal(params.projectId, r)
+          )
+        )
+      ).filter((u): u is string => Boolean(u));
+      const vidCandidate = params.sourceVideoUrl || params.referenceVideos?.[0];
+      const videoUrl = await uploadMediaRefToFal(params.projectId, vidCandidate);
+
+      if (refImgs.length === 0 && !videoUrl) {
+        throw new Error(
+          'Google Gemini Omni Flash Reference-to-Video requires at least one reference image or video.'
+        );
+      }
+
+      const input: Record<string, unknown> = { ...base };
+      if (refImgs.length > 0) input.image_urls = refImgs;
+      if (videoUrl) input.video_url = videoUrl;
+
+      return {
+        endpointId:
+          model.endpoints.referenceToVideo || 'google/gemini-omni-flash/reference-to-video',
+        input,
+        resolvedResolution: omniRes,
+        clampedDuration: omniDur,
+      };
+    }
+
+    return {
+      endpointId: model.endpoints.textToVideo || 'google/gemini-omni-flash',
+      input: base,
+      resolvedResolution: omniRes,
+      clampedDuration: omniDur,
+    };
+  }
+
+  // 7. Seedance (2.5 or 2.0 Fast) — preserved intact
   const is25 = params.modelId === 'seedance-2.5';
   const referenceEndpoint = model.endpoints.referenceToVideo as string;
   const mappedAspect = params.aspectRatio === '2:1' ? '16:9' : params.aspectRatio;

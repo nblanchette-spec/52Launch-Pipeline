@@ -43,8 +43,9 @@ import {
   logoutGoogleDrive,
   signInWithGoogleDrive,
 } from '../../utils/googleDriveSync';
+import { openGooglePicker } from '../../utils/googlePicker';
 
-export type DriveMediaFilter = 'image' | 'video' | 'audio' | 'image_video' | 'all';
+export type DriveMediaFilter = 'image' | 'video' | 'audio' | 'image_video' | 'pdf_and_docs' | 'all';
 export type DriveExplorerTab = 'my_drive' | 'shared_drives' | 'shared_with_me' | 'search' | 'direct_link';
 export type DrivePickerMode = 'pick_assets' | 'select_destination_folder' | 'select_source_folder';
 
@@ -67,7 +68,7 @@ interface DriveAssetPickerModalProps {
   onSelectFolder?: (folder: { id: string; name: string; url: string }) => void | Promise<void>;
 }
 
-function classifyDriveItem(item: { mimeType?: string; name?: string }): 'folder' | 'image' | 'video' | 'audio' | 'other' {
+function classifyDriveItem(item: { mimeType?: string; name?: string }): 'folder' | 'image' | 'video' | 'audio' | 'pdf_doc' | 'other' {
   const mime = (item.mimeType || '').toLowerCase();
   const name = (item.name || '').toLowerCase();
   if (mime === 'application/vnd.google-apps.folder') return 'folder';
@@ -83,6 +84,17 @@ function classifyDriveItem(item: { mimeType?: string; name?: string }): 'folder'
   }
   if (mime.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|aac|flac)$/i.test(name)) {
     return 'audio';
+  }
+  if (
+    mime === 'application/pdf' ||
+    mime === 'application/vnd.google-apps.document' ||
+    mime === 'application/vnd.google-apps.presentation' ||
+    mime === 'application/vnd.google-apps.spreadsheet' ||
+    mime.includes('wordprocessingml') ||
+    mime.includes('presentationml') ||
+    /\.(pdf|docx?|pptx?|txt|md|rtf)$/i.test(name)
+  ) {
+    return 'pdf_doc';
   }
   return 'other';
 }
@@ -146,6 +158,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
   const [failedThumbs, setFailedThumbs] = useState<Record<string, boolean>>({});
   const [isImporting, setIsImporting] = useState(false);
+  const [isOpeningPicker, setIsOpeningPicker] = useState(false);
 
   // Status & error messages
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -349,6 +362,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
       if (activeFilter === 'video' && kind !== 'video') return false;
       if (activeFilter === 'audio' && kind !== 'audio') return false;
       if (activeFilter === 'image_video' && kind !== 'image' && kind !== 'video') return false;
+      if (activeFilter === 'pdf_and_docs' && kind !== 'pdf_doc' && kind !== 'image') return false;
       return true;
     });
   }, [explorerItems, activeFilter]);
@@ -435,6 +449,72 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
     }
   };
 
+  const handleOpenGooglePicker = async () => {
+    setErrorMsg(null);
+    setIsOpeningPicker(true);
+    try {
+      let token = driveToken;
+      if (!token) {
+        const res = await signInWithGoogleDrive(false);
+        token = res.accessToken;
+        setDriveToken(token);
+        setDriveUserEmail(res.user.email || null);
+      }
+
+      const isFolderMode =
+        pickerMode === 'select_destination_folder' ||
+        pickerMode === 'select_source_folder';
+
+      const picked = await openGooglePicker({
+        accessToken: token,
+        mode: isFolderMode ? 'folders' : 'files',
+        mediaFilter: activeFilter,
+        multiSelect: isFolderMode ? false : multiple,
+        title: modalTitle,
+      });
+
+      if (!picked || picked.length === 0) return;
+
+      if (pickerMode === 'select_destination_folder') {
+        await handleConfirmDestinationFolder({
+          id: picked[0].id,
+          name: picked[0].name,
+        });
+        return;
+      }
+
+      if (pickerMode === 'select_source_folder') {
+        await handleConfirmSourceFolder({
+          id: picked[0].id,
+          name: picked[0].name,
+        });
+        return;
+      }
+
+      setIsImporting(true);
+      const result = await importDriveFilesToProject({
+        projectId,
+        files: picked,
+        prefix,
+        uploadToFal,
+        accessToken: token,
+      });
+      if (onImported) {
+        await onImported(result.assets);
+      }
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not open Google Picker.';
+      setErrorMsg(msg);
+      if (msg.toLowerCase().includes('expired') || msg.toLowerCase().includes('sign in')) {
+        setDriveToken(null);
+      }
+    } finally {
+      setIsOpeningPicker(false);
+      setIsImporting(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const modalTitle =
@@ -479,6 +559,21 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={isOpeningPicker || isImporting || isConnecting}
+              onClick={() => void handleOpenGooglePicker()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 brand-corner-sm cursor-pointer shadow-sm transition-colors"
+              title="Open official Google Picker"
+            >
+              {isOpeningPicker ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <HardDrive className="w-3.5 h-3.5" />
+              )}
+              <span>{isOpeningPicker ? 'Opening Picker...' : 'Google Picker'}</span>
+            </button>
+
             {!driveToken ? (
               <button
                 type="button"
@@ -678,7 +773,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
 
               {pickerMode === 'pick_assets' && (
                 <div className="flex items-center gap-1 bg-[#F6F6F7] p-0.5 rounded border border-[#E2E2E6]">
-                  {(['all', 'image', 'video', 'audio'] as DriveMediaFilter[]).map((m) => (
+                  {(['all', 'image', 'video', 'audio', 'pdf_and_docs'] as DriveMediaFilter[]).map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -689,7 +784,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                           : 'text-[#5A5A66] hover:text-[#111114]'
                       }`}
                     >
-                      {m}
+                      {m === 'pdf_and_docs' ? 'PDF & Docs' : m}
                     </button>
                   ))}
                 </div>
@@ -768,19 +863,34 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
               <p className="text-xs text-[#5A5A66] max-w-md mx-auto leading-relaxed">
                 Browse My Drive, Shared Drives, and team files directly inside this studio. Pick product photos, select save destination folders, or lock key reference docs.
               </p>
-              <button
-                type="button"
-                disabled={isConnecting}
-                onClick={() => void handleConnect()}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-[#1F1F1F] bg-white hover:bg-[#F2F2F5] border border-[#D8D8DF] brand-corner-sm cursor-pointer shadow-xs"
-              >
-                {isConnecting ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#4A4A55]" />
-                ) : (
-                  <FolderSync className="w-4 h-4 text-[#C6202F]" />
-                )}
-                {isConnecting ? 'Signing in...' : 'Sign in with Google'}
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  disabled={isConnecting}
+                  onClick={() => void handleConnect()}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-[#1F1F1F] bg-white hover:bg-[#F2F2F5] border border-[#D8D8DF] brand-corner-sm cursor-pointer shadow-xs"
+                >
+                  {isConnecting ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-[#4A4A55]" />
+                  ) : (
+                    <FolderSync className="w-4 h-4 text-[#C6202F]" />
+                  )}
+                  {isConnecting ? 'Signing in...' : 'Sign in with Google'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isOpeningPicker || isConnecting}
+                  onClick={() => void handleOpenGooglePicker()}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 brand-corner-sm cursor-pointer shadow-xs"
+                >
+                  {isOpeningPicker ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <HardDrive className="w-4 h-4" />
+                  )}
+                  {isOpeningPicker ? 'Opening Picker...' : 'Open Google Picker'}
+                </button>
+              </div>
             </div>
           ) : isLoadingItems ? (
             <div className="py-20 flex flex-col items-center justify-center gap-2.5 text-xs text-[#5A5A66]">
@@ -988,7 +1098,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                       )}
 
                       <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 text-[9px] font-mono uppercase text-white">
-                        {kind}
+                        {kind === 'pdf_doc' ? 'PDF / Doc' : kind}
                       </span>
 
                       {item.webViewLink && (
@@ -1010,7 +1120,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                         {item.name}
                       </div>
                       <div className="flex items-center justify-between text-[10px] text-[#6E6E7A] gap-1">
-                        <span className="truncate">{kind.toUpperCase()}</span>
+                        <span className="truncate">{kind === 'pdf_doc' ? 'PDF / DOC' : kind.toUpperCase()}</span>
                         {sizeText && <span className="font-mono shrink-0">{sizeText}</span>}
                       </div>
                     </div>

@@ -11,6 +11,9 @@ import {
   FolderSync,
   Image as ImageIcon,
   Type as TypeIcon,
+  FileText,
+  Palette,
+  ExternalLink,
 } from 'lucide-react';
 import { BrandBible, PipelineProject, ProductPhoto } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
@@ -289,6 +292,141 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
       {errorMsg && (
         <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
+        </div>
+      )}
+
+      {((project.brandGuideDocuments && project.brandGuideDocuments.length > 0) ||
+        project.extractedStyleGuide) && (
+        <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Palette className="w-4 h-4 text-[#C6202F]" />
+              <h2 className="text-sm font-semibold text-[#111114]">
+                Extracted PDF Brand &amp; Style Guide Reference
+              </h2>
+              {project.brandGuideDocuments && project.brandGuideDocuments.length > 0 && (
+                <span className="px-2 py-0.5 rounded bg-[#FDF4F5] border border-[#EABAC0] text-[10px] font-mono text-[#891A23]">
+                  {project.brandGuideDocuments.length} PDF
+                  {project.brandGuideDocuments.length > 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+
+            {project.extractedStyleGuide && (
+              <button
+                type="button"
+                onClick={() => {
+                  const sg = project.extractedStyleGuide!;
+                  const paletteText = [
+                    sg.palette,
+                    sg.paletteHexes.length > 0 ? `Hexes: ${sg.paletteHexes.join(', ')}` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' — ');
+                  updateBible({
+                    visualStyle: {
+                      ...bible.visualStyle,
+                      palette: paletteText || bible.visualStyle.palette,
+                      typography: sg.typography || bible.visualStyle.typography,
+                      lighting: sg.lighting || bible.visualStyle.lighting,
+                      lensAndFraming: sg.lensAndFraming || bible.visualStyle.lensAndFraming,
+                      grade: sg.grade || bible.visualStyle.grade,
+                    },
+                    productRules: sg.productVisualRules || bible.productRules,
+                    bannedList:
+                      sg.bannedElements.length > 0
+                        ? Array.from(new Set([...bible.bannedList, ...sg.bannedElements]))
+                        : bible.bannedList,
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Apply Style Guide Rules to Brand Bible
+              </button>
+            )}
+          </div>
+
+          {project.brandGuideDocuments && project.brandGuideDocuments.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {project.brandGuideDocuments.map((doc) => (
+                <a
+                  key={doc.id}
+                  href={doc.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] text-xs text-[#111114]"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#C6202F]" />
+                  <span className="font-medium truncate max-w-[220px]">{doc.name}</span>
+                  {typeof doc.graphicCount === 'number' && doc.graphicCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded bg-white border border-[#E2E2E6] text-[10px] font-mono text-[#5A5A66]">
+                      {doc.graphicCount} graphic{doc.graphicCount === 1 ? '' : 's'}
+                    </span>
+                  )}
+                  <ExternalLink className="w-3 h-3 text-[#6E6E7A]" />
+                </a>
+              ))}
+            </div>
+          )}
+
+          {project.extractedStyleGuide && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-[#FBFBFC] border border-[#E2E2E6] rounded-lg p-3.5">
+              {project.extractedStyleGuide.summary && (
+                <div className="md:col-span-2 text-[#24242B]">
+                  <span className="font-semibold text-[#111114]">Guide Summary: </span>
+                  {project.extractedStyleGuide.summary}
+                </div>
+              )}
+              {project.extractedStyleGuide.paletteHexes.length > 0 && (
+                <div className="md:col-span-2 flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-[#3A3A44]">Swatches:</span>
+                  {project.extractedStyleGuide.paletteHexes.map((hex) => (
+                    <span
+                      key={hex}
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white border border-[#E2E2E6] text-[10px] font-mono text-[#24242B]"
+                    >
+                      <span
+                        className="w-3 h-3 rounded-sm border border-black/15 shrink-0"
+                        style={{ backgroundColor: hex }}
+                      />
+                      {hex}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {project.extractedStyleGuide.typography && (
+                <div>
+                  <span className="font-semibold text-[#3A3A44]">Typography: </span>
+                  <span className="text-[#5A5A66]">{project.extractedStyleGuide.typography}</span>
+                </div>
+              )}
+              {project.extractedStyleGuide.lighting && (
+                <div>
+                  <span className="font-semibold text-[#3A3A44]">Lighting: </span>
+                  <span className="text-[#5A5A66]">{project.extractedStyleGuide.lighting}</span>
+                </div>
+              )}
+              {project.extractedStyleGuide.lensAndFraming && (
+                <div>
+                  <span className="font-semibold text-[#3A3A44]">Lens &amp; Framing: </span>
+                  <span className="text-[#5A5A66]">{project.extractedStyleGuide.lensAndFraming}</span>
+                </div>
+              )}
+              {project.extractedStyleGuide.brandLogoNotes && (
+                <div>
+                  <span className="font-semibold text-[#3A3A44]">Logo Rules: </span>
+                  <span className="text-[#5A5A66]">{project.extractedStyleGuide.brandLogoNotes}</span>
+                </div>
+              )}
+              {project.extractedStyleGuide.productVisualRules && (
+                <div className="md:col-span-2">
+                  <span className="font-semibold text-[#3A3A44]">Product Visual Rules: </span>
+                  <span className="text-[#5A5A66]">{project.extractedStyleGuide.productVisualRules}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
