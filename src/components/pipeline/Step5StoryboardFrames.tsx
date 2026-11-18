@@ -8,9 +8,12 @@ import {
   Package,
   CheckCircle2,
   AlertCircle,
+  FolderSync,
 } from 'lucide-react';
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
+import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step5StoryboardFramesProps {
   project: PipelineProject;
@@ -26,6 +29,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
   onApproveAndGoToVideo,
 }) => {
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  const [drivePickerShotId, setDrivePickerShotId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -94,15 +98,15 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
   return (
     <div className="max-w-[1280px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 5 · Storyboard Frames (Google Flow & Crew References)
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             Copy Prompts into Google Flow & Upload Frames
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Copy each frame prompt into Google Flow, then click the image area on the card to
             upload your frame. Live-shoot shots can also hold a reference frame for the crew.
           </p>
@@ -112,7 +116,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           <button
             type="button"
             onClick={onGoToFrameSuggestions}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Optional AI frame suggestions
           </button>
@@ -120,7 +124,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           <button
             type="button"
             onClick={() => void onApproveAndGoToVideo()}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Approve frames & continue to Video
             <ArrowRight className="w-4 h-4" />
@@ -129,9 +133,9 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
       </div>
 
       {/* Upload Readiness Summary */}
-      <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-400 font-mono tabular-nums">
+      <div className="flex flex-wrap items-center gap-4 text-xs text-[#5A5A66] font-mono tabular-nums">
         <span>
-          Total frames uploaded: <span className="text-zinc-100">{totalUploadedCount}/{project.shots.length}</span>
+          Total frames uploaded: <span className="text-[#111114]">{totalUploadedCount}/{project.shots.length}</span>
         </span>
         <span aria-hidden="true">·</span>
         <span>
@@ -139,8 +143,8 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           <span
             className={
               uploadedAiHybridCount === aiHybridShots.length
-                ? 'text-emerald-400'
-                : 'text-amber-300'
+                ? 'text-emerald-700'
+                : 'text-[#891A23]'
             }
           >
             {uploadedAiHybridCount}/{aiHybridShots.length}
@@ -149,7 +153,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
       </div>
 
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
@@ -168,21 +172,21 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           return (
             <div
               key={shot.id}
-              className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden flex flex-col"
+              className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden flex flex-col"
             >
               {/* Card Header */}
-              <div className="px-4 py-3 bg-[#101318] border-b border-[#262B36] flex items-center justify-between gap-2 text-xs">
+              <div className="px-4 py-3 bg-[#FBFBFC] border-b border-[#E2E2E6] flex items-center justify-between gap-2 text-xs">
                 <div className="flex items-center gap-2.5">
-                  <span className="font-mono font-bold text-amber-400">{shot.id}</span>
-                  <span className="text-zinc-300 font-medium">{routeLabel}</span>
-                  <span className="text-zinc-600">·</span>
-                  <span className="font-mono text-zinc-400 tabular-nums">
+                  <span className="font-mono font-bold text-[#C6202F]">{shot.id}</span>
+                  <span className="text-[#3A3A44] font-medium">{routeLabel}</span>
+                  <span className="text-[#8A8A96]">·</span>
+                  <span className="font-mono text-[#5A5A66] tabular-nums">
                     {shot.durationSec}s
                   </span>
                   {shot.productInFrame && (
                     <>
-                      <span className="text-zinc-600">·</span>
-                      <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
+                      <span className="text-[#8A8A96]">·</span>
+                      <span className="inline-flex items-center gap-1 text-[#891A23] font-medium">
                         <Package className="w-3.5 h-3.5" />
                         Product in frame
                       </span>
@@ -192,25 +196,25 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
 
                 <div className="flex items-center gap-1.5">
                   {shot.frameCheck?.passed ? (
-                    <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                    <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       Passed
                     </span>
                   ) : shot.frameCheck && !shot.frameCheck.passed ? (
-                    <span className="inline-flex items-center gap-1 text-rose-400 font-medium">
+                    <span className="inline-flex items-center gap-1 text-[#C6202F] font-medium">
                       <AlertCircle className="w-3.5 h-3.5" />
                       Needs Fix
                     </span>
                   ) : shot.frameImageUrl ? (
-                    <span className="text-zinc-300">Uploaded</span>
+                    <span className="text-[#3A3A44]">Uploaded</span>
                   ) : (
-                    <span className="text-zinc-500">Waiting for frame</span>
+                    <span className="text-[#6E6E7A]">Waiting for frame</span>
                   )}
                 </div>
               </div>
 
               {/* Click-to-upload Frame Area */}
-              <label className="block aspect-video bg-[#0B0D10] border-b border-[#262B36] relative flex items-center justify-center cursor-pointer hover:bg-[#0E1217] transition-colors overflow-hidden">
+              <label className="block aspect-video bg-[#F6F6F7] border-b border-[#E2E2E6] relative flex items-center justify-center cursor-pointer hover:bg-[#0E1217] transition-colors overflow-hidden">
                 {shot.frameImageUrl ? (
                   <>
                     <img
@@ -224,20 +228,20 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                     </div>
                   </>
                 ) : (
-                  <div className="text-center p-6 space-y-2 text-zinc-500">
+                  <div className="text-center p-6 space-y-2 text-[#6E6E7A]">
                     {isUploading ? (
-                      <Loader2 className="w-6 h-6 animate-spin text-amber-400 mx-auto" />
+                      <Loader2 className="w-6 h-6 animate-spin text-[#C6202F] mx-auto" />
                     ) : (
-                      <Upload className="w-6 h-6 mx-auto text-zinc-400" />
+                      <Upload className="w-6 h-6 mx-auto text-[#5A5A66]" />
                     )}
-                    <div className="text-xs font-semibold text-zinc-200">
+                    <div className="text-xs font-semibold text-[#24242B]">
                       {isUploading
                         ? 'Saving frame...'
                         : shot.route === 'live'
                           ? 'Click to upload crew reference frame (optional)'
                           : 'Click to upload frame from Google Flow'}
                     </div>
-                    <div className="text-[11px] text-zinc-500">
+                    <div className="text-[11px] text-[#6E6E7A]">
                       No file naming needed — click anywhere in this box
                     </div>
                   </div>
@@ -254,22 +258,34 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                 />
               </label>
 
+              <div className="px-4 py-2 bg-[#FBFBFC] border-b border-[#E2E2E6] flex items-center justify-between text-[11px]">
+                <span className="text-[#6E6E7A]">Frame source</span>
+                <button
+                  type="button"
+                  onClick={() => setDrivePickerShotId(shot.id)}
+                  className="inline-flex items-center gap-1.5 text-[#891A23] hover:text-[#891A23] font-medium cursor-pointer"
+                >
+                  <FolderSync className="w-3.5 h-3.5" />
+                  Pick frame from Google Drive
+                </button>
+              </div>
+
               {/* Scene & Copyable Frame Prompt */}
               <div className="p-4 space-y-3 flex-1 flex flex-col justify-between">
-                <div className="text-xs text-zinc-300 leading-relaxed">
-                  <span className="text-zinc-500 font-medium">Scene: </span>
+                <div className="text-xs text-[#3A3A44] leading-relaxed">
+                  <span className="text-[#6E6E7A] font-medium">Scene: </span>
                   {shot.scene}
                 </div>
 
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-zinc-400">
+                    <span className="text-xs font-medium text-[#5A5A66]">
                       Frame prompt
                     </span>
                     <button
                       type="button"
                       onClick={() => void handleCopyPrompt(shot.id, shot.framePrompt)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 rounded-md transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-md transition-colors cursor-pointer"
                     >
                       {copiedId === shot.id ? (
                         <>
@@ -289,7 +305,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                     rows={3}
                     value={shot.framePrompt}
                     onChange={(e) => updateShot(shot.id, { framePrompt: e.target.value })}
-                    className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500 leading-relaxed"
+                    className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F] leading-relaxed"
                   />
                 </div>
               </div>
@@ -297,6 +313,45 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           );
         })}
       </div>
+
+      <DriveAssetPickerModal
+        isOpen={Boolean(drivePickerShotId)}
+        projectId={project.id}
+        initialFolderUrls={
+          project.googleDriveFolderUrls?.length
+            ? project.googleDriveFolderUrls
+            : project.googleDriveFolderUrl
+              ? [project.googleDriveFolderUrl]
+              : []
+        }
+        mediaFilter="image"
+        multiple={false}
+        prefix="frame"
+        title={
+          drivePickerShotId
+            ? `Pick Storyboard Frame for ${drivePickerShotId} from Google Drive`
+            : 'Pick Storyboard Frame from Google Drive'
+        }
+        onClose={() => setDrivePickerShotId(null)}
+        onImported={(assets: ImportedDriveAsset[]) => {
+          const picked = assets[0];
+          if (picked?.url && drivePickerShotId) {
+            updateShot(drivePickerShotId, {
+              frameImageUrl: picked.url,
+              status: 'Frame Uploaded',
+              frameCheck: null,
+              productFrameApproved: false,
+            });
+          }
+        }}
+        onFoldersChange={(urls) => {
+          void onUpdateProject({
+            ...project,
+            googleDriveFolderUrls: urls,
+            googleDriveFolderUrl: urls[0] || undefined,
+          });
+        }}
+      />
     </div>
   );
 };

@@ -64,15 +64,15 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
   return (
     <div className="max-w-[1180px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 3 · Creative Brief
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             Creative Objective, Concepts & Voiceover Direction
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Grounded in the approved Brand Bible and client ideas. Review or edit concepts,
             then approve to unlock the Shot List.
           </p>
@@ -83,12 +83,12 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
             type="button"
             disabled={isGenerating}
             onClick={() => void triggerGenerate(false)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isGenerating ? (
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-400" />
+              <Sparkles className="w-4 h-4 text-[#C6202F]" />
             )}
             {isGenerating
               ? 'Generating Brief...'
@@ -101,7 +101,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
             <button
               type="button"
               onClick={onGoToShotBoard}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] hover:bg-[#166534] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               Brief Approved · Open Shot List
@@ -112,7 +112,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
               type="button"
               disabled={!brief.objective.trim()}
               onClick={() => void onApproveBrief()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               Approve brief
@@ -122,8 +122,8 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
       </div>
 
       {confirmOverwrite && (
-        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="text-xs text-amber-200">
+        <div className="p-4 rounded-xl bg-[#FDF4F5] border border-[#EABAC0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-xs text-[#891A23]">
             You have made manual edits to this Creative Brief. Re-running Gemini will replace
             your current text. Continue?
           </div>
@@ -131,14 +131,14 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
             <button
               type="button"
               onClick={() => setConfirmOverwrite(false)}
-              className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] rounded-lg cursor-pointer"
             >
               Keep my edits
             </button>
             <button
               type="button"
               onClick={() => void triggerGenerate(true)}
-              className="px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
             >
               Replace & re-run
             </button>
@@ -147,18 +147,18 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
       )}
 
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
 
       {!brief.hasGenerated && !brief.objective ? (
-        <div className="bg-[#14171D] border border-dashed border-[#262B36] rounded-xl p-12 text-center space-y-3">
-          <Sparkles className="w-8 h-8 text-amber-400 mx-auto" />
-          <div className="text-base font-semibold text-zinc-100">
+        <div className="bg-white border border-dashed border-[#E2E2E6] rounded-xl p-12 text-center space-y-3">
+          <Sparkles className="w-8 h-8 text-[#C6202F] mx-auto" />
+          <div className="text-base font-semibold text-[#111114]">
             Ready to write the Creative Brief
           </div>
-          <p className="text-xs text-zinc-400 max-w-md mx-auto">
+          <p className="text-xs text-[#5A5A66] max-w-md mx-auto">
             Click &ldquo;Generate Creative Brief&rdquo; to craft tailored concepts building on
             your client’s ideas and allowed claims.
           </p>
@@ -167,27 +167,27 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
         <div className="space-y-6">
           {/* Objective & Key Message */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-2">
-              <label className="block text-xs font-semibold text-zinc-300">
+            <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-2">
+              <label className="block text-xs font-semibold text-[#3A3A44]">
                 Objective (one sentence)
               </label>
               <textarea
                 rows={3}
                 value={brief.objective}
                 onChange={(e) => updateBrief({ objective: e.target.value })}
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3.5 py-2.5 text-sm text-zinc-100 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3.5 py-2.5 text-sm text-[#111114] focus:outline-none focus:border-[#C6202F]"
               />
             </div>
 
-            <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-2">
-              <label className="block text-xs font-semibold text-zinc-300">
+            <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-2">
+              <label className="block text-xs font-semibold text-[#3A3A44]">
                 Key Message (one sentence)
               </label>
               <textarea
                 rows={3}
                 value={brief.keyMessage}
                 onChange={(e) => updateBrief({ keyMessage: e.target.value })}
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3.5 py-2.5 text-sm text-zinc-100 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3.5 py-2.5 text-sm text-[#111114] focus:outline-none focus:border-[#C6202F]"
               />
             </div>
           </div>
@@ -195,7 +195,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
           {/* Concepts */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-zinc-100">
+              <h2 className="text-sm font-semibold text-[#111114]">
                 Creative Concepts (building on client’s marketing ideas)
               </h2>
               <button
@@ -214,7 +214,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                     ],
                   })
                 }
-                className="inline-flex items-center gap-1 text-xs font-medium text-amber-400 hover:text-amber-300 cursor-pointer"
+                className="inline-flex items-center gap-1 text-xs font-medium text-[#C6202F] hover:text-[#891A23] cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 Add concept
@@ -229,8 +229,8 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                 return (
                   <div
                     key={concept.id}
-                    className={`bg-[#14171D] border rounded-xl p-5 space-y-3 flex flex-col justify-between ${
-                      isRecommended ? 'border-amber-500/60' : 'border-[#262B36]'
+                    className={`bg-white border rounded-xl p-5 space-y-3 flex flex-col justify-between ${
+                      isRecommended ? 'border-[#C6202F]/60' : 'border-[#E2E2E6]'
                     }`}
                   >
                     <div className="space-y-3">
@@ -245,7 +245,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                               ),
                             })
                           }
-                          className="bg-transparent text-base font-semibold text-zinc-100 focus:outline-none border-b border-transparent focus:border-amber-500 w-full"
+                          className="bg-transparent text-base font-semibold text-[#111114] focus:outline-none border-b border-transparent focus:border-[#C6202F] w-full"
                         />
                         <button
                           type="button"
@@ -254,14 +254,14 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                               concepts: brief.concepts.filter((c) => c.id !== concept.id),
                             })
                           }
-                          className="p-1 text-zinc-500 hover:text-rose-400 cursor-pointer shrink-0"
+                          className="p-1 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer shrink-0"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
 
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">
+                        <label className="block text-[11px] text-[#5A5A66] mb-1">
                           Logline
                         </label>
                         <textarea
@@ -274,12 +274,12 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                               ),
                             })
                           }
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">
+                        <label className="block text-[11px] text-[#5A5A66] mb-1">
                           Why it works
                         </label>
                         <textarea
@@ -294,12 +294,12 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                               ),
                             })
                           }
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">
+                        <label className="block text-[11px] text-[#5A5A66] mb-1">
                           Risks
                         </label>
                         <textarea
@@ -312,7 +312,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                               ),
                             })
                           }
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#3A3A44] focus:outline-none focus:border-[#C6202F]"
                         />
                       </div>
                     </div>
@@ -329,8 +329,8 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                       }
                       className={`w-full py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer ${
                         isRecommended
-                          ? 'bg-amber-500/15 border-amber-500 text-amber-300'
-                          : 'bg-[#0B0D10] border-[#262B36] text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#5A5A66] hover:text-[#24242B]'
                       }`}
                     >
                       {isRecommended ? 'Recommended Concept' : 'Set as Recommended'}
@@ -343,8 +343,8 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
 
           {/* Recommended Concept, Deliverables, VO Direction, Claims Check */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
-              <h2 className="text-sm font-semibold text-zinc-100">
+            <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
+              <h2 className="text-sm font-semibold text-[#111114]">
                 Recommended Concept & Reason
               </h2>
               <input
@@ -359,7 +359,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                   })
                 }
                 placeholder="Recommended concept title"
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-sm font-medium text-amber-300 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-sm font-medium text-[#891A23] focus:outline-none focus:border-[#C6202F]"
               />
               <textarea
                 rows={3}
@@ -373,16 +373,16 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                   })
                 }
                 placeholder="Why this direction wins..."
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
               />
             </div>
 
-            <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
-              <h2 className="text-sm font-semibold text-zinc-100">
+            <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
+              <h2 className="text-sm font-semibold text-[#111114]">
                 Deliverables & Claims Check
               </h2>
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">
+                <label className="block text-xs text-[#5A5A66] mb-1">
                   Deliverables (one per line)
                 </label>
                 <textarea
@@ -396,26 +396,26 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                         .filter(Boolean),
                     })
                   }
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                 />
               </div>
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">Claims check</label>
+                <label className="block text-xs text-[#5A5A66] mb-1">Claims check</label>
                 <textarea
                   rows={2}
                   value={brief.claimsCheck}
                   onChange={(e) => updateBrief({ claimsCheck: e.target.value })}
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-emerald-200 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-emerald-900 focus:outline-none focus:border-[#C6202F]"
                 />
               </div>
             </div>
           </div>
 
-          <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
-            <h2 className="text-sm font-semibold text-zinc-100">Voiceover Direction</h2>
+          <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
+            <h2 className="text-sm font-semibold text-[#111114]">Voiceover Direction</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">Who is speaking</label>
+                <label className="block text-xs text-[#5A5A66] mb-1">Who is speaking</label>
                 <input
                   type="text"
                   value={brief.voDirection.speaker}
@@ -424,11 +424,11 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                       voDirection: { ...brief.voDirection, speaker: e.target.value },
                     })
                   }
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                 />
               </div>
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">Pace</label>
+                <label className="block text-xs text-[#5A5A66] mb-1">Pace</label>
                 <input
                   type="text"
                   value={brief.voDirection.pace}
@@ -437,11 +437,11 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                       voDirection: { ...brief.voDirection, pace: e.target.value },
                     })
                   }
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                 />
               </div>
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">Emotional arc</label>
+                <label className="block text-xs text-[#5A5A66] mb-1">Emotional arc</label>
                 <input
                   type="text"
                   value={brief.voDirection.emotionalArc}
@@ -450,7 +450,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                       voDirection: { ...brief.voDirection, emotionalArc: e.target.value },
                     })
                   }
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                 />
               </div>
             </div>

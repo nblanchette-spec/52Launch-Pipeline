@@ -9,9 +9,12 @@ import {
   Package,
   ArrowRight,
   Sparkles,
+  FolderSync,
 } from 'lucide-react';
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
+import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step6FrameCheckProps {
   project: PipelineProject;
@@ -31,6 +34,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
   const [checkingShotId, setCheckingShotId] = useState<string | null>(null);
   const [isCheckingAll, setIsCheckingAll] = useState(false);
   const [uploadingShotId, setUploadingShotId] = useState<string | null>(null);
+  const [drivePickerShotId, setDrivePickerShotId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -155,15 +159,15 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
   return (
     <div className="max-w-[1320px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 6 · Optional AI Frame Suggestions
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             AI Frame Review & Suggestions (Optional)
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Need a second set of eyes? Gemini can review uploaded frames against your Brand
             Bible and product photos and suggest prompt tweaks — or skip straight to Video
             anytime.
@@ -175,12 +179,12 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
             type="button"
             disabled={isCheckingAll || Boolean(checkingShotId)}
             onClick={() => void handleCheckAllUploaded()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isCheckingAll ? (
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-400" />
+              <Sparkles className="w-4 h-4 text-[#C6202F]" />
             )}
             {isCheckingAll ? `Reviewing ${checkingShotId}...` : 'Get AI suggestions for all'}
           </button>
@@ -189,7 +193,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
             <button
               type="button"
               onClick={onGoToVideoStep}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] hover:bg-[#166534] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               Continue to Video Step
@@ -199,7 +203,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
             <button
               type="button"
               onClick={() => void onApproveStoryboard()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <ArrowRight className="w-4 h-4" />
               Bypass & continue to Video
@@ -209,25 +213,25 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
       </div>
 
       {/* Advisory Info Strip */}
-      <div className="p-3.5 rounded-xl border border-[#262B36] bg-[#14171D] text-xs text-zinc-300 flex flex-wrap items-center justify-between gap-3">
+      <div className="p-3.5 rounded-xl border border-[#E2E2E6] bg-white text-xs text-[#3A3A44] flex flex-wrap items-center justify-between gap-3">
         <span>
           Suggestions here never block your workflow — continue to Video Prompts & Rendering
           whenever you are happy with your frames.
         </span>
-        <div className="text-zinc-400 font-mono tabular-nums flex items-center gap-4">
+        <div className="text-[#5A5A66] font-mono tabular-nums flex items-center gap-4">
           <span>
-            AI/hybrid frames uploaded: <strong className="text-zinc-200">{uploadedAiCount}/{aiHybridShots.length}</strong>
+            AI/hybrid frames uploaded: <strong className="text-[#24242B]">{uploadedAiCount}/{aiHybridShots.length}</strong>
           </span>
           {productShots.length > 0 && (
             <span>
-              Product frames marked ready: <strong className="text-zinc-200">{checkedProductShots.length}/{productShots.length}</strong>
+              Product frames marked ready: <strong className="text-[#24242B]">{checkedProductShots.length}/{productShots.length}</strong>
             </span>
           )}
         </div>
       </div>
 
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
@@ -242,14 +246,14 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
           return (
             <div
               key={shot.id}
-              className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden"
+              className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden"
             >
-              <div className="px-5 py-3 bg-[#101318] border-b border-[#262B36] flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="px-5 py-3 bg-[#FBFBFC] border-b border-[#E2E2E6] flex flex-wrap items-center justify-between gap-3 text-xs">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="font-mono font-bold text-amber-400 text-sm">
+                  <span className="font-mono font-bold text-[#C6202F] text-sm">
                     {shot.id}
                   </span>
-                  <span className="text-zinc-300 font-medium">
+                  <span className="text-[#3A3A44] font-medium">
                     {shot.route === 'live'
                       ? 'Live shoot'
                       : shot.route === 'hybrid'
@@ -257,7 +261,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                         : 'AI video'}
                   </span>
                   {shot.productInFrame && (
-                    <span className="inline-flex items-center gap-1 text-amber-300 font-semibold">
+                    <span className="inline-flex items-center gap-1 text-[#891A23] font-semibold">
                       <Package className="w-3.5 h-3.5" />
                       Product in frame
                     </span>
@@ -265,7 +269,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                   {fc && (
                     <span
                       className={`inline-flex items-center gap-1 font-medium ${
-                        fc.passed ? 'text-emerald-400' : 'text-amber-300'
+                        fc.passed ? 'text-emerald-700' : 'text-[#891A23]'
                       }`}
                     >
                       {fc.passed ? (
@@ -291,8 +295,8 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                       onClick={() => toggleProductApproval(shot)}
                       className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer disabled:opacity-40 ${
                         shot.productFrameApproved
-                          ? 'bg-emerald-500 text-zinc-950 border-emerald-400'
-                          : 'bg-[#0B0D10] text-zinc-300 border-[#262B36] hover:border-amber-500'
+                          ? 'bg-[#15803D] text-white border-emerald-600'
+                          : 'bg-[#F6F6F7] text-[#3A3A44] border-[#E2E2E6] hover:border-[#C6202F]'
                       }`}
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
@@ -306,12 +310,12 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                     type="button"
                     disabled={!shot.frameImageUrl || isChecking || isCheckingAll}
                     onClick={() => void handleCheckSingle(shot.id)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-100 bg-[#0B0D10] border border-[#262B36] hover:border-amber-500 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#111114] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
                   >
                     {isChecking ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
                     ) : (
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <Sparkles className="w-3.5 h-3.5 text-[#C6202F]" />
                     )}
                     {isChecking ? 'Reviewing...' : 'Get AI suggestions'}
                   </button>
@@ -321,7 +325,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
               <div className="p-5 grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6">
                 {/* Left: Uploaded Frame + Real Product Reference */}
                 <div className="space-y-3">
-                  <label className="block aspect-video bg-[#0B0D10] border border-dashed border-[#262B36] hover:border-amber-500 rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer">
+                  <label className="block aspect-video bg-[#F6F6F7] border border-dashed border-[#E2E2E6] hover:border-[#C6202F] rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer">
                     {shot.frameImageUrl ? (
                       <>
                         <img
@@ -335,13 +339,13 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                         </div>
                       </>
                     ) : (
-                      <div className="text-center p-4 text-zinc-500 space-y-1">
+                      <div className="text-center p-4 text-[#6E6E7A] space-y-1">
                         {isUploading ? (
-                          <Loader2 className="w-5 h-5 animate-spin text-amber-400 mx-auto" />
+                          <Loader2 className="w-5 h-5 animate-spin text-[#C6202F] mx-auto" />
                         ) : (
                           <Upload className="w-5 h-5 mx-auto" />
                         )}
-                        <div className="text-xs text-zinc-300">
+                        <div className="text-xs text-[#3A3A44]">
                           {shot.route === 'live'
                             ? 'No reference frame uploaded (optional for live)'
                             : 'Click to upload frame for QC'}
@@ -360,9 +364,18 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                     />
                   </label>
 
+                  <button
+                    type="button"
+                    onClick={() => setDrivePickerShotId(shot.id)}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                  >
+                    <FolderSync className="w-3.5 h-3.5" />
+                    Pick Replacement Frame from Google Drive
+                  </button>
+
                   {shot.productInFrame && project.product.photos.length > 0 && (
                     <div className="space-y-1.5">
-                      <div className="text-[11px] font-medium text-zinc-400">
+                      <div className="text-[11px] font-medium text-[#5A5A66]">
                         Comparing against real product photos:
                       </div>
                       <div className="flex items-center gap-2 overflow-x-auto pb-1">
@@ -372,7 +385,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                             src={photo.url}
                             alt={photo.caption || 'Real product'}
                             referrerPolicy="no-referrer"
-                            className="w-16 h-16 rounded border border-[#262B36] bg-[#0B0D10] object-contain shrink-0"
+                            className="w-16 h-16 rounded border border-[#E2E2E6] bg-[#F6F6F7] object-contain shrink-0"
                           />
                         ))}
                       </div>
@@ -382,13 +395,13 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
 
                 {/* Right: Scores, Problems, Product Differences, Improved Prompt */}
                 <div className="space-y-4">
-                  <div className="text-xs text-zinc-300">
-                    <span className="text-zinc-500 font-medium">Shot description: </span>
+                  <div className="text-xs text-[#3A3A44]">
+                    <span className="text-[#6E6E7A] font-medium">Shot description: </span>
                     {shot.scene}
                   </div>
 
                   {!fc ? (
-                    <div className="p-4 rounded-lg bg-[#0B0D10] border border-[#262B36] text-xs text-zinc-400">
+                    <div className="p-4 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] text-xs text-[#5A5A66]">
                       {shot.frameImageUrl
                         ? 'Optional: click "Get AI suggestions" for notes on character match, style, composition, and product details — or skip straight to Video.'
                         : shot.route === 'live'
@@ -418,12 +431,12 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                           return (
                             <div
                               key={item.label}
-                              className="p-2.5 rounded-lg border border-[#262B36] bg-[#0B0D10]"
+                              className="p-2.5 rounded-lg border border-[#E2E2E6] bg-[#F6F6F7]"
                             >
-                              <div className="text-[11px] text-zinc-400">{item.label}</div>
+                              <div className="text-[11px] text-[#5A5A66]">{item.label}</div>
                               <div
                                 className={`text-lg font-bold font-mono tabular-nums mt-0.5 ${
-                                  ok ? 'text-emerald-400' : 'text-amber-300'
+                                  ok ? 'text-emerald-700' : 'text-[#891A23]'
                                 }`}
                               >
                                 {item.score}/5
@@ -435,11 +448,11 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
 
                       {/* Advisory Notes */}
                       {fc.problems.length > 0 && (
-                        <div className="p-3.5 rounded-lg bg-[#0B0D10] border border-[#262B36] space-y-1.5">
-                          <div className="text-xs font-semibold text-zinc-200">
+                        <div className="p-3.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] space-y-1.5">
+                          <div className="text-xs font-semibold text-[#24242B]">
                             AI suggestions & notes
                           </div>
-                          <ul className="list-disc pl-4 space-y-1 text-xs text-zinc-300">
+                          <ul className="list-disc pl-4 space-y-1 text-xs text-[#3A3A44]">
                             {fc.problems.map((prob, i) => (
                               <li key={i}>{prob}</li>
                             ))}
@@ -449,12 +462,12 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
 
                       {/* Product Differences */}
                       {shot.productInFrame && fc.productDifferences.length > 0 && (
-                        <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-1.5">
-                          <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                        <div className="p-3.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold text-[#891A23]">
                             <AlertTriangle className="w-3.5 h-3.5" />
                             Product comparison vs. real photos
                           </div>
-                          <ul className="list-disc pl-4 space-y-1 text-xs text-amber-100/90">
+                          <ul className="list-disc pl-4 space-y-1 text-xs text-[#6E141C]">
                             {fc.productDifferences.map((diff, i) => (
                               <li key={i}>{diff}</li>
                             ))}
@@ -464,9 +477,9 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
 
                       {/* Optional Improved Frame Prompt */}
                       {fc.improvedFramePrompt && (
-                        <div className="p-3.5 rounded-lg bg-[#0B0D10] border border-[#262B36] space-y-2">
+                        <div className="p-3.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] space-y-2">
                           <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-xs font-semibold text-amber-300">
+                            <span className="text-xs font-semibold text-[#891A23]">
                               Improved frame prompt (paste back into Google Flow)
                             </span>
                             <div className="flex items-center gap-2">
@@ -475,11 +488,11 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                                 onClick={() =>
                                   void handleCopy(shot.id, fc.improvedFramePrompt)
                                 }
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded cursor-pointer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded cursor-pointer"
                               >
                                 {copiedId === shot.id ? (
                                   <>
-                                    <Check className="w-3 h-3 text-emerald-400" />
+                                    <Check className="w-3 h-3 text-emerald-700" />
                                     Copied
                                   </>
                                 ) : (
@@ -494,13 +507,13 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
                                 onClick={() =>
                                   applyImprovedPrompt(shot.id, fc.improvedFramePrompt)
                                 }
-                                className="px-2.5 py-1 text-[11px] font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded cursor-pointer"
+                                className="px-2.5 py-1 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded cursor-pointer"
                               >
                                 Save to shot prompt
                               </button>
                             </div>
                           </div>
-                          <p className="text-xs text-zinc-300 leading-relaxed">
+                          <p className="text-xs text-[#3A3A44] leading-relaxed">
                             {fc.improvedFramePrompt}
                           </p>
                         </div>
@@ -513,6 +526,60 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
           );
         })}
       </div>
+
+      <DriveAssetPickerModal
+        isOpen={Boolean(drivePickerShotId)}
+        projectId={project.id}
+        initialFolderUrls={
+          project.googleDriveFolderUrls?.length
+            ? project.googleDriveFolderUrls
+            : project.googleDriveFolderUrl
+              ? [project.googleDriveFolderUrl]
+              : []
+        }
+        mediaFilter="image"
+        multiple={false}
+        prefix="frame"
+        title={
+          drivePickerShotId
+            ? `Pick Replacement Frame for ${drivePickerShotId} from Google Drive`
+            : 'Pick Replacement Frame from Google Drive'
+        }
+        onClose={() => setDrivePickerShotId(null)}
+        onImported={async (assets: ImportedDriveAsset[]) => {
+          const picked = assets[0];
+          if (!picked?.url || !drivePickerShotId) return;
+          const nextShots: PipelineShot[] = project.shots.map((s) =>
+            s.id === drivePickerShotId
+              ? {
+                  ...s,
+                  frameImageUrl: picked.url!,
+                  status: 'Frame Uploaded',
+                  frameCheck: null,
+                  productFrameApproved: false,
+                }
+              : s
+          );
+          await onUpdateProject({
+            ...project,
+            shots: nextShots,
+            approvals: {
+              ...project.approvals,
+              storyboardApproved: false,
+              videoPromptsApproved: false,
+              voApproved: false,
+              shootPlanApproved: false,
+            },
+          });
+        }}
+        onFoldersChange={(urls) => {
+          void onUpdateProject({
+            ...project,
+            googleDriveFolderUrls: urls,
+            googleDriveFolderUrl: urls[0] || undefined,
+          });
+        }}
+      />
     </div>
   );
 };

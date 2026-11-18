@@ -8,6 +8,7 @@ import {
   Lock,
   Printer,
   Layers,
+  FileText,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -25,6 +26,7 @@ interface PipelineHeaderProps {
   onStartNewProject: () => void;
   onSelectStep: (step: PipelineStepNumber) => void;
   onTogglePrintable: () => void;
+  onOpenMasterExport: () => void;
   onDownloadBackup: () => void;
   onImportBackup: (file: File) => void;
   onSwitchToClassicStudio: () => void;
@@ -56,6 +58,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   onStartNewProject,
   onSelectStep,
   onTogglePrintable,
+  onOpenMasterExport,
   onDownloadBackup,
   onImportBackup,
   onSwitchToClassicStudio,
@@ -122,15 +125,26 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   };
 
   return (
-    <header className="no-print sticky top-0 z-30 bg-[#0B0D10]/95 backdrop-blur-md border-b border-[#262B36]">
-      {/* Top Row: Brand, Project Picker, Backup Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="text-base font-bold tracking-tight text-zinc-100 whitespace-nowrap shrink-0">
-            52Launch Production Studio
-          </span>
+    <header className="no-print sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-[#E2E2E6]">
+      {/* Thin 52Launch Red #5 top brand rule */}
+      <div className="h-[3px] w-full bg-gradient-to-r from-[#C6202F] via-[#891A23] to-[#C6202F]" />
 
-          <span className="text-zinc-700" aria-hidden="true">
+      {/* Top Row: 52Launch Wordmark, Project Selector, Primary Actions */}
+      <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-3">
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            <img
+              src="/brand/wordmark-color.png"
+              alt="fifty-two launch"
+              className="h-6 w-auto object-contain"
+            />
+            <span className="hidden sm:inline-block h-4 w-[1.5px] bg-[#891A23]/40" aria-hidden="true" />
+            <span className="hidden sm:inline-block text-xs font-semibold tracking-tight text-[#5A5A66] whitespace-nowrap font-display">
+              Production Studio
+            </span>
+          </div>
+
+          <span className="text-[#D0D0D6]" aria-hidden="true">
             /
           </span>
 
@@ -146,7 +160,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
                   onSelectProject(e.target.value);
                 }
               }}
-              className="appearance-none bg-[#14171D] border border-[#262B36] hover:border-zinc-500 text-zinc-100 text-sm font-medium rounded-lg pl-3 pr-8 py-1.5 focus:outline-none focus:border-amber-500 cursor-pointer max-w-[280px] truncate"
+              className="appearance-none bg-[#F6F6F7] border border-[#D8D8DF] hover:border-[#891A23] text-[#111114] text-sm font-medium rounded-md pl-3 pr-8 py-1.5 focus:outline-none focus:border-[#C6202F] cursor-pointer max-w-[270px] truncate transition-colors"
             >
               {isNewProjectMode && <option value="__new__">New client project...</option>}
               {projects.map((p) => (
@@ -155,13 +169,13 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
                 </option>
               ))}
             </select>
-            <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2.5" />
+            <ChevronDown className="w-3.5 h-3.5 text-[#5A5A66] pointer-events-none absolute right-2.5" />
           </div>
 
           <button
             type="button"
             onClick={onStartNewProject}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] brand-corner-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
           >
             <Plus className="w-3.5 h-3.5" />
             New project
@@ -173,10 +187,10 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             <button
               type="button"
               onClick={onTogglePrintable}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 isPrintableOpen
-                  ? 'bg-amber-500/15 border-amber-500 text-amber-300'
-                  : 'bg-[#14171D] border-[#262B36] text-zinc-200 hover:border-zinc-500'
+                  ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23] font-semibold'
+                  : 'bg-white border-[#D8D8DF] text-[#111114] hover:border-[#891A23]'
               }`}
             >
               <Printer className="w-3.5 h-3.5" />
@@ -201,28 +215,39 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
           <button
             type="button"
             onClick={() => importInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-300 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#3A3A44] bg-white border border-[#D8D8DF] hover:border-[#891A23] hover:text-[#111114] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5" />
             Import project backup
           </button>
 
           {activeProject && !isNewProjectMode && (
-            <button
-              type="button"
-              onClick={onDownloadBackup}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-300 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Download project backup
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={onOpenMasterExport}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#891A23] hover:bg-[#6E141C] brand-corner-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Master PDF
+              </button>
+
+              <button
+                type="button"
+                onClick={onDownloadBackup}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#3A3A44] bg-white border border-[#D8D8DF] hover:border-[#891A23] hover:text-[#111114] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Backup
+              </button>
+            </>
           )}
 
           <button
             type="button"
             onClick={onSwitchToClassicStudio}
-            title="Open original Google Flow Storyboard Studio view"
-            className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 border border-transparent hover:border-[#262B36] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            title="Open original Storyboard Studio view"
+            className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#6E6E7A] hover:text-[#891A23] border border-transparent hover:border-[#E2E2E6] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Layers className="w-3.5 h-3.5" />
             Classic Studio
@@ -233,7 +258,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
       {/* Left-to-Right Gated 9-Step Workflow Bar */}
       <nav
         aria-label="Production workflow steps"
-        className="flex items-center gap-1.5 px-5 py-2 bg-[#101318] border-t border-[#1D222B] overflow-x-auto"
+        className="flex items-center gap-1.5 px-5 py-2 bg-[#F6F6F7] border-t border-[#E6E6EB] overflow-x-auto"
       >
         {STEPS.map((st, idx) => {
           const enabled = isStepEnabled(st.num);
@@ -246,34 +271,25 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
                 type="button"
                 disabled={!enabled}
                 onClick={() => enabled && onSelectStep(st.num)}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
                   current
-                    ? 'bg-amber-500 text-zinc-950 border-amber-400 font-semibold cursor-pointer'
+                    ? 'bg-[#C6202F] text-white border-[#AD1A27] font-semibold brand-corner-sm cursor-pointer shadow-xs'
                     : enabled
-                      ? 'bg-[#14171D] text-zinc-200 border-[#262B36] hover:border-zinc-500 cursor-pointer'
-                      : 'bg-[#0D1015] text-zinc-600 border-[#1B2029] cursor-not-allowed'
+                      ? 'bg-white text-[#111114] border-[#DCDCE2] hover:border-[#891A23] rounded-md cursor-pointer'
+                      : 'bg-[#EFEFF2] text-[#9A9AA6] border-[#E4E4EA] rounded-md cursor-not-allowed'
                 }`}
               >
                 {approved && !current ? (
-                  <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <Check className="w-3.5 h-3.5 text-[#15803D] shrink-0" />
                 ) : !enabled ? (
-                  <Lock className="w-3 h-3 text-zinc-600 shrink-0" />
+                  <Lock className="w-3 h-3 text-[#A0A0AC] shrink-0" />
                 ) : null}
-                <span>
+                <span className="tabular-nums">
                   {st.num}. {st.label}
                 </span>
-                {st.phaseNote && (
-                  <span
-                    className={`text-[10px] font-normal ${
-                      current ? 'text-zinc-900' : 'text-zinc-500'
-                    }`}
-                  >
-                    · {st.phaseNote}
-                  </span>
-                )}
               </button>
               {idx < STEPS.length - 1 && (
-                <span className="text-zinc-700 text-xs select-none" aria-hidden="true">
+                <span className="text-[#C8C8D2] text-xs select-none" aria-hidden="true">
                   →
                 </span>
               )}

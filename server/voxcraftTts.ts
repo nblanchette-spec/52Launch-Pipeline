@@ -191,6 +191,141 @@ function ensureWavBuffer(rawBuffer: Buffer): Buffer {
   return Buffer.concat([header, rawBuffer]);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isQuotaOrTransientError(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err || '').toLowerCase();
+  return (
+    status === 429 ||
+    status === 503 ||
+    msg.includes('429') ||
+    msg.includes('503') ||
+    msg.includes('quota') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('unavailable') ||
+    msg.includes('overloaded') ||
+    msg.includes('rate limit')
+  );
+}
+
+function isInvalidFieldError(err: unknown, fieldName: string): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return msg.includes('Unknown name') && msg.includes(fieldName);
+}
+
+function getTtsClient(fallbackClient: GoogleGenAI): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return fallbackClient;
+  return new GoogleGenAI({
+    apiKey,
+    apiVersion: 'v1beta',
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+async function callTtsGenerateWithPayloadModes(
+  ttsClient: GoogleGenAI,
+  activeModel: GeminiTtsModel,
+  spokenText: string,
+  styleDirective: string,
+  chosenVoice: string
+) {
+  const speechConfig = {
+    voiceConfig: {
+      prebuiltVoiceConfig: { voiceName: chosenVoice },
+    },
+  };
+
+  // Mode 1: v1beta standard speechMetadata + speechConfig
+  try {
+    return await ttsClient.models.generateContent({
+      model: activeModel,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: spokenText,
+              speechMetadata: {
+                style: styleDirective,
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig,
+      },
+    });
+  } catch (err: unknown) {
+    if (!isInvalidFieldError(err, 'speechMetadata') && !isInvalidFieldError(err, 'speechConfig')) {
+      throw err;
+    }
+
+    // Mode 2: If backend rejected speechMetadata on Part, use systemInstruction + speechConfig
+    if (isInvalidFieldError(err, 'speechMetadata') && !isInvalidFieldError(err, 'speechConfig')) {
+      try {
+        return await ttsClient.models.generateContent({
+          model: activeModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: spokenText }],
+            },
+          ],
+          config: {
+            systemInstruction: `Read ONLY the user's spoken words aloud naturally without reading instructions. Perform in this vocal style: ${styleDirective}`,
+            responseModalities: ['AUDIO'],
+            speechConfig,
+          },
+        });
+      } catch (err2: unknown) {
+        if (isQuotaOrTransientError(err2)) throw err2;
+        // Mode 3: Plain text part + speechConfig only
+        return await ttsClient.models.generateContent({
+          model: activeModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: spokenText }],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig,
+          },
+        });
+      }
+    }
+
+    // Mode 4: Plain text + responseModalities only (last resort if speechConfig rejected on API tier)
+    return await ttsClient.models.generateContent({
+      model: activeModel,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `Using voice persona ${chosenVoice} (${styleDirective}), speak the following line aloud:\n\n${spokenText}`,
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+      },
+    });
+  }
+}
+
 export async function synthesizeWithGeminiTTS(
   aiClient: GoogleGenAI,
   options: {
@@ -222,80 +357,68 @@ export async function synthesizeWithGeminiTTS(
     : 'Kore';
 
   const preferredModel: GeminiTtsModel =
-    options.model === 'gemini-3.8-flash-lite-tts'
-      ? 'gemini-3.8-flash-lite-tts'
-      : 'gemini-3.8-flash-tts';
+    options.model === 'gemini-3.8-flash-tts'
+      ? 'gemini-3.8-flash-tts'
+      : 'gemini-3.8-flash-lite-tts';
 
   const modelsToTry: GeminiTtsModel[] =
     preferredModel === 'gemini-3.8-flash-tts'
       ? ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts']
-      : ['gemini-3.8-flash-lite-tts'];
+      : ['gemini-3.8-flash-lite-tts', 'gemini-3.8-flash-tts'];
 
   const styleDirective = buildVoxStyleDirective(options);
+  const spokenText = options.text.trim();
+  const ttsClient = getTtsClient(aiClient);
   let lastErr: unknown;
 
   for (const activeModel of modelsToTry) {
-    try {
-      const response = await aiClient.models.generateContent({
-        model: activeModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: options.text.trim(),
-                speechMetadata: {
-                  style: styleDirective,
-                },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: chosenVoice },
-            },
-          },
-        },
-      });
-
-      const candidate = response.candidates?.[0];
-      const audioPart = candidate?.content?.parts?.find((p) =>
-        Boolean(p.inlineData?.data)
-      );
-      if (!audioPart?.inlineData?.data) {
-        const textReply = candidate?.content?.parts?.find((p) => p.text)?.text;
-        throw new Error(
-          textReply
-            ? `Gemini voice model returned text instead of audio: ${textReply}`
-            : 'Gemini voice model returned an empty audio response.'
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await callTtsGenerateWithPayloadModes(
+          ttsClient,
+          activeModel,
+          spokenText,
+          styleDirective,
+          chosenVoice
         );
-      }
 
-      const rawBuf = Buffer.from(audioPart.inlineData.data, 'base64');
-      const wavBuffer = ensureWavBuffer(rawBuf);
+        const candidate = response.candidates?.[0];
+        const audioPart = candidate?.content?.parts?.find((p) =>
+          Boolean(p.inlineData?.data)
+        );
+        if (!audioPart?.inlineData?.data) {
+          const textReply = candidate?.content?.parts?.find((p) => p.text)?.text;
+          throw new Error(
+            textReply
+              ? `Gemini voice model returned text instead of audio: ${textReply}`
+              : 'Gemini voice model returned an empty audio response.'
+          );
+        }
 
-      return {
-        wavBuffer,
-        audioBase64: wavBuffer.toString('base64'),
-        mimeType: 'audio/wav',
-        voice: chosenVoice,
-        model: activeModel,
-        styleDirective,
-      };
-    } catch (err: unknown) {
-      lastErr = err;
-      const msg = err instanceof Error ? err.message.toLowerCase() : '';
-      const status = (err as { status?: number })?.status;
-      if (
-        (status === 429 || msg.includes('429') || msg.includes('quota')) &&
-        activeModel !== modelsToTry[modelsToTry.length - 1]
-      ) {
-        continue;
+        const rawBuf = Buffer.from(audioPart.inlineData.data, 'base64');
+        const wavBuffer = ensureWavBuffer(rawBuf);
+
+        return {
+          wavBuffer,
+          audioBase64: wavBuffer.toString('base64'),
+          mimeType: 'audio/wav',
+          voice: chosenVoice,
+          model: activeModel,
+          styleDirective,
+        };
+      } catch (err: unknown) {
+        lastErr = err;
+        if (isQuotaOrTransientError(err)) {
+          if (attempt < 2) {
+            const backoffMs = 1500 * Math.pow(2, attempt) + Math.floor(Math.random() * 500);
+            await sleep(backoffMs);
+            continue;
+          }
+          // Exhausted retries on this model; try fallback TTS model if available
+          break;
+        }
+        throw err;
       }
-      throw err;
     }
   }
 

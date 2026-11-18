@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import path from 'path';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { fal } from '@fal-ai/client';
 import {
   deleteProject,
@@ -21,6 +21,7 @@ import {
   PipelineProject,
   PipelineShot,
   ShootPlan,
+  ShotClipHistoryItem,
   UpscaleDetails,
   VideoModelOption,
   VoScriptLine,
@@ -37,6 +38,13 @@ import {
   synthesizeWithGeminiTTS,
   VALID_GEMINI_VOICES,
 } from './voxcraftTts';
+import {
+  downloadAndExtractDriveFiles,
+  downloadDriveBinaryAsset,
+  DriveAuthError,
+  DriveFileDescriptor,
+  syncProjectAssetsToDrive,
+} from './driveHelpers';
 import {
   FLUX3_ENDPOINTS,
   StudioAspectRatio,
@@ -96,6 +104,111 @@ function formatGeminiError(err: unknown, fallback: string): string {
   return message || fallback;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const status = (err as { status?: number; code?: number })?.status ?? (err as { code?: number })?.code;
+  const raw = err instanceof Error ? err.message.toLowerCase() : String(err || '').toLowerCase();
+  return (
+    status === 429 ||
+    status === 503 ||
+    raw.includes('429') ||
+    raw.includes('503') ||
+    raw.includes('resource_exhausted') ||
+    raw.includes('quota') ||
+    raw.includes('unavailable') ||
+    raw.includes('overloaded') ||
+    raw.includes('rate limit')
+  );
+}
+
+async function withGeminiRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (isTransientGeminiError(err) && attempt < 2) {
+        const delayMs = 1500 * Math.pow(2, attempt) + Math.floor(Math.random() * 500);
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+async function falSubscribeWithNegativeFallback(
+  endpointId: string,
+  input: Record<string, unknown>,
+  negativePrompt?: string
+) {
+  try {
+    return await fal.subscribe(endpointId, { input, logs: false });
+  } catch (err: unknown) {
+    if ('negative_prompt' in input && negativePrompt?.trim()) {
+      const errObj = err as { status?: number; body?: { detail?: unknown }; message?: string };
+      const detailText = JSON.stringify(errObj?.body?.detail || errObj?.message || '').toLowerCase();
+      if (
+        errObj?.status === 422 ||
+        detailText.includes('negative_prompt') ||
+        detailText.includes('extra_forbidden')
+      ) {
+        const fallbackInput = { ...input };
+        delete fallbackInput.negative_prompt;
+        const basePrompt = String(fallbackInput.prompt || '').trim();
+        if (basePrompt) {
+          fallbackInput.prompt = `${basePrompt}\nAvoid: ${negativePrompt.trim()}`;
+        }
+        return await fal.subscribe(endpointId, { input: fallbackInput, logs: false });
+      }
+    }
+    throw err;
+  }
+}
+
+function appendShotClipHistory(
+  shot: PipelineShot,
+  newItem: ShotClipHistoryItem
+): ShotClipHistoryItem[] {
+  const existing = Array.isArray(shot.videoHistory) ? [...shot.videoHistory] : [];
+  if (existing.length === 0 && shot.videoUrl) {
+    existing.push({
+      id: `clip-legacy-${shot.id}`,
+      videoUrl: shot.videoUrl,
+      createdAt: new Date().toISOString(),
+      modelId:
+        shot.model === 'flux3'
+          ? 'flux-3'
+          : shot.model === 'kling'
+            ? 'kling-4.0'
+            : shot.model === 'wan'
+              ? 'wan-3.0-prime'
+              : shot.model === 'luma'
+                ? 'luma-ray-3.2'
+                : 'seedance-2.0',
+      workflowMode: shot.frameImageUrl ? 'image_to_video' : 'text_to_video',
+      prompt: shot.videoPrompt || shot.scene || '',
+      negativePrompt: shot.negativePrompt || '',
+      aspectRatio: '16:9',
+      duration: Number(shot.durationSec) || 5,
+      qualityTier: 'draft',
+      resolution: shot.videoResolution || '480p',
+      nativeAudio: true,
+      seed: shot.videoSeed,
+      startFrameUrl: shot.frameImageUrl,
+      draftCacheUrl: shot.draftCacheUrl || null,
+      upscaledVideoUrl: shot.upscaledVideoUrl || null,
+      upscaledResolution: shot.upscaledResolution || null,
+    });
+  }
+  return [newItem, ...existing].slice(0, 24);
+}
+
 export function createPipelineRouter(): Router {
   const router = Router();
 
@@ -129,7 +242,7 @@ export function createPipelineRouter(): Router {
   // Create new project from New Project Form
   router.post('/projects', async (req, res) => {
     try {
-      const { client, product, intake, initialPhotoDataUrls } = req.body;
+      const { client, product, intake, initialPhotoDataUrls, googleDriveFolderUrl } = req.body;
       if (!client || !product?.name) {
         return res
           .status(400)
@@ -185,7 +298,9 @@ export function createPipelineRouter(): Router {
           positioning: '',
           audience: '',
           toneOfVoice: { adjectives: [], guidance: '' },
-          visualStyle: { palette: '', lighting: '', lensAndFraming: '', grade: '' },
+          visualStyle: { palette: '', typography: '', lighting: '', lensAndFraming: '', grade: '' },
+          brandLogoUrl: null,
+          brandLogoCaption: '',
           characters: [],
           productRules: '',
           bannedList: [],
@@ -229,6 +344,24 @@ export function createPipelineRouter(): Router {
           shootPlanApproved: false,
         },
         generationLog: [],
+        googleDriveFolderUrl: googleDriveFolderUrl ? String(googleDriveFolderUrl).trim() : undefined,
+        googleDriveFolderUrls: Array.isArray(req.body.googleDriveFolderUrls)
+          ? req.body.googleDriveFolderUrls.map((u: string) => String(u).trim()).filter(Boolean)
+          : googleDriveFolderUrl
+            ? [String(googleDriveFolderUrl).trim()]
+            : [],
+        googleDriveDestinationFolderId: req.body.googleDriveDestinationFolderId
+          ? String(req.body.googleDriveDestinationFolderId).trim()
+          : undefined,
+        googleDriveDestinationFolderUrl: req.body.googleDriveDestinationFolderUrl
+          ? String(req.body.googleDriveDestinationFolderUrl).trim()
+          : undefined,
+        googleDriveDestinationFolderName: req.body.googleDriveDestinationFolderName
+          ? String(req.body.googleDriveDestinationFolderName).trim()
+          : undefined,
+        lockedDriveReferences: Array.isArray(req.body.lockedDriveReferences)
+          ? req.body.lockedDriveReferences
+          : [],
       };
 
       const savedProject = await saveProject(project);
@@ -282,7 +415,7 @@ export function createPipelineRouter(): Router {
       const saved = await saveDataUrlAsset(
         req.params.id,
         dataUrl,
-        prefix === 'frame' ? 'frame' : 'product'
+        prefix === 'frame' ? 'frame' : prefix === 'logo' ? 'logo' : 'product'
       );
       res.json(saved);
     } catch (err) {
@@ -358,7 +491,7 @@ From the client intake and the attached real product photos produce a complete B
 - positioning: one sharp sentence
 - audience: clear description of who this is for
 - toneOfVoice: 3-5 adjectives plus clear guidance
-- visualStyle: palette, lighting, lensAndFraming, grade
+- visualStyle: palette (include any brand color hex codes if present), typography (primary/display/body fonts and type treatment), lighting, lensAndFraming, grade
 - characters: array of key on-screen people (name plus a FIXED short visual descriptor that will be pasted word for word into every prompt)
 - productRules: how the product must look, based ONLY on the intake and photos, never invented features
 - bannedList: specific visual tropes, clichés, or forbidden elements
@@ -387,10 +520,11 @@ CLIENT & PRODUCT INTAKE:
 
       parts.push({ text: prompt });
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: { parts },
-        config: {
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: { parts },
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -409,11 +543,12 @@ CLIENT & PRODUCT INTAKE:
                 type: Type.OBJECT,
                 properties: {
                   palette: { type: Type.STRING },
+                  typography: { type: Type.STRING },
                   lighting: { type: Type.STRING },
                   lensAndFraming: { type: Type.STRING },
                   grade: { type: Type.STRING },
                 },
-                required: ['palette', 'lighting', 'lensAndFraming', 'grade'],
+                required: ['palette', 'typography', 'lighting', 'lensAndFraming', 'grade'],
               },
               characters: {
                 type: Type.ARRAY,
@@ -444,7 +579,8 @@ CLIENT & PRODUCT INTAKE:
             ],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
       const updatedBible = {
@@ -458,10 +594,13 @@ CLIENT & PRODUCT INTAKE:
         },
         visualStyle: {
           palette: parsed.visualStyle?.palette || '',
+          typography: parsed.visualStyle?.typography || '',
           lighting: parsed.visualStyle?.lighting || '',
           lensAndFraming: parsed.visualStyle?.lensAndFraming || '',
           grade: parsed.visualStyle?.grade || '',
         },
+        brandLogoUrl: project.brandBible?.brandLogoUrl ?? null,
+        brandLogoCaption: project.brandBible?.brandLogoCaption ?? '',
         characters: Array.isArray(parsed.characters)
           ? parsed.characters.map(
               (c: { name: string; fixedDescriptor: string }, idx: number) => ({
@@ -556,10 +695,11 @@ APPROVED BRAND BIBLE:
 - Claims Flagged: ${project.brandBible.claimsToFlag.join(' | ') || 'None'}
 - Banned List: ${project.brandBible.bannedList.join(', ')}`;
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -610,7 +750,8 @@ APPROVED BRAND BIBLE:
             ],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
       const nextBrief = {
@@ -736,10 +877,11 @@ APPROVED CREATIVE BRIEF:
 - Deliverables: ${project.creativeBrief.deliverables.join(', ')}
 - VO Direction: ${JSON.stringify(project.creativeBrief.voDirection)}`;
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
@@ -776,7 +918,8 @@ APPROVED CREATIVE BRIEF:
             },
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '[]').trim());
       const shots: PipelineShot[] = (Array.isArray(parsed) ? parsed : []).map(
@@ -936,10 +1079,11 @@ BRAND BIBLE:
 
       parts.push({ text: prompt });
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: { parts },
-        config: {
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: { parts },
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -965,7 +1109,8 @@ BRAND BIBLE:
             ],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
       const clampScore = (val: unknown) =>
@@ -1041,7 +1186,7 @@ BRAND BIBLE:
     }
   });
 
-  // STEP 7A: Generate Video Prompts & Negative Prompts (Gemini 2.5 Pro)
+  // STEP 7A: Generate Video Prompts & Negative Prompts (Fast batched ThinkingLevel.LOW)
   router.post('/pipeline/video-prompts', async (req, res) => {
     try {
       const { projectId, shotId } = req.body;
@@ -1065,7 +1210,7 @@ BRAND BIBLE:
         { videoPrompt: string; negativePrompt: string }
       >();
 
-      for (const shot of targetShots) {
+      const buildSingleShotParts = async (shot: PipelineShot) => {
         const parts: Array<{
           inlineData?: { data: string; mimeType: string };
           text?: string;
@@ -1074,11 +1219,11 @@ BRAND BIBLE:
           const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
           if (inline) parts.push({ inlineData: inline });
         }
+        parts.push({
+          text: `You are a Commercial Video Prompt Director for 52Launch.
+Write the video prompt and negative prompt for shot ${shot.id} using the attached start frame (if present).
 
-        const prompt = `You are a Commercial Video Prompt Director for 52Launch.
-Write the video prompt and negative prompt for shot ${shot.id} using the attached approved start frame.
-
-MODEL TARGET: ${shot.model === 'flux3' ? 'Flux 3' : 'Seedance'}
+MODEL TARGET: ${shot.model === 'flux3' ? 'Flux 3' : shot.model}
 DURATION: ${shot.durationSec} seconds
 SCENE: ${shot.scene}
 HAS VOICEOVER LINE: ${shot.voLine ? `YES ("${shot.voLine}")` : 'NO'}
@@ -1086,42 +1231,149 @@ PRODUCT IN FRAME: ${shot.productInFrame ? 'YES' : 'NO'}
 BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
 
 STRICT RULES:
-1. Describe MOTION, CAMERA, and TIMING only. Do NOT re-describe how things look, except add ONE clean line preserving the start frame's framing, wardrobe, and lighting.
+1. Describe MOTION, CAMERA, and TIMING only. Keep it concise — add ONE clean line preserving the start frame's framing, wardrobe, and lighting.
 2. ${
-          shot.model === 'flux3'
-            ? `Flux 3 generates native audio: describe realistic ambient sound matching the scene${
-                shot.voLine
-                  ? ', and explicitly state "no dialogue" because voiceover is recorded separately.'
-                  : '.'
-              }`
-            : 'Seedance: keep it concise — one clean camera move and one clear subject action.'
-        }
+            shot.model === 'flux3'
+              ? `Flux 3 generates native audio: describe realistic ambient sound matching the scene${
+                  shot.voLine
+                    ? ', and explicitly state "no dialogue" because voiceover is recorded separately.'
+                    : '.'
+                }`
+              : 'Keep it concise — one clean camera move and one clear subject action.'
+          }
 3. One action per shot. Never add characters, props, or claims not already in the shot.
-4. For negativePrompt: list common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS every item from the Brand Bible banned list.`;
-
-        parts.push({ text: prompt });
-
-        const response = await ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                videoPrompt: { type: Type.STRING },
-                negativePrompt: { type: Type.STRING },
-              },
-              required: ['videoPrompt', 'negativePrompt'],
-            },
-          },
+4. For negativePrompt: list common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS every item from the Brand Bible banned list.`,
         });
+        return parts;
+      };
 
+      if (targetShots.length === 1) {
+        const shot = targetShots[0];
+        const parts = await buildSingleShotParts(shot);
+        const response = await withGeminiRetry(() =>
+          ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: { parts },
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  videoPrompt: { type: Type.STRING },
+                  negativePrompt: { type: Type.STRING },
+                },
+                required: ['videoPrompt', 'negativePrompt'],
+              },
+            },
+          })
+        );
         const parsed = JSON.parse((response.text ?? '{}').trim());
         updatedMap.set(shot.id, {
           videoPrompt: parsed.videoPrompt || '',
           negativePrompt: parsed.negativePrompt || '',
         });
+      } else {
+        // Batched single-request generation across all AI/hybrid shots for ~5x speedup and fewer quota calls
+        const batchParts: Array<{
+          inlineData?: { data: string; mimeType: string };
+          text?: string;
+        }> = [];
+
+        const shotSpecs: string[] = [];
+        for (const shot of targetShots) {
+          if (shot.frameImageUrl) {
+            const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
+            if (inline) {
+              batchParts.push({ text: `Reference start frame for shot ${shot.id}:` });
+              batchParts.push({ inlineData: inline });
+            }
+          }
+          shotSpecs.push(
+            `- Shot ${shot.id} | Model: ${shot.model === 'flux3' ? 'Flux 3 (native audio; state "no dialogue" if VO present)' : shot.model} | Duration: ${shot.durationSec}s | Product in frame: ${shot.productInFrame ? 'YES' : 'NO'} | VO: ${shot.voLine ? `"${shot.voLine}"` : 'NONE'} | Scene: ${shot.scene}`
+          );
+        }
+
+        batchParts.push({
+          text: `You are a Commercial Video Prompt Director for 52Launch.
+Write concise video prompts and negative prompts for ALL ${targetShots.length} shots below in a single JSON array.
+
+BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
+
+STRICT RULES FOR EVERY SHOT:
+1. Describe MOTION, CAMERA, and TIMING only. Add ONE clean sentence preserving the start frame's framing, wardrobe, and lighting.
+2. For Flux 3 shots with VO, include realistic ambient SFX and explicitly state "no dialogue". For other models keep it crisp: one camera move + one clear subject action.
+3. For negativePrompt: include common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS items from the Brand Bible banned list.
+4. Return the exact "shotId" for every shot listed.
+
+SHOTS TO WRITE:
+${shotSpecs.join('\n')}`,
+        });
+
+        const batchResponse = await withGeminiRetry(() =>
+          ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: { parts: batchParts },
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    shotId: { type: Type.STRING },
+                    videoPrompt: { type: Type.STRING },
+                    negativePrompt: { type: Type.STRING },
+                  },
+                  required: ['shotId', 'videoPrompt', 'negativePrompt'],
+                },
+              },
+            },
+          })
+        );
+
+        const parsedList = JSON.parse((batchResponse.text ?? '[]').trim());
+        if (Array.isArray(parsedList)) {
+          for (const item of parsedList) {
+            const sid = String(item?.shotId || '').trim();
+            if (sid) {
+              updatedMap.set(sid, {
+                videoPrompt: String(item.videoPrompt || ''),
+                negativePrompt: String(item.negativePrompt || ''),
+              });
+            }
+          }
+        }
+
+        // Fill any shot missing from batch response individually
+        const missingShots = targetShots.filter((s) => !updatedMap.has(s.id));
+        for (const shot of missingShots) {
+          const parts = await buildSingleShotParts(shot);
+          const singleRes = await withGeminiRetry(() =>
+            ai.models.generateContent({
+              model: GEMINI_MODEL,
+              contents: { parts },
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    videoPrompt: { type: Type.STRING },
+                    negativePrompt: { type: Type.STRING },
+                  },
+                  required: ['videoPrompt', 'negativePrompt'],
+                },
+              },
+            })
+          );
+          const p = JSON.parse((singleRes.text ?? '{}').trim());
+          updatedMap.set(shot.id, {
+            videoPrompt: p.videoPrompt || '',
+            negativePrompt: p.negativePrompt || '',
+          });
+        }
       }
 
       const nextShots = project.shots.map((s) => {
@@ -1224,6 +1476,7 @@ STRICT RULES:
       modelId,
       workflowMode,
       prompt,
+      negativePrompt,
       aspectRatio,
       duration,
       qualityTier,
@@ -1247,6 +1500,7 @@ STRICT RULES:
       modelId: StudioModelId;
       workflowMode: StudioWorkflowMode;
       prompt: string;
+      negativePrompt?: string;
       aspectRatio: StudioAspectRatio;
       duration: number;
       qualityTier: StudioQualityTier;
@@ -1286,24 +1540,32 @@ STRICT RULES:
       });
     }
 
-    let chosenEndpoint = String(modelId || 'seedance-2.5');
+    const effectiveModelId: StudioModelId =
+      modelId || (shot.model === 'flux3' ? 'flux-3' : 'seedance-2.0');
+    const effectiveWorkflow: StudioWorkflowMode = workflowMode || 'image_to_video';
+    const effectiveQualityTier: StudioQualityTier = qualityTier || 'draft';
+    const effectiveNeg =
+      negativePrompt !== undefined ? negativePrompt : shot.negativePrompt || '';
+
+    let chosenEndpoint = String(effectiveModelId);
     try {
       fal.config({ credentials: falKey });
 
       const built = await buildFalVideoRequest({
         projectId: project.id,
-        modelId: modelId || (shot.model === 'flux3' ? 'flux-3' : 'seedance-2.5'),
-        workflowMode: workflowMode || 'image_to_video',
+        modelId: effectiveModelId,
+        workflowMode: effectiveWorkflow,
         prompt: prompt || '',
+        negativePrompt: effectiveNeg,
         aspectRatio: aspectRatio || '16:9',
         duration: Number(duration) || shot.durationSec || 5,
-        qualityTier: qualityTier || 'draft',
+        qualityTier: effectiveQualityTier,
         resolution,
         nativeAudio: nativeAudio !== false,
         safetyTolerance: typeof safetyTolerance === 'number' ? safetyTolerance : 2,
         enableSafetyChecker: enableSafetyChecker ?? false,
         seed: typeof seed === 'number' ? seed : Math.floor(Math.random() * 1000000),
-        startFrameUrl: startFrameUrl ?? shot.frameImageUrl,
+        startFrameUrl: startFrameUrl !== undefined ? startFrameUrl : shot.frameImageUrl,
         endFrameUrl,
         keyframes,
         sourceVideoUrl,
@@ -1315,10 +1577,11 @@ STRICT RULES:
       });
 
       chosenEndpoint = built.endpointId;
-      const result = await fal.subscribe(built.endpointId, {
-        input: built.input,
-        logs: false,
-      });
+      const result = await falSubscribeWithNegativeFallback(
+        built.endpointId,
+        built.input,
+        effectiveNeg
+      );
 
       const data = result.data as {
         video?: { url?: string };
@@ -1340,7 +1603,9 @@ STRICT RULES:
       const finalSeed =
         typeof data?.seed === 'number'
           ? data.seed
-          : modelId === 'flux-3' || modelId === 'kling-4.0' || modelId === 'luma-ray-3.2'
+          : effectiveModelId === 'flux-3' ||
+              effectiveModelId === 'kling-4.0' ||
+              effectiveModelId === 'luma-ray-3.2'
             ? null
             : typeof seed === 'number'
               ? seed
@@ -1348,15 +1613,45 @@ STRICT RULES:
       const draftCacheUrl = data?.draft_cache?.url ?? null;
 
       const mappedShotModel: VideoModelOption =
-        modelId === 'flux-3'
+        effectiveModelId === 'flux-3'
           ? 'flux3'
-          : modelId === 'kling-4.0'
+          : effectiveModelId === 'kling-4.0'
             ? 'kling'
-            : modelId === 'wan-3.0-prime'
+            : effectiveModelId === 'wan-3.0-prime'
               ? 'wan'
-              : modelId === 'luma-ray-3.2'
+              : effectiveModelId === 'luma-ray-3.2'
                 ? 'luma'
                 : 'seedance';
+
+      const newClipItem: ShotClipHistoryItem = {
+        id: `clip-${Date.now()}`,
+        videoUrl: savedVideo.url,
+        createdAt: new Date().toISOString(),
+        modelId: effectiveModelId,
+        workflowMode: effectiveWorkflow,
+        prompt: prompt || '',
+        negativePrompt: effectiveNeg,
+        aspectRatio: aspectRatio || '16:9',
+        duration: built.clampedDuration,
+        qualityTier: effectiveQualityTier,
+        resolution: built.resolvedResolution,
+        nativeAudio: nativeAudio !== false,
+        safetyTolerance: typeof safetyTolerance === 'number' ? safetyTolerance : 2,
+        enableSafetyChecker: enableSafetyChecker ?? false,
+        seed: finalSeed,
+        startFrameUrl: startFrameUrl !== undefined ? startFrameUrl : shot.frameImageUrl,
+        endFrameUrl: endFrameUrl ?? null,
+        keyframes: Array.isArray(keyframes) ? keyframes : undefined,
+        sourceVideoUrl: sourceVideoUrl ?? null,
+        referenceImages: Array.isArray(referenceImages) ? referenceImages : undefined,
+        referenceElements: Array.isArray(referenceElements) ? referenceElements : undefined,
+        referenceVideos: Array.isArray(referenceVideos) ? referenceVideos : undefined,
+        referenceAudioUrl: referenceAudioUrl ?? null,
+        referenceTask,
+        draftCacheUrl,
+        upscaledVideoUrl: null,
+        upscaledResolution: null,
+      };
 
       const nextProject: PipelineProject = {
         ...project,
@@ -1365,12 +1660,14 @@ STRICT RULES:
             ? {
                 ...s,
                 videoPrompt: prompt?.trim() || s.videoPrompt,
+                negativePrompt: effectiveNeg,
                 durationSec: built.clampedDuration,
                 model: mappedShotModel,
                 videoUrl: savedVideo.url,
                 videoSeed: finalSeed,
                 videoResolution: built.resolvedResolution,
                 draftCacheUrl,
+                videoHistory: appendShotClipHistory(s, newClipItem),
                 status: 'Video Ready',
               }
             : s
@@ -1382,10 +1679,10 @@ STRICT RULES:
             step: 'Video Studio',
             shotId: shot.id,
             model: chosenEndpoint,
-            prompt: prompt?.trim() || workflowMode,
+            prompt: prompt?.trim() || effectiveWorkflow,
             seed: finalSeed,
             status: 'success',
-            notes: `${built.resolvedResolution} (${workflowMode})`,
+            notes: `${built.resolvedResolution} (${effectiveWorkflow})`,
           },
           ...project.generationLog,
         ],
@@ -1395,6 +1692,7 @@ STRICT RULES:
       res.json({
         project: saved,
         videoUrl: savedVideo.url,
+        clipId: newClipItem.id,
         seed: finalSeed,
         resolution: built.resolvedResolution,
         draftCacheUrl,
@@ -1603,6 +1901,17 @@ STRICT RULES:
                   upscaledVideoUrl: savedVideo.url,
                   upscaledResolution: badgeLabel,
                   upscaleDetails: details,
+                  videoHistory: Array.isArray(s.videoHistory)
+                    ? s.videoHistory.map((clip) =>
+                        clip.videoUrl === sourceRef || clip.videoUrl === persistedSourceUrl
+                          ? {
+                              ...clip,
+                              upscaledVideoUrl: savedVideo.url,
+                              upscaledResolution: badgeLabel,
+                            }
+                          : clip
+                      )
+                    : s.videoHistory,
                   status: 'Video Ready',
                 }
               : s
@@ -1714,9 +2023,10 @@ STRICT RULES:
         modelId,
         workflowMode: 'image_to_video',
         prompt: shot.videoPrompt,
+        negativePrompt: shot.negativePrompt,
         aspectRatio: '16:9',
         duration: shot.durationSec,
-        qualityTier: 'final',
+        qualityTier: 'draft',
         nativeAudio: true,
         safetyTolerance: 2,
         seed: shot.videoSeed ?? Math.floor(Math.random() * 1000000),
@@ -1724,10 +2034,11 @@ STRICT RULES:
       });
 
       chosenEndpoint = built.endpointId;
-      const result = await fal.subscribe(built.endpointId, {
-        input: built.input,
-        logs: false,
-      });
+      const result = await falSubscribeWithNegativeFallback(
+        built.endpointId,
+        built.input,
+        shot.negativePrompt
+      );
 
       const data = result.data as {
         video?: { url?: string };
@@ -1746,6 +2057,24 @@ STRICT RULES:
       );
       const seed = typeof data?.seed === 'number' ? data.seed : null;
 
+      const newClipItem: ShotClipHistoryItem = {
+        id: `clip-${Date.now()}`,
+        videoUrl: savedVideo.url,
+        createdAt: new Date().toISOString(),
+        modelId,
+        workflowMode: 'image_to_video',
+        prompt: shot.videoPrompt,
+        negativePrompt: shot.negativePrompt || '',
+        aspectRatio: '16:9',
+        duration: built.clampedDuration,
+        qualityTier: 'draft',
+        resolution: built.resolvedResolution,
+        nativeAudio: true,
+        safetyTolerance: 2,
+        seed,
+        startFrameUrl: chainedLastFrameDataUrl || shot.frameImageUrl,
+      };
+
       const nextProject: PipelineProject = {
         ...project,
         shots: project.shots.map((s) =>
@@ -1755,6 +2084,7 @@ STRICT RULES:
                 videoUrl: savedVideo.url,
                 videoSeed: seed,
                 videoResolution: built.resolvedResolution,
+                videoHistory: appendShotClipHistory(s, newClipItem),
                 status: 'Video Ready',
               }
             : s
@@ -1843,39 +2173,42 @@ CREATIVE BRIEF VO DIRECTION:
 ORDERED SHOTS:
 ${shotsContext}`;
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                shotId: { type: Type.STRING },
-                speaker: { type: Type.STRING },
-                direction: { type: Type.STRING },
-                line: { type: Type.STRING },
-                audioTags: { type: Type.STRING },
-                emotionalTone: { type: Type.STRING },
-                emotionIntensity: { type: Type.NUMBER },
-                pauseAfter: { type: Type.NUMBER },
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  shotId: { type: Type.STRING },
+                  speaker: { type: Type.STRING },
+                  direction: { type: Type.STRING },
+                  line: { type: Type.STRING },
+                  audioTags: { type: Type.STRING },
+                  emotionalTone: { type: Type.STRING },
+                  emotionIntensity: { type: Type.NUMBER },
+                  pauseAfter: { type: Type.NUMBER },
+                },
+                required: [
+                  'shotId',
+                  'speaker',
+                  'direction',
+                  'line',
+                  'audioTags',
+                  'emotionalTone',
+                  'emotionIntensity',
+                  'pauseAfter',
+                ],
               },
-              required: [
-                'shotId',
-                'speaker',
-                'direction',
-                'line',
-                'audioTags',
-                'emotionalTone',
-                'emotionIntensity',
-                'pauseAfter',
-              ],
             },
           },
-        },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '[]').trim());
       const shotDurationMap = new Map(
@@ -1889,7 +2222,7 @@ ${shotsContext}`;
         pitch: 1.0,
         language: 'en-US',
         pauseAfter: 0.35,
-        ttsModel: 'gemini-3.8-flash-tts',
+        ttsModel: 'gemini-3.8-flash-lite-tts',
         enhanceWithDSP: true,
         singleVoiceMode: true,
       };
@@ -2096,7 +2429,7 @@ ${shotsContext}`;
       const tts = await synthesizeWithGeminiTTS(ai, {
         text: spokenText,
         voice: safeVoice,
-        model: ttsModel ?? project.voSettings?.ttsModel ?? 'gemini-3.8-flash-tts',
+        model: ttsModel ?? project.voSettings?.ttsModel ?? 'gemini-3.8-flash-lite-tts',
         direction: activeDirection,
         emotionalTone: activeTone,
         emotionIntensity: activeIntensity,
@@ -2205,26 +2538,29 @@ Also translate "direction" and "speaker" naturally into ${langLabel}, and return
 LINES TO TRANSLATE:
 ${JSON.stringify(linesInput)}`;
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                speaker: { type: Type.STRING },
-                direction: { type: Type.STRING },
-                line: { type: Type.STRING },
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  speaker: { type: Type.STRING },
+                  direction: { type: Type.STRING },
+                  line: { type: Type.STRING },
+                },
+                required: ['id', 'speaker', 'direction', 'line'],
               },
-              required: ['id', 'speaker', 'direction', 'line'],
             },
           },
-        },
-      });
+        })
+      );
 
       const translated = JSON.parse((response.text ?? '[]').trim()) as Array<{
         id: string;
@@ -2256,7 +2592,7 @@ ${JSON.stringify(linesInput)}`;
           pitch: 1.0,
           language: targetLanguage,
           pauseAfter: 0.35,
-          ttsModel: 'gemini-3.8-flash-tts',
+          ttsModel: 'gemini-3.8-flash-lite-tts',
           enhanceWithDSP: true,
           singleVoiceMode: true,
         }),
@@ -2340,10 +2676,19 @@ Build a practical, production-ready Shoot Plan ONLY for the Live and Hybrid shot
 Do NOT include any AI-only ("ai_video") shots in this Shoot Plan.
 
 CRITICAL LINE PRODUCER RULES:
-1. Group shots efficiently into "shootDays" and within each day into logical "setups" grouped by LOCATION and LIGHTING (so the crew doesn't relight back and forth).
-2. For each setup include setupName, lightingNotes, shotIds (exact IDs from the list below), and realistic estimatedMinutes.
-3. For "propsAndUnits", always specify backup real product units (e.g. "2 hero units + 2 spare unopened units") whenever productInFrame is true, plus who supplies each item (Client vs Production).
-4. NEVER invent shoot dates, permit confirmations, or budget numbers that were not provided in the intake notes. If dates, locations, talent availability, or budget figures are missing or vague, explicitly put questions for them in "clientQuestions".
+1. Provide a comprehensive, detailed CHRONOLOGICAL DAY SCHEDULE BREAKDOWN for each shoot day.
+   Every shoot day MUST be broken down step-by-step:
+   - Crew Call & Load-In (e.g., 07:00 - 08:00 AM)
+   - Hot Breakfast & Morning Director/DP Safety Briefing (e.g., 08:00 - 08:30 AM)
+   - Morning Shoot Setups (group shots by location and lighting, e.g., 08:30 - 10:30 AM)
+   - MANDATORY CREW LUNCH BREAK (e.g., 12:30 PM - 01:30 PM, exactly 60 minutes, hot catering on-set)
+   - Afternoon Shoot Setups (continue scheduled shots, e.g., 01:30 PM - 05:30 PM)
+   - Pack-Down, DIT Media Dump & Sound Card Check (e.g., 05:30 PM - 06:15 PM)
+   - Company Wrap (e.g., 06:30 PM)
+2. Group shots efficiently into "shootDays" and within each day into logical "setups" grouped by LOCATION and LIGHTING (so the crew doesn't relight back and forth).
+3. For each setup include setupName, timeSlot (e.g. "08:30 - 10:15 AM"), lightingNotes, shotIds (exact IDs from the list below), and realistic estimatedMinutes.
+4. For "propsAndUnits", always specify backup real product units (e.g. "2 hero units + 2 spare unopened units") whenever productInFrame is true, plus who supplies each item (Client vs Production).
+5. NEVER invent shoot dates, permit confirmations, or budget numbers that were not provided in the intake notes. If dates, locations, talent availability, or budget figures are missing or vague, explicitly put questions for them in "clientQuestions".
 
 PROJECT & INTAKE NOTES:
 - Client: ${project.client}
@@ -2356,10 +2701,11 @@ PROJECT & INTAKE NOTES:
 LIVE & HYBRID SHOTS TO SCHEDULE (${liveHybridShots.length} total):
 ${shotsText}`;
 
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: prompt,
-        config: {
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -2372,13 +2718,34 @@ ${shotsText}`;
                     dayLabel: { type: Type.STRING },
                     location: { type: Type.STRING },
                     callTime: { type: Type.STRING },
+                    breakfastTime: { type: Type.STRING },
+                    lunchTime: { type: Type.STRING },
                     wrapTime: { type: Type.STRING },
+                    scheduleBreakdown: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          timeSlot: { type: Type.STRING },
+                          activity: { type: Type.STRING },
+                          category: {
+                            type: Type.STRING,
+                            description: 'call, setup, meal, move, wrap, or general',
+                          },
+                          shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                          notes: { type: Type.STRING },
+                          estimatedMinutes: { type: Type.INTEGER },
+                        },
+                        required: ['timeSlot', 'activity', 'category', 'notes'],
+                      },
+                    },
                     setups: {
                       type: Type.ARRAY,
                       items: {
                         type: Type.OBJECT,
                         properties: {
                           setupName: { type: Type.STRING },
+                          timeSlot: { type: Type.STRING },
                           lightingNotes: { type: Type.STRING },
                           shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
                           estimatedMinutes: { type: Type.INTEGER },
@@ -2417,7 +2784,8 @@ ${shotsText}`;
             ],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
       const shootPlan: ShootPlan = {
@@ -2428,30 +2796,124 @@ ${shotsText}`;
                   dayLabel?: string;
                   location?: string;
                   callTime?: string;
+                  breakfastTime?: string;
+                  lunchTime?: string;
                   wrapTime?: string;
+                  scheduleBreakdown?: Array<{
+                    timeSlot?: string;
+                    activity?: string;
+                    category?: string;
+                    shotIds?: string[];
+                    notes?: string;
+                    estimatedMinutes?: number;
+                  }>;
                   setups?: Array<{
                     setupName?: string;
+                    timeSlot?: string;
                     lightingNotes?: string;
                     shotIds?: string[];
                     estimatedMinutes?: number;
                   }>;
                 },
                 idx: number
-              ) => ({
-                id: `day-${Date.now()}-${idx}`,
-                dayLabel: day.dayLabel || `Shoot Day ${idx + 1}`,
-                location: day.location || 'TBD — confirm with client',
-                callTime: day.callTime || 'TBD',
-                wrapTime: day.wrapTime || 'TBD',
-                setups: Array.isArray(day.setups)
+              ) => {
+                const dayCallTime = day.callTime || '07:00 AM';
+                const dayWrapTime = day.wrapTime || '06:30 PM';
+                const dayLunchTime = day.lunchTime || '12:30 PM - 01:30 PM';
+                const dayBreakfastTime = day.breakfastTime || '07:30 AM';
+
+                const parsedSetups = Array.isArray(day.setups)
                   ? day.setups.map((st) => ({
                       setupName: st.setupName || 'Setup',
+                      timeSlot: st.timeSlot || undefined,
                       lightingNotes: st.lightingNotes || '',
                       shotIds: Array.isArray(st.shotIds) ? st.shotIds : [],
                       estimatedMinutes: Number(st.estimatedMinutes) || 45,
                     }))
-                  : [],
-              })
+                  : [];
+
+                // Build default schedule breakdown if model omitted it
+                let scheduleBreakdown = Array.isArray(day.scheduleBreakdown) && day.scheduleBreakdown.length > 0
+                  ? day.scheduleBreakdown.map((sb, sbIdx) => ({
+                      id: `sb-${Date.now()}-${idx}-${sbIdx}`,
+                      timeSlot: sb.timeSlot || 'TBD',
+                      activity: sb.activity || 'Activity',
+                      category: (['call', 'setup', 'meal', 'move', 'wrap', 'general'].includes(sb.category || '')
+                        ? sb.category
+                        : 'general') as 'call' | 'setup' | 'meal' | 'move' | 'wrap' | 'general',
+                      shotIds: Array.isArray(sb.shotIds) ? sb.shotIds : [],
+                      notes: sb.notes || '',
+                      estimatedMinutes: sb.estimatedMinutes,
+                    }))
+                  : [];
+
+                if (scheduleBreakdown.length === 0) {
+                  scheduleBreakdown = [
+                    {
+                      id: `sb-${Date.now()}-${idx}-call`,
+                      timeSlot: `${dayCallTime} - 07:45 AM`,
+                      activity: 'Crew Call & Equipment Load-In',
+                      category: 'call',
+                      shotIds: [],
+                      notes: 'Grip & Electric truck unload, DIT staging, sound check',
+                      estimatedMinutes: 45,
+                    },
+                    {
+                      id: `sb-${Date.now()}-${idx}-bfast`,
+                      timeSlot: `${dayBreakfastTime} - 08:15 AM`,
+                      activity: 'Hot Breakfast & Morning Briefing',
+                      category: 'meal',
+                      shotIds: [],
+                      notes: 'Director & DP walk department heads through day plan',
+                      estimatedMinutes: 45,
+                    },
+                  ];
+
+                  parsedSetups.forEach((st, sIdx) => {
+                    scheduleBreakdown.push({
+                      id: `sb-${Date.now()}-${idx}-st-${sIdx}`,
+                      timeSlot: st.timeSlot || `Morning Setup ${sIdx + 1}`,
+                      activity: st.setupName,
+                      category: 'setup',
+                      shotIds: st.shotIds,
+                      notes: st.lightingNotes,
+                      estimatedMinutes: st.estimatedMinutes,
+                    });
+                  });
+
+                  scheduleBreakdown.push({
+                    id: `sb-${Date.now()}-${idx}-lunch`,
+                    timeSlot: dayLunchTime,
+                    activity: 'Mandatory Crew Lunch Break',
+                    category: 'meal',
+                    shotIds: [],
+                    notes: 'Hot catering provided on-set (quiet hour for media offload)',
+                    estimatedMinutes: 60,
+                  });
+
+                  scheduleBreakdown.push({
+                    id: `sb-${Date.now()}-${idx}-wrap`,
+                    timeSlot: `${dayWrapTime}`,
+                    activity: 'Company Wrap & Final DIT Backup',
+                    category: 'wrap',
+                    shotIds: [],
+                    notes: 'All media verified, equipment locked down, sound logs signed',
+                    estimatedMinutes: 30,
+                  });
+                }
+
+                return {
+                  id: `day-${Date.now()}-${idx}`,
+                  dayLabel: day.dayLabel || `Shoot Day ${idx + 1}`,
+                  location: day.location || 'TBD — confirm with client',
+                  callTime: dayCallTime,
+                  breakfastTime: dayBreakfastTime,
+                  lunchTime: dayLunchTime,
+                  wrapTime: dayWrapTime,
+                  scheduleBreakdown,
+                  setups: parsedSetups,
+                };
+              }
             )
           : [],
         equipment: Array.isArray(parsed.equipment) ? parsed.equipment : [],
@@ -2497,6 +2959,421 @@ ${shotsText}`;
     } catch (err) {
       res.status(500).json({
         error: formatGeminiError(err, 'Could not generate Shoot Plan.'),
+      });
+    }
+  });
+
+  // Google Drive Sync / Auto-Save Route (Uploads JSON, Shotlist PDF, and Storyboard Frames to Drive)
+  router.post('/pipeline/drive-sync', async (req, res) => {
+    try {
+      const {
+        projectId,
+        googleDriveFolderUrls,
+        googleDriveFolderUrl,
+        destinationFolderId,
+        destinationFolderUrl,
+      } = req.body;
+      const project = await getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found.' });
+
+      if (destinationFolderId) {
+        project.googleDriveDestinationFolderId = String(destinationFolderId).trim();
+      }
+      if (destinationFolderUrl) {
+        project.googleDriveDestinationFolderUrl = String(destinationFolderUrl).trim();
+      }
+
+      const urls = Array.isArray(googleDriveFolderUrls)
+        ? googleDriveFolderUrls.map((u: string) => String(u).trim()).filter(Boolean)
+        : googleDriveFolderUrl
+          ? [String(googleDriveFolderUrl).trim()]
+          : project.googleDriveFolderUrls || [];
+
+      project.googleDriveFolderUrls = urls;
+      if (urls.length > 0) {
+        project.googleDriveFolderUrl = urls[0];
+      }
+
+      const authHeader = req.headers.authorization;
+      const token =
+        authHeader && authHeader.startsWith('Bearer ')
+          ? authHeader.slice('Bearer '.length).trim()
+          : '';
+
+      if (!token) {
+        return res.status(401).json({
+          error: 'Google Drive sign-in is required to save backups to Drive.',
+        });
+      }
+
+      const syncResult = await syncProjectAssetsToDrive(
+        project,
+        token,
+        project.googleDriveDestinationFolderUrl || urls[0]
+      );
+
+      project.googleDriveBackupFolderId = syncResult.backupFolderId;
+      project.googleDriveBackupFolderUrl = syncResult.backupFolderUrl;
+      if (!project.googleDriveDestinationFolderId) {
+        project.googleDriveDestinationFolderId = syncResult.backupFolderId;
+        project.googleDriveDestinationFolderUrl = syncResult.backupFolderUrl;
+      }
+      project.googleDriveSyncedAt = new Date().toISOString();
+      project.googleDriveSyncStatus = 'synced';
+      project.googleDriveSyncError = undefined;
+      project.updatedAt = new Date().toISOString();
+
+      await saveProject(project);
+      res.json({
+        success: true,
+        syncedAt: project.googleDriveSyncedAt,
+        backupFolderId: syncResult.backupFolderId,
+        backupFolderUrl: syncResult.backupFolderUrl,
+        uploadedFiles: syncResult.uploadedFiles,
+      });
+    } catch (err) {
+      if (err instanceof DriveAuthError) {
+        return res.status(401).json({ error: err.message });
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Drive sync failed.',
+      });
+    }
+  });
+
+  // Google Drive Parse & Auto-Fill Route (Downloads real file contents + analyzes with Gemini)
+  router.post('/pipeline/drive-parse', async (req, res) => {
+    try {
+      const { projectId, googleDriveFolderUrls, googleDriveFolderUrl, filesToAnalyze, lockedFiles } =
+        req.body;
+
+      const authHeader = req.headers.authorization;
+      const token =
+        authHeader && authHeader.startsWith('Bearer ')
+          ? authHeader.slice('Bearer '.length).trim()
+          : '';
+
+      if (!token) {
+        return res.status(401).json({
+          error: 'Please sign in with Google first so the studio can read your Drive files.',
+        });
+      }
+
+      const fileList: DriveFileDescriptor[] = Array.isArray(filesToAnalyze)
+        ? filesToAnalyze
+        : Array.isArray(lockedFiles)
+          ? lockedFiles
+          : [];
+
+      if (fileList.length === 0) {
+        return res.status(400).json({
+          error:
+            'No files were found or selected in the linked Google Drive folders. Verify the folder URL(s) and permissions.',
+        });
+      }
+
+      const project =
+        projectId && projectId !== 'new' ? await getProject(projectId) : null;
+      if (projectId && projectId !== 'new' && !project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+
+      const urls = Array.isArray(googleDriveFolderUrls)
+        ? googleDriveFolderUrls.map((u: string) => String(u).trim()).filter(Boolean)
+        : googleDriveFolderUrl
+          ? [String(googleDriveFolderUrl).trim()]
+          : [];
+
+      // Download and extract real contents from Google Docs, Sheets, Slides, PDFs, DOCX, PPTX, XLSX, TXT, Images
+      const extracted = await downloadAndExtractDriveFiles(fileList.slice(0, 25), token);
+
+      if (extracted.textSummaries.length === 0 && extracted.inlineParts.length === 0) {
+        const detail =
+          extracted.warnings.length > 0
+            ? ` Details: ${extracted.warnings.slice(0, 3).join(' | ')}`
+            : '';
+        return res.status(400).json({
+          error: `Could not read content from the selected Google Drive files.${detail}`,
+          analyzedFiles: extracted.analyzedFiles,
+          warnings: extracted.warnings,
+        });
+      }
+
+      const ai = getGeminiClient();
+      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> = [];
+
+      // Attach PDFs and images directly for Gemini multimodal inspection
+      for (const inline of extracted.inlineParts.slice(0, 12)) {
+        parts.push({ text: `--- Attached File: ${inline.fileName} ---` });
+        parts.push({
+          inlineData: {
+            mimeType: inline.mimeType,
+            data: inline.data,
+          },
+        });
+      }
+
+      const prompt = `You are an expert Executive Producer at 52Launch Production Studio.
+Analyze the ACTUAL contents of the attached Google Drive files and documents below and extract accurate commercial production intake details.
+
+STRICT RULES:
+- Extract information ONLY from the provided file contents, PDFs, spreadsheets, docs, and product images.
+- NEVER invent, guess, or fabricate a fictional product or company.
+- If a detail (such as shoot dates or budget) is not present in the linked files, write "Not specified in linked Drive files" rather than making anything up.
+- For "provableClaims", extract specific factual product claims or specs explicitly stated in the documents.
+
+EXTRACTED DOCUMENT CONTENTS & ASSET CATALOG:
+${extracted.textSummaries.join('\n\n')}
+
+Return a JSON object with:
+- "client": string (actual client/company name from the documents)
+- "productName": string (actual product name from the documents)
+- "productDescription": string (accurate 2-4 sentence summary based on the files and product images)
+- "provableClaims": string[] (factual claims/specs directly supported by the documents)
+- "audience": string (target audience stated or strongly evidenced in the documents)
+- "tone": string (brand tone / visual & voice direction from the style guide or docs)
+- "clientMarketingIdeas": string (marketing angles, campaign structure, or hooks found in the docs)
+- "videosWanted": string (deliverables, formats, durations, or aspect ratios specified in the docs)
+- "shootLocationDatesBudgetNotes": string (shoot logistics, dates, locations, or budget notes from the docs)`;
+
+      parts.push({ text: prompt });
+
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: { parts },
+          config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              client: { type: Type.STRING },
+              productName: { type: Type.STRING },
+              productDescription: { type: Type.STRING },
+              provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
+              audience: { type: Type.STRING },
+              tone: { type: Type.STRING },
+              clientMarketingIdeas: { type: Type.STRING },
+              videosWanted: { type: Type.STRING },
+              shootLocationDatesBudgetNotes: { type: Type.STRING },
+            },
+            required: [
+              'client',
+              'productName',
+              'productDescription',
+              'provableClaims',
+              'audience',
+              'tone',
+              'clientMarketingIdeas',
+              'videosWanted',
+              'shootLocationDatesBudgetNotes',
+            ],
+          },
+        },
+        })
+      );
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+
+      // Import extracted image files from Drive into Product Photos (up to 8 images)
+      const importedPhotos: Array<{ id: string; url: string; caption: string }> = [];
+      const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+
+      for (const img of extracted.imageFiles.slice(0, 8)) {
+        if (project) {
+          const alreadyImported = project.product.photos.some(
+            (p) => p.caption === img.fileName
+          );
+          if (!alreadyImported) {
+            const ext = img.mimeType.includes('png')
+              ? 'png'
+              : img.mimeType.includes('webp')
+                ? 'webp'
+                : 'jpg';
+            const saved = await saveBufferAsset(
+              project.id,
+              Buffer.from(img.data, 'base64'),
+              'product',
+              ext
+            );
+            const photoEntry = {
+              id: `photo-drive-${img.fileId.slice(0, 8)}-${Date.now()}`,
+              url: saved.url,
+              caption: img.fileName,
+            };
+            importedPhotos.push(photoEntry);
+          }
+        } else {
+          importedPhotoDataUrls.push({
+            dataUrl: `data:${img.mimeType};base64,${img.data}`,
+            caption: img.fileName,
+          });
+        }
+      }
+
+      if (project) {
+        project.googleDriveFolderUrls = urls;
+        if (urls.length > 0) project.googleDriveFolderUrl = urls[0];
+        if (importedPhotos.length > 0) {
+          project.product.photos = [...project.product.photos, ...importedPhotos];
+        }
+        project.lockedDriveReferences = fileList.map((f) => ({
+          fileId: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          webViewLink: f.webViewLink,
+          folderUrl: f.folderUrl,
+          selected: true,
+        }));
+        project.googleDriveSyncedAt = new Date().toISOString();
+        project.updatedAt = new Date().toISOString();
+        await saveProject(project);
+      }
+
+      res.json({
+        success: true,
+        parsed,
+        analyzedFiles: extracted.analyzedFiles,
+        importedPhotos,
+        importedPhotoDataUrls,
+        warnings: extracted.warnings,
+      });
+    } catch (err) {
+      if (err instanceof DriveAuthError) {
+        return res.status(err.status).json({ error: err.message });
+      }
+      res.status(500).json({
+        error: formatGeminiError(err, 'Could not parse Google Drive files.'),
+      });
+    }
+  });
+
+  // Import specific Google Drive assets (images, videos, audio) into any project step
+  router.post('/pipeline/drive-import-assets', async (req, res) => {
+    try {
+      const { projectId, files, prefix, uploadToFal } = req.body as {
+        projectId: string;
+        files?: DriveFileDescriptor[];
+        prefix?: string;
+        uploadToFal?: boolean;
+      };
+
+      const authHeader = req.headers.authorization;
+      const token =
+        authHeader && authHeader.startsWith('Bearer ')
+          ? authHeader.slice(7).trim()
+          : '';
+
+      if (!token) {
+        return res.status(401).json({
+          error: 'Please sign in with Google first to import files from Google Drive.',
+        });
+      }
+
+      const fileList = Array.isArray(files) ? files.slice(0, 15) : [];
+      if (fileList.length === 0) {
+        return res.status(400).json({ error: 'Select at least one Google Drive file to import.' });
+      }
+
+      const isNewUnsaved = !projectId || projectId === 'new';
+      if (!isNewUnsaved) {
+        const existing = await getProject(projectId);
+        if (!existing) {
+          return res.status(404).json({ error: 'Project not found.' });
+        }
+      }
+
+      const assets: Array<{
+        fileId: string;
+        name: string;
+        mimeType: string;
+        url?: string;
+        filename?: string;
+        falUrl?: string | null;
+        dataUrl?: string;
+      }> = [];
+      const warnings: string[] = [];
+
+      const falKey = process.env.FAL_KEY;
+      const canUploadFal = Boolean(uploadToFal && falKey && falKey.trim() && falKey !== 'MY_FAL_KEY');
+      if (canUploadFal) {
+        fal.config({ credentials: falKey });
+      }
+
+      for (const file of fileList) {
+        try {
+          const downloaded = await downloadDriveBinaryAsset(file, token);
+          if (isNewUnsaved) {
+            if (downloaded.buffer.length > 18 * 1024 * 1024) {
+              warnings.push(
+                `"${downloaded.fileName}" is too large to stage before project creation (${(
+                  downloaded.buffer.length /
+                  (1024 * 1024)
+                ).toFixed(1)} MB). Save the project first, then import it.`
+              );
+              continue;
+            }
+            assets.push({
+              fileId: file.id,
+              name: downloaded.fileName,
+              mimeType: downloaded.mimeType,
+              dataUrl: `data:${downloaded.mimeType};base64,${downloaded.buffer.toString('base64')}`,
+            });
+          } else {
+            const saved = await saveBufferAsset(
+              projectId,
+              downloaded.buffer,
+              prefix || 'drive',
+              downloaded.ext
+            );
+            let falUrl: string | null = null;
+            if (canUploadFal) {
+              try {
+                falUrl = await uploadMediaRefToFal(projectId, saved.url);
+              } catch {
+                // Non-fatal: local project asset URL is still saved
+              }
+            }
+            assets.push({
+              fileId: file.id,
+              name: downloaded.fileName,
+              mimeType: downloaded.mimeType,
+              url: saved.url,
+              filename: saved.filename,
+              falUrl,
+            });
+          }
+        } catch (err) {
+          if (err instanceof DriveAuthError) throw err;
+          warnings.push(
+            err instanceof Error
+              ? err.message
+              : `Could not import "${file.name || file.id}".`
+          );
+        }
+      }
+
+      if (assets.length === 0) {
+        return res.status(400).json({
+          error: warnings[0] || 'Could not import any of the selected Google Drive files.',
+          warnings,
+        });
+      }
+
+      res.json({
+        success: true,
+        assets,
+        warnings,
+      });
+    } catch (err) {
+      if (err instanceof DriveAuthError) {
+        return res.status(err.status).json({ error: err.message });
+      }
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Could not import assets from Google Drive.',
       });
     }
   });

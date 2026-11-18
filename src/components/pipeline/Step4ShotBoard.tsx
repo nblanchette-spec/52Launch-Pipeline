@@ -12,6 +12,7 @@ import {
   Upload,
   Printer,
   Package,
+  FolderSync,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -20,6 +21,8 @@ import {
   VideoModelOption,
 } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
+import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step4ShotBoardProps {
   project: PipelineProject;
@@ -41,6 +44,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [uploadingShotId, setUploadingShotId] = useState<string | null>(null);
+  const [drivePickerShotId, setDrivePickerShotId] = useState<string | null>(null);
 
   const totalDuration = project.shots.reduce(
     (sum, s) => sum + (Number(s.durationSec) || 0),
@@ -187,15 +191,15 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
   return (
     <div className="max-w-[1360px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 4 · Shot List & Shot Board
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             Master Shot Board — Live Shoot, Hybrid & AI Together
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Every shot in sequence. Copy frame prompts into Google Flow, upload your frames
             directly onto any card, or insert custom live-action shots.
           </p>
@@ -206,12 +210,12 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
             type="button"
             disabled={isGenerating}
             onClick={() => void triggerGenerate(false)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isGenerating ? (
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-400" />
+              <Sparkles className="w-4 h-4 text-[#C6202F]" />
             )}
             {isGenerating
               ? 'Building Shot List...'
@@ -223,7 +227,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
           <button
             type="button"
             onClick={addShot}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             Add shot
@@ -233,7 +237,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
             <button
               type="button"
               onClick={onOpenPrintable}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
               Printable storyboard
@@ -241,7 +245,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
           )}
 
           {project.approvals.shotListApproved ? (
-            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 rounded-lg whitespace-nowrap shrink-0">
+            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap shrink-0">
               <CheckCircle2 className="w-4 h-4" />
               Shot list approved
             </span>
@@ -250,7 +254,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
               type="button"
               disabled={project.shots.length === 0}
               onClick={() => void onApproveShotList()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               Approve shot list
@@ -261,7 +265,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
 
       {/* Summary Bar */}
       {project.shots.length > 0 && (
-        <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-400 font-mono tabular-nums">
+        <div className="flex flex-wrap items-center gap-4 text-xs text-[#5A5A66] font-mono tabular-nums">
           <span>{project.shots.length} total shots</span>
           <span aria-hidden="true">·</span>
           <span>{totalDuration}s total runtime</span>
@@ -272,15 +276,15 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
             {project.shots.filter((s) => s.route === 'ai_video').length} AI
           </span>
           <span aria-hidden="true">·</span>
-          <span className="text-amber-300">
+          <span className="text-[#891A23]">
             {project.shots.filter((s) => s.productInFrame).length} with product in frame
           </span>
         </div>
       )}
 
       {confirmOverwrite && (
-        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="text-xs text-amber-200">
+        <div className="p-4 rounded-xl bg-[#FDF4F5] border border-[#EABAC0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-xs text-[#891A23]">
             You have manually edited shots in this Shot Board. Re-running Gemini will replace
             your current shots. Continue?
           </div>
@@ -288,14 +292,14 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
             <button
               type="button"
               onClick={() => setConfirmOverwrite(false)}
-              className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] rounded-lg cursor-pointer"
             >
               Keep my edits
             </button>
             <button
               type="button"
               onClick={() => void triggerGenerate(true)}
-              className="px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
             >
               Replace & re-run
             </button>
@@ -304,19 +308,19 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
       )}
 
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
 
       {/* Shot Cards */}
       {project.shots.length === 0 ? (
-        <div className="bg-[#14171D] border border-dashed border-[#262B36] rounded-xl p-12 text-center space-y-3">
-          <Sparkles className="w-8 h-8 text-amber-400 mx-auto" />
-          <div className="text-base font-semibold text-zinc-100">
+        <div className="bg-white border border-dashed border-[#E2E2E6] rounded-xl p-12 text-center space-y-3">
+          <Sparkles className="w-8 h-8 text-[#C6202F] mx-auto" />
+          <div className="text-base font-semibold text-[#111114]">
             No shots on the board yet
           </div>
-          <p className="text-xs text-zinc-400 max-w-md mx-auto">
+          <p className="text-xs text-[#5A5A66] max-w-md mx-auto">
             Click &ldquo;Generate shot list&rdquo; to have Gemini plan an ordered mix of AI,
             hybrid, and live-action shots, or click &ldquo;Add shot&rdquo; to build manually.
           </p>
@@ -331,21 +335,21 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
             return (
               <div
                 key={`${shot.id}-${idx}`}
-                className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden"
+                className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden"
               >
                 {/* Shot Card Header */}
-                <div className="px-5 py-3 bg-[#101318] border-b border-[#262B36] flex flex-wrap items-center justify-between gap-3">
+                <div className="px-5 py-3 bg-[#FBFBFC] border-b border-[#E2E2E6] flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-3">
                     <input
                       type="text"
                       value={shot.id}
                       onChange={(e) => updateShot(shot.id, { id: e.target.value })}
                       aria-label="Shot number"
-                      className="w-16 bg-[#0B0D10] border border-[#262B36] rounded px-2 py-1 text-xs font-mono font-bold text-amber-400 text-center focus:outline-none focus:border-amber-500"
+                      className="w-16 bg-[#F6F6F7] border border-[#E2E2E6] rounded px-2 py-1 text-xs font-mono font-bold text-[#C6202F] text-center focus:outline-none focus:border-[#C6202F]"
                     />
 
                     <div className="flex items-center gap-1.5 text-xs">
-                      <span className="text-zinc-500">Duration:</span>
+                      <span className="text-[#6E6E7A]">Duration:</span>
                       <input
                         type="number"
                         min={1}
@@ -356,13 +360,13 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             durationSec: Number(e.target.value) || 1,
                           })
                         }
-                        className="w-14 bg-[#0B0D10] border border-[#262B36] rounded px-2 py-1 text-xs font-mono tabular-nums text-zinc-100 text-right focus:outline-none focus:border-amber-500"
+                        className="w-14 bg-[#F6F6F7] border border-[#E2E2E6] rounded px-2 py-1 text-xs font-mono tabular-nums text-[#111114] text-right focus:outline-none focus:border-[#C6202F]"
                       />
-                      <span className="text-zinc-500">sec</span>
+                      <span className="text-[#6E6E7A]">sec</span>
                     </div>
 
-                    <span className="text-xs text-zinc-400">
-                      Status: <span className="text-zinc-200 font-medium">{shot.status}</span>
+                    <span className="text-xs text-[#5A5A66]">
+                      Status: <span className="text-[#24242B] font-medium">{shot.status}</span>
                     </span>
 
                     <button
@@ -372,8 +376,8 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                       }
                       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                         shot.productInFrame
-                          ? 'bg-amber-500/15 border-amber-500 text-amber-300'
-                          : 'bg-[#0B0D10] border-[#262B36] text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#5A5A66] hover:text-[#24242B]'
                       }`}
                     >
                       <Package className="w-3.5 h-3.5" />
@@ -388,7 +392,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                       disabled={idx === 0}
                       onClick={() => moveShot(idx, -1)}
                       title="Move shot up"
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 disabled:opacity-30 rounded cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-30 rounded cursor-pointer"
                     >
                       <ArrowUp className="w-3.5 h-3.5" />
                       Up
@@ -398,7 +402,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                       disabled={idx === project.shots.length - 1}
                       onClick={() => moveShot(idx, 1)}
                       title="Move shot down"
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 disabled:opacity-30 rounded cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-30 rounded cursor-pointer"
                     >
                       <ArrowDown className="w-3.5 h-3.5" />
                       Down
@@ -407,7 +411,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                       type="button"
                       onClick={() => deleteShot(shot.id)}
                       title="Remove shot"
-                      className="p-1.5 text-zinc-500 hover:text-rose-400 rounded cursor-pointer"
+                      className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] rounded cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -418,7 +422,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                 <div className="p-5 grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6">
                   {/* Left Column: Click-to-upload Frame Image + Route / Model */}
                   <div className="space-y-3">
-                    <label className="block aspect-video bg-[#0B0D10] border border-dashed border-[#262B36] hover:border-amber-500/70 rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer transition-colors">
+                    <label className="block aspect-video bg-[#F6F6F7] border border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 rounded-lg overflow-hidden relative flex items-center justify-center cursor-pointer transition-colors">
                       {shot.frameImageUrl ? (
                         <>
                           <img
@@ -432,20 +436,20 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           </div>
                         </>
                       ) : (
-                        <div className="text-center p-4 space-y-1.5 text-zinc-500">
+                        <div className="text-center p-4 space-y-1.5 text-[#6E6E7A]">
                           {isUploading ? (
-                            <Loader2 className="w-5 h-5 animate-spin text-amber-400 mx-auto" />
+                            <Loader2 className="w-5 h-5 animate-spin text-[#C6202F] mx-auto" />
                           ) : (
                             <Upload className="w-5 h-5 mx-auto" />
                           )}
-                          <div className="text-xs font-medium text-zinc-300">
+                          <div className="text-xs font-medium text-[#3A3A44]">
                             {isUploading
                               ? 'Uploading frame...'
                               : shot.route === 'live'
                                 ? 'Upload crew reference frame'
                                 : 'Upload Google Flow frame'}
                           </div>
-                          <div className="text-[11px] text-zinc-500">
+                          <div className="text-[11px] text-[#6E6E7A]">
                             Click to choose image
                           </div>
                         </div>
@@ -462,9 +466,18 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                       />
                     </label>
 
+                    <button
+                      type="button"
+                      onClick={() => setDrivePickerShotId(shot.id)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                    >
+                      <FolderSync className="w-3.5 h-3.5" />
+                      Pick frame from Google Drive
+                    </button>
+
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">
+                        <label className="block text-[11px] text-[#5A5A66] mb-1">
                           Route
                         </label>
                         <select
@@ -472,7 +485,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           onChange={(e) =>
                             handleRouteChange(shot, e.target.value as ShotRoute)
                           }
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-100 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-medium text-[#111114] focus:outline-none focus:border-[#C6202F]"
                         >
                           <option value="ai_video">AI video</option>
                           <option value="hybrid">Hybrid</option>
@@ -482,7 +495,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
 
                       {shot.route !== 'live' ? (
                         <div>
-                          <label className="block text-[11px] text-zinc-400 mb-1">
+                          <label className="block text-[11px] text-[#5A5A66] mb-1">
                             Model
                           </label>
                           <select
@@ -492,7 +505,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                                 model: e.target.value as VideoModelOption,
                               })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-medium text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           >
                             <option value="flux3">Flux 3</option>
                             <option value="seedance">Seedance</option>
@@ -503,7 +516,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                         </div>
                       ) : (
                         <div>
-                          <label className="block text-[11px] text-zinc-400 mb-1">
+                          <label className="block text-[11px] text-[#5A5A66] mb-1">
                             Deliverable
                           </label>
                           <input
@@ -512,7 +525,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             onChange={(e) =>
                               updateShot(shot.id, { deliverable: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                       )}
@@ -521,7 +534,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                     {shot.route !== 'live' && (
                       <div className="grid grid-cols-2 gap-2.5">
                         <div>
-                          <label className="block text-[11px] text-zinc-400 mb-1">
+                          <label className="block text-[11px] text-[#5A5A66] mb-1">
                             Deliverable
                           </label>
                           <input
@@ -530,11 +543,11 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             onChange={(e) =>
                               updateShot(shot.id, { deliverable: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                         <div>
-                          <label className="block text-[11px] text-zinc-400 mb-1">
+                          <label className="block text-[11px] text-[#5A5A66] mb-1">
                             Chain from
                           </label>
                           <select
@@ -542,7 +555,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             onChange={(e) =>
                               updateShot(shot.id, { chainFrom: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                           >
                             <option value="none">None</option>
                             {earlierShots.map((es) => (
@@ -559,7 +572,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                   {/* Right Column: Editable Plain-Text Fields */}
                   <div className="space-y-3.5">
                     <div>
-                      <label className="block text-xs font-medium text-zinc-300 mb-1">
+                      <label className="block text-xs font-medium text-[#3A3A44] mb-1">
                         What happens
                       </label>
                       <textarea
@@ -567,13 +580,13 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                         value={shot.scene}
                         onChange={(e) => updateShot(shot.id, { scene: e.target.value })}
                         placeholder="Describe the single clear action in plain English..."
-                        className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                        className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-sm text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
                       />
                     </div>
 
                     {showShootDirection && (
                       <div>
-                        <label className="block text-xs font-medium text-emerald-300 mb-1">
+                        <label className="block text-xs font-medium text-emerald-800 mb-1">
                           Shoot direction (camera, lens, lighting, talent and product handling)
                         </label>
                         <textarea
@@ -583,7 +596,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             updateShot(shot.id, { shootDirection: e.target.value })
                           }
                           placeholder="Camera placement, lens, lighting ratio, talent action, and how the product is held..."
-                          className="w-full bg-[#0B0D10] border border-emerald-500/30 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-400"
+                          className="w-full bg-[#F6F6F7] border border-emerald-300 rounded-lg px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-emerald-600"
                         />
                       </div>
                     )}
@@ -591,7 +604,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                     {/* Frame Prompt with Copy Button */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-medium text-zinc-300">
+                        <label className="text-xs font-medium text-[#3A3A44]">
                           Frame prompt (paste into Google Flow)
                         </label>
                         <button
@@ -599,7 +612,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           onClick={() =>
                             void handleCopy(`frame-${shot.id}`, shot.framePrompt)
                           }
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-amber-300 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 rounded transition-colors cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded transition-colors cursor-pointer"
                         >
                           {copiedKey === `frame-${shot.id}` ? (
                             <>
@@ -621,14 +634,14 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           updateShot(shot.id, { framePrompt: e.target.value })
                         }
                         placeholder="Still image prompt with fixed character descriptors and [PRODUCT PLACEHOLDER: composite real product here]..."
-                        className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500 leading-relaxed"
+                        className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
                       />
                     </div>
 
                     {/* Video Prompt with Copy Button */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-medium text-zinc-300">
+                        <label className="text-xs font-medium text-[#3A3A44]">
                           Video prompt
                         </label>
                         <button
@@ -636,11 +649,11 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           onClick={() =>
                             void handleCopy(`video-${shot.id}`, shot.videoPrompt)
                           }
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded transition-colors cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded transition-colors cursor-pointer"
                         >
                           {copiedKey === `video-${shot.id}` ? (
                             <>
-                              <Check className="w-3 h-3 text-emerald-400" />
+                              <Check className="w-3 h-3 text-emerald-700" />
                               Copied
                             </>
                           ) : (
@@ -658,14 +671,14 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                           updateShot(shot.id, { videoPrompt: e.target.value })
                         }
                         placeholder="Motion, camera, and timing prompt (auto-generated in Phase 2 or enter notes now)..."
-                        className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                        className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
                       />
                     </div>
 
                     {/* VO Line & Continuity */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-xs font-medium text-zinc-300 mb-1">
+                        <label className="block text-xs font-medium text-[#3A3A44] mb-1">
                           VO line
                         </label>
                         <input
@@ -675,12 +688,12 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             updateShot(shot.id, { voLine: e.target.value })
                           }
                           placeholder="Spoken voiceover line (or leave empty)..."
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-xs font-medium text-zinc-300 mb-1">
+                        <label className="block text-xs font-medium text-[#3A3A44] mb-1">
                           Continuity notes
                         </label>
                         <input
@@ -690,7 +703,7 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
                             updateShot(shot.id, { continuityNotes: e.target.value })
                           }
                           placeholder="Light direction, wardrobe, eye-line notes..."
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
                         />
                       </div>
                     </div>
@@ -701,6 +714,45 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
           })}
         </div>
       )}
+
+      <DriveAssetPickerModal
+        isOpen={Boolean(drivePickerShotId)}
+        projectId={project.id}
+        initialFolderUrls={
+          project.googleDriveFolderUrls?.length
+            ? project.googleDriveFolderUrls
+            : project.googleDriveFolderUrl
+              ? [project.googleDriveFolderUrl]
+              : []
+        }
+        mediaFilter="image"
+        multiple={false}
+        prefix="frame"
+        title={
+          drivePickerShotId
+            ? `Pick Reference Frame for ${drivePickerShotId} from Google Drive`
+            : 'Pick Reference Frame from Google Drive'
+        }
+        onClose={() => setDrivePickerShotId(null)}
+        onImported={(assets: ImportedDriveAsset[]) => {
+          const picked = assets[0];
+          if (picked?.url && drivePickerShotId) {
+            updateShot(drivePickerShotId, {
+              frameImageUrl: picked.url,
+              status: 'Frame Uploaded',
+              frameCheck: null,
+              productFrameApproved: false,
+            });
+          }
+        }}
+        onFoldersChange={(urls) => {
+          void onUpdateProject({
+            ...project,
+            googleDriveFolderUrls: urls,
+            googleDriveFolderUrl: urls[0] || undefined,
+          });
+        }}
+      />
     </div>
   );
 };

@@ -51,10 +51,13 @@ export interface BrandBible {
   };
   visualStyle: {
     palette: string;
+    typography?: string;
     lighting: string;
     lensAndFraming: string;
     grade: string;
   };
+  brandLogoUrl?: string | null;
+  brandLogoCaption?: string;
   characters: BibleCharacter[];
   productRules: string;
   bannedList: string[];
@@ -106,6 +109,41 @@ export interface FrameCheckResult {
   checkedAt: string;
 }
 
+export interface ShotClipHistoryItem {
+  id: string;
+  videoUrl: string;
+  createdAt: string;
+  modelId: string;
+  workflowMode: string;
+  prompt: string;
+  negativePrompt?: string;
+  aspectRatio: string;
+  duration: number;
+  qualityTier: 'draft' | 'final';
+  resolution: string;
+  nativeAudio: boolean;
+  safetyTolerance?: number;
+  enableSafetyChecker?: boolean;
+  seed?: number | null;
+  startFrameUrl?: string | null;
+  endFrameUrl?: string | null;
+  keyframes?: Array<{
+    id: string;
+    timeSeconds: number;
+    imageUrl: string;
+    label?: string;
+  }>;
+  sourceVideoUrl?: string | null;
+  referenceImages?: string[];
+  referenceElements?: string[];
+  referenceVideos?: string[];
+  referenceAudioUrl?: string | null;
+  referenceTask?: string;
+  draftCacheUrl?: string | null;
+  upscaledVideoUrl?: string | null;
+  upscaledResolution?: string | null;
+}
+
 export interface PipelineShot {
   id: string; // S01, S02...
   deliverable: string;
@@ -131,6 +169,7 @@ export interface PipelineShot {
   upscaledVideoUrl?: string | null;
   upscaledResolution?: string | null;
   upscaleDetails?: UpscaleDetails | null;
+  videoHistory?: ShotClipHistoryItem[];
   status: ShotStatus;
 }
 
@@ -185,17 +224,31 @@ export interface VoStudioSettings {
   customStylePrompt?: string;
 }
 
+export interface ShootScheduleBlock {
+  id: string;
+  timeSlot: string; // e.g., "07:00 - 08:00"
+  activity: string; // e.g., "Crew Call & Equipment Load-In", "Setup A", "Lunch Break"
+  category: 'call' | 'setup' | 'meal' | 'move' | 'wrap' | 'general';
+  shotIds?: string[];
+  notes?: string;
+  estimatedMinutes?: number;
+}
+
 export interface ShootDayPlan {
   id: string;
   dayLabel: string;
   location: string;
   callTime: string;
   wrapTime: string;
+  breakfastTime?: string;
+  lunchTime?: string;
+  scheduleBreakdown?: ShootScheduleBlock[];
   setups: Array<{
     setupName: string;
     lightingNotes: string;
     shotIds: string[];
     estimatedMinutes: number;
+    timeSlot?: string;
   }>;
 }
 
@@ -255,6 +308,24 @@ export interface PipelineProject {
   voSettings?: VoStudioSettings;
   externalUpscales?: ExternalUpscaleItem[];
   shootPlan: ShootPlan;
+  googleDriveFolderUrl?: string;
+  googleDriveFolderUrls?: string[];
+  googleDriveDestinationFolderId?: string;
+  googleDriveDestinationFolderUrl?: string;
+  googleDriveDestinationFolderName?: string;
+  googleDriveBackupFolderId?: string;
+  googleDriveBackupFolderUrl?: string;
+  googleDriveSyncError?: string;
+  lockedDriveReferences?: Array<{
+    fileId: string;
+    name: string;
+    mimeType: string;
+    webViewLink?: string;
+    folderUrl?: string;
+    selected: boolean;
+  }>;
+  googleDriveSyncedAt?: string;
+  googleDriveSyncStatus?: 'idle' | 'syncing' | 'synced' | 'error';
   approvals: ApprovalState;
   generationLog: GenerationLogEntry[];
 }

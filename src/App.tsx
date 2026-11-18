@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
   PipelineProject,
@@ -16,6 +16,11 @@ import { Step7VideoStudio } from './components/pipeline/Step7VideoStudio';
 import { Step8VoStudio } from './components/pipeline/Step8VoStudio';
 import { Step9ShootPlan } from './components/pipeline/Step9ShootPlan';
 import { PrintableStoryboardView } from './components/pipeline/PrintableStoryboardView';
+import { MasterPdfExportModal } from './components/pipeline/MasterPdfExportModal';
+import {
+  getGoogleDriveAccessToken,
+  syncProjectToDriveServer,
+} from './utils/googleDriveSync';
 
 // Preserve Classic Studio components so existing features remain accessible
 import { BrandProject, MacroPhase, WorkflowStepId } from './types/studio';
@@ -46,14 +51,71 @@ export default function App() {
   const [activeStep, setActiveStep] = useState<PipelineStepNumber>(1);
   const [isNewProjectMode, setIsNewProjectMode] = useState(false);
   const [isPrintableOpen, setIsPrintableOpen] = useState(false);
+  const [isMasterExportOpen, setIsMasterExportOpen] = useState(false);
   const [isLoadingPipeline, setIsLoadingPipeline] = useState(true);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
+
+  const driveSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showPipelineNotice = (msg: string) => {
     setPipelineNotice(msg);
     setTimeout(() => {
       setPipelineNotice((prev) => (prev === msg ? null : prev));
     }, 4500);
+  };
+
+  const scheduleDriveAutoSave = (proj: PipelineProject) => {
+    const urls =
+      proj.googleDriveFolderUrls && proj.googleDriveFolderUrls.length > 0
+        ? proj.googleDriveFolderUrls
+        : proj.googleDriveFolderUrl
+          ? [proj.googleDriveFolderUrl]
+          : [];
+
+    if (urls.length === 0 && !proj.googleDriveBackupFolderId) return;
+
+    if (driveSyncTimerRef.current) {
+      clearTimeout(driveSyncTimerRef.current);
+    }
+
+    driveSyncTimerRef.current = setTimeout(() => {
+      void (async () => {
+        const token = await getGoogleDriveAccessToken();
+        if (!token) return;
+        try {
+          const res = await syncProjectToDriveServer(
+            proj.id,
+            urls,
+            token,
+            proj.googleDriveDestinationFolderId,
+            proj.googleDriveDestinationFolderUrl
+          );
+          setActiveProject((curr) =>
+            curr && curr.id === proj.id
+              ? {
+                  ...curr,
+                  googleDriveSyncStatus: 'synced',
+                  googleDriveSyncedAt: res.syncedAt,
+                  googleDriveBackupFolderId:
+                    res.backupFolderId || curr.googleDriveBackupFolderId,
+                  googleDriveBackupFolderUrl:
+                    res.backupFolderUrl || curr.googleDriveBackupFolderUrl,
+                  googleDriveDestinationFolderId:
+                    curr.googleDriveDestinationFolderId || res.backupFolderId,
+                  googleDriveDestinationFolderUrl:
+                    curr.googleDriveDestinationFolderUrl || res.backupFolderUrl,
+                }
+              : curr
+          );
+        } catch {
+          setActiveProject((curr) =>
+            curr && curr.id === proj.id
+              ? { ...curr, googleDriveSyncStatus: 'error' }
+              : curr
+          );
+        }
+      })();
+    }, 1800);
   };
 
   const refreshProjectList = async (selectId?: string) => {
@@ -132,6 +194,17 @@ export default function App() {
       shootLocationDatesBudgetNotes: string;
     };
     initialPhotoDataUrls: Array<{ dataUrl: string; caption: string }>;
+    googleDriveFolderUrls?: string[];
+    googleDriveDestinationFolderId?: string;
+    googleDriveDestinationFolderUrl?: string;
+    googleDriveDestinationFolderName?: string;
+    lockedDriveReferences?: Array<{
+      fileId: string;
+      name: string;
+      mimeType: string;
+      webViewLink?: string;
+      selected: boolean;
+    }>;
   }) => {
     const resp = await fetch('/api/projects', {
       method: 'POST',
@@ -145,6 +218,7 @@ export default function App() {
     setIsNewProjectMode(false);
     setActiveStep(2);
     await refreshProjectList(created.id);
+    scheduleDriveAutoSave(created);
     showPipelineNotice(`Saved "${created.product.name}" to the studio.`);
   };
 
@@ -173,6 +247,7 @@ export default function App() {
     const data = await resp.json();
     if (resp.ok && data.project) {
       setActiveProject(data.project);
+      scheduleDriveAutoSave(data.project);
       setProjectSummaries((prev) =>
         prev.map((s) =>
           s.id === data.project.id
@@ -200,6 +275,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate Brand Bible.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice('Brand Bible generated. Review and click Approve bible when ready.');
   };
 
@@ -213,6 +289,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate Creative Brief.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice('Creative Brief generated. Review and click Approve brief when ready.');
   };
 
@@ -226,6 +303,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate Shot List.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice('Shot list built with AI, hybrid, and live shots.');
   };
 
@@ -239,6 +317,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Frame Check failed.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
   };
 
   const handleGenerateVideoPrompts = async (shotId?: string) => {
@@ -251,6 +330,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate video prompts.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice(
       shotId
         ? `Updated video prompt for ${shotId}.`
@@ -275,6 +355,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Video generation failed.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice(`Video ready for ${shotId}.`);
   };
 
@@ -288,6 +369,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate VO script.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice('VO script drafted and timed to your shots.');
   };
 
@@ -301,6 +383,7 @@ export default function App() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not generate Shoot Plan.');
     setActiveProject(data.project);
+    scheduleDriveAutoSave(data.project);
     showPipelineNotice('Live & Hybrid Shoot Plan built.');
   };
 
@@ -359,15 +442,15 @@ export default function App() {
       : classicActiveProject;
 
     return (
-      <div className="min-h-screen bg-[#0B0D10] text-zinc-100 flex flex-col">
-        <div className="no-print bg-[#14171D] border-b border-[#262B36] px-5 py-2 flex items-center justify-between text-xs">
-          <span className="text-zinc-400">
+      <div className="min-h-screen bg-[#F6F6F7] text-[#111114] flex flex-col">
+        <div className="no-print bg-white border-b border-[#E2E2E6] px-5 py-2 flex items-center justify-between text-xs">
+          <span className="text-[#5A5A66]">
             Viewing Classic 6-Step Storyboard Studio
           </span>
           <button
             type="button"
             onClick={() => setWorkspaceMode('pipeline')}
-            className="px-3 py-1 font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-md cursor-pointer"
+            className="px-3.5 py-1 font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] brand-corner-sm cursor-pointer transition-colors"
           >
             Return to Production Pipeline
           </button>
@@ -508,7 +591,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0B0D10] text-zinc-100 flex flex-col">
+    <div className="min-h-screen bg-[#F6F6F7] text-[#111114] flex flex-col">
       <PipelineHeader
         projects={projectSummaries}
         activeProject={activeProject}
@@ -528,21 +611,22 @@ export default function App() {
           setActiveStep(step);
         }}
         onTogglePrintable={() => setIsPrintableOpen((v) => !v)}
+        onOpenMasterExport={() => setIsMasterExportOpen(true)}
         onDownloadBackup={handleDownloadBackup}
         onImportBackup={(f) => void handleImportBackup(f)}
         onSwitchToClassicStudio={() => setWorkspaceMode('classic')}
       />
 
       {pipelineNotice && (
-        <div className="no-print fixed bottom-5 right-5 z-50 bg-[#14171D] border border-amber-500/60 text-xs text-zinc-100 px-4 py-2.5 rounded-lg shadow-xl">
+        <div className="no-print fixed bottom-5 right-5 z-50 bg-[#111114] border border-[#C6202F] text-xs text-white px-4 py-2.5 brand-corner-sm shadow-xl">
           {pipelineNotice}
         </div>
       )}
 
       <main className="flex-1 min-w-0 overflow-y-auto print-only-full">
         {isLoadingPipeline ? (
-          <div className="flex items-center justify-center py-24 gap-2 text-sm text-zinc-400">
-            <Loader2 className="w-5 h-5 animate-spin text-amber-400" />
+          <div className="flex items-center justify-center py-24 gap-2.5 text-sm text-[#5A5A66]">
+            <Loader2 className="w-5 h-5 animate-spin text-[#C6202F]" />
             Loading studio projects...
           </div>
         ) : isPrintableOpen && activeProject ? (
@@ -641,7 +725,10 @@ export default function App() {
           <Step7VideoStudio
             project={activeProject}
             onUpdateProject={handleUpdatePipelineProject}
-            onProjectUpdated={(updated) => setActiveProject(updated)}
+            onProjectUpdated={(updated) => {
+              setActiveProject(updated);
+              scheduleDriveAutoSave(updated);
+            }}
             onGenerateVideoPrompts={handleGenerateVideoPrompts}
             onGenerateSingleVideo={handleGenerateSingleVideo}
             onApproveVideoStep={async () => {
@@ -659,7 +746,10 @@ export default function App() {
           <Step8VoStudio
             project={activeProject}
             onUpdateProject={handleUpdatePipelineProject}
-            onProjectUpdated={(updated) => setActiveProject(updated)}
+            onProjectUpdated={(updated) => {
+              setActiveProject(updated);
+              scheduleDriveAutoSave(updated);
+            }}
             onGenerateVoScript={handleGenerateVoScript}
             onApproveVo={async () => {
               await handleUpdatePipelineProject({
@@ -677,6 +767,7 @@ export default function App() {
             project={activeProject}
             onUpdateProject={handleUpdatePipelineProject}
             onGenerateShootPlan={handleGenerateShootPlan}
+            onOpenMasterExport={() => setIsMasterExportOpen(true)}
             onApproveShootPlan={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
@@ -689,6 +780,12 @@ export default function App() {
           />
         )}
       </main>
+
+      <MasterPdfExportModal
+        isOpen={isMasterExportOpen}
+        project={activeProject}
+        onClose={() => setIsMasterExportOpen(false)}
+      />
     </div>
   );
 }

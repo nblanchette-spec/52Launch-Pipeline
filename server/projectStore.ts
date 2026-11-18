@@ -222,11 +222,14 @@ export async function seedInitialProjectIfEmpty(): Promise<void> {
           'Speak in calm, direct athletic truths. Avoid breathless tech buzzwords, exclamation marks, or unproven medical promises.',
       },
       visualStyle: {
-        palette: 'Asphalt black, brutalist concrete slate, dawn mist white, and subtle amber telemetry highlights.',
+        palette: 'Asphalt black (#0F172A), brutalist concrete slate (#334155), dawn mist white (#F8FAFC), and amber telemetry highlights (#F59E0B).',
+        typography: 'Primary Display: Neue Haas Grotesk Bold; Body & Subheads: Inter Medium; Telemetry Readouts: JetBrains Mono Regular.',
         lighting: 'Low-angle natural dawn sunlight cutting across concrete bleachers with crisp negative fill.',
         lensAndFraming: '35mm and 85mm anamorphic primes for track action; 100mm macro for skin-patch detail.',
         grade: 'Rich monochrome-leaning contrast with natural warm skin tones.',
       },
+      brandLogoUrl: null,
+      brandLogoCaption: '',
       characters: [
         {
           id: 'char-1',

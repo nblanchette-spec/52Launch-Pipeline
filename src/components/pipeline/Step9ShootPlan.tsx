@@ -14,19 +14,28 @@ import {
   Camera,
   HelpCircle,
   ShieldAlert,
+  Download,
+  FileText,
+  Utensils,
+  Coffee,
+  Clock,
+  RotateCcw,
 } from 'lucide-react';
 import {
   PipelineProject,
   ShootDayPlan,
   ShootPlan,
+  ShootScheduleBlock,
 } from '../../types/pipeline';
 import { PrintableCallSheetView } from './PrintableCallSheetView';
+import { downloadCallSheetPdf } from '../../utils/pdfExporter';
 
 interface Step9ShootPlanProps {
   project: PipelineProject;
   onUpdateProject: (updated: PipelineProject) => Promise<void>;
   onGenerateShootPlan: () => Promise<void>;
   onApproveShootPlan: () => Promise<void>;
+  onOpenMasterExport: () => void;
 }
 
 export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
@@ -34,11 +43,27 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
   onUpdateProject,
   onGenerateShootPlan,
   onApproveShootPlan,
+  onOpenMasterExport,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isDownloadingCallSheet, setIsDownloadingCallSheet] = useState(false);
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
   const [isPrintableOpen, setIsPrintableOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleQuickDownloadCallSheet = async () => {
+    setErrorMsg(null);
+    setIsDownloadingCallSheet(true);
+    try {
+      await downloadCallSheetPdf(project, project.shootPlan);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Could not download Call Sheet PDF.'
+      );
+    } finally {
+      setIsDownloadingCallSheet(false);
+    }
+  };
 
   const liveHybridShots = useMemo(
     () => project.shots.filter((s) => s.route === 'live' || s.route === 'hybrid'),
@@ -94,13 +119,81 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
     });
   };
 
+  const defaultScheduleBreakdown = (day: ShootDayPlan): ShootScheduleBlock[] => {
+    const blocks: ShootScheduleBlock[] = [
+      {
+        id: `block-call-${Date.now()}-1`,
+        timeSlot: day.callTime && day.callTime !== 'TBD' ? `${day.callTime} - 07:45` : '07:00 - 07:45',
+        activity: 'Crew Call, Safety Briefing & Equipment Load-In',
+        category: 'call',
+        notes: 'Crew check-in, staging area setup, lighting prep',
+      },
+      {
+        id: `block-bfast-${Date.now()}-2`,
+        timeSlot: day.breakfastTime || '07:45 - 08:15',
+        activity: 'Crew Breakfast & Craft Services',
+        category: 'meal',
+        notes: 'Coffee, light breakfast, review morning shot list',
+      },
+    ];
+
+    const setups = day.setups || [];
+    const halfSetups = Math.max(1, Math.ceil(setups.length / 2));
+    const morningSetups = setups.slice(0, halfSetups);
+    const afternoonSetups = setups.slice(halfSetups);
+
+    morningSetups.forEach((st, idx) => {
+      blocks.push({
+        id: `block-setup-m-${Date.now()}-${idx}`,
+        timeSlot: st.timeSlot || (idx === 0 ? '08:15 - 10:30' : '10:30 - 12:30'),
+        activity: `${st.setupName} — Shooting`,
+        category: 'setup',
+        shotIds: st.shotIds,
+        notes: st.lightingNotes || `${st.estimatedMinutes} mins est.`,
+        estimatedMinutes: st.estimatedMinutes,
+      });
+    });
+
+    blocks.push({
+      id: `block-lunch-${Date.now()}-lunch`,
+      timeSlot: day.lunchTime || '12:30 - 01:30',
+      activity: 'Mandatory Crew Lunch Break (Hot Catering Provided)',
+      category: 'meal',
+      notes: 'Hot catering served; 60m off-the-clock break; equipment & media recharge',
+    });
+
+    afternoonSetups.forEach((st, idx) => {
+      blocks.push({
+        id: `block-setup-a-${Date.now()}-${idx}`,
+        timeSlot: st.timeSlot || (idx === 0 ? '01:30 - 03:45' : '03:45 - 05:30'),
+        activity: `${st.setupName} — Shooting`,
+        category: 'setup',
+        shotIds: st.shotIds,
+        notes: st.lightingNotes || `${st.estimatedMinutes} mins est.`,
+        estimatedMinutes: st.estimatedMinutes,
+      });
+    });
+
+    blocks.push({
+      id: `block-wrap-${Date.now()}-wrap`,
+      timeSlot: day.wrapTime && day.wrapTime !== 'TBD' ? `05:30 - ${day.wrapTime}` : '05:30 - 06:00',
+      activity: 'Wrap, DIT Media Dump & Equipment Load-Out',
+      category: 'wrap',
+      notes: 'Verify dual media backups, pack equipment, site clean-up',
+    });
+
+    return blocks;
+  };
+
   const handleAddDay = () => {
     const newDay: ShootDayPlan = {
       id: `day-${Date.now()}`,
       dayLabel: `Shoot Day ${plan.shootDays.length + 1}`,
       location: 'Location TBD — confirm with client',
-      callTime: 'TBD',
-      wrapTime: 'TBD',
+      callTime: '07:00 AM',
+      breakfastTime: '07:30 AM',
+      lunchTime: '12:30 PM - 01:30 PM',
+      wrapTime: '06:00 PM',
       setups: [
         {
           setupName: 'Setup A',
@@ -110,7 +203,100 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
         },
       ],
     };
+    newDay.scheduleBreakdown = defaultScheduleBreakdown(newDay);
     updatePlan({ shootDays: [...plan.shootDays, newDay] });
+  };
+
+  const updateScheduleBlock = (
+    dayId: string,
+    blockId: string,
+    patch: Partial<ShootScheduleBlock>
+  ) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const currentBlocks = d.scheduleBreakdown?.length
+          ? d.scheduleBreakdown
+          : defaultScheduleBreakdown(d);
+        return {
+          ...d,
+          scheduleBreakdown: currentBlocks.map((b) =>
+            b.id === blockId ? { ...b, ...patch } : b
+          ),
+        };
+      }),
+    });
+  };
+
+  const handleAddScheduleBlock = (dayId: string) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const currentBlocks = d.scheduleBreakdown?.length
+          ? d.scheduleBreakdown
+          : defaultScheduleBreakdown(d);
+        const newBlock: ShootScheduleBlock = {
+          id: `block-${Date.now()}`,
+          timeSlot: '14:00 - 15:00',
+          activity: 'New Activity / Setup',
+          category: 'setup',
+          notes: '',
+        };
+        return {
+          ...d,
+          scheduleBreakdown: [...currentBlocks, newBlock],
+        };
+      }),
+    });
+  };
+
+  const handleAddLunchBreak = (dayId: string) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const currentBlocks = d.scheduleBreakdown?.length
+          ? d.scheduleBreakdown
+          : defaultScheduleBreakdown(d);
+        const lunchBlock: ShootScheduleBlock = {
+          id: `block-lunch-${Date.now()}`,
+          timeSlot: d.lunchTime || '12:30 PM - 01:30 PM',
+          activity: 'Mandatory Crew Lunch Break (Hot Catering Provided)',
+          category: 'meal',
+          notes: 'Full crew 60-min meal break; hot catering in dining area; battery charging',
+        };
+        return {
+          ...d,
+          scheduleBreakdown: [...currentBlocks, lunchBlock],
+        };
+      }),
+    });
+  };
+
+  const handleRemoveScheduleBlock = (dayId: string, blockId: string) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const currentBlocks = d.scheduleBreakdown?.length
+          ? d.scheduleBreakdown
+          : defaultScheduleBreakdown(d);
+        return {
+          ...d,
+          scheduleBreakdown: currentBlocks.filter((b) => b.id !== blockId),
+        };
+      }),
+    });
+  };
+
+  const handleResetTimeline = (dayId: string) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        return {
+          ...d,
+          scheduleBreakdown: defaultScheduleBreakdown(d),
+        };
+      }),
+    });
   };
 
   const handleRemoveDay = (dayId: string) => {
@@ -209,16 +395,16 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
       {/* Screen Interactive Workspace */}
       <div className="no-print max-w-[1320px] mx-auto px-6 py-7 space-y-6">
         {/* Header */}
-        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
           <div>
-            <div className="text-xs font-medium text-amber-400">
+            <div className="text-xs font-medium text-[#C6202F]">
               Step 9 · Live &amp; Hybrid Shoot Plan
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+            <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
               Line Producer Call Sheet &amp; Production Schedule
             </h1>
-            <p className="text-sm text-zinc-400 mt-1">
-              Covers <strong className="text-zinc-200">{liveHybridShots.length}</strong>{' '}
+            <p className="text-sm text-[#5A5A66] mt-1">
+              Covers <strong className="text-[#24242B]">{liveHybridShots.length}</strong>{' '}
               Live &amp; Hybrid shot{liveHybridShots.length === 1 ? '' : 's'} grouped by
               location and lighting ({aiOnlyShots.length} AI-only shot
               {aiOnlyShots.length === 1 ? '' : 's'} excluded). Missing dates or budget
@@ -231,7 +417,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
               type="button"
               disabled={isGenerating}
               onClick={() => void handleGenerateClick(false)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
             >
               {isGenerating ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -246,18 +432,43 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             </button>
 
             {plan.hasGenerated && (
-              <button
-                type="button"
-                onClick={() => setIsPrintableOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors cursor-pointer"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                Print Call Sheet / PDF
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsPrintableOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Preview Call Sheet
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isDownloadingCallSheet}
+                  onClick={() => void handleQuickDownloadCallSheet()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
+                >
+                  {isDownloadingCallSheet ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5 text-[#C6202F]" />
+                  )}
+                  {isDownloadingCallSheet ? 'Saving PDF...' : 'Save Call Sheet PDF'}
+                </button>
+              </>
             )}
 
+            <button
+              type="button"
+              onClick={onOpenMasterExport}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg transition-colors cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Master Download PDF
+            </button>
+
             {project.approvals.shootPlanApproved ? (
-              <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 rounded-lg whitespace-nowrap">
+              <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap">
                 <CheckCircle2 className="w-4 h-4" />
                 Shoot Plan Approved
               </span>
@@ -266,20 +477,47 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                 type="button"
                 disabled={!plan.hasGenerated}
                 onClick={() => void onApproveShootPlan()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-emerald-500/50 hover:bg-emerald-500/15 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-[#111114] bg-white border border-emerald-600 hover:bg-emerald-50 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
               >
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <CheckCircle2 className="w-4 h-4 text-emerald-700" />
                 Approve shoot plan
               </button>
             )}
           </div>
         </div>
 
+        {/* Master Production Packet Completion Banner */}
+        {(project.approvals.shootPlanApproved || plan.hasGenerated) && (
+          <div className="p-4 brand-corner bg-gradient-to-r from-[#FDF4F5] via-white to-[#F6F6F7] border border-[#EABAC0] flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+            <div className="space-y-0.5">
+              <div className="text-xs font-bold uppercase tracking-wider text-[#C6202F] flex items-center gap-1.5">
+                <FileText className="w-3.5 h-3.5" />
+                {project.approvals.shootPlanApproved
+                  ? 'Pipeline Complete · All Deliverables Ready'
+                  : 'Production Deliverables Ready for Export'}
+              </div>
+              <p className="text-xs text-[#3A3A44]">
+                Download your Brand Bible, Creative Brief, Shot List &amp; Storyboard,
+                Frame Suggestions, Video Prompts &amp; Takes, VO Script, and Shoot Plan
+                in one combined Master PDF or individually as selectable files.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenMasterExport}
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Download className="w-4 h-4" />
+              Master Download PDF
+            </button>
+          </div>
+        )}
+
         {/* Manual edit overwrite confirmation */}
         {confirmOverwriteOpen && (
-          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-start gap-2.5 text-xs text-amber-100">
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div className="p-4 rounded-xl bg-[#FDF4F5] border border-[#C6202F]/55 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 text-xs text-[#6E141C]">
+              <AlertTriangle className="w-4 h-4 text-[#C6202F] shrink-0 mt-0.5" />
               <div>
                 <strong>You have manual edits in the Shoot Plan.</strong> Regenerating
                 will replace your current schedule, crew, and gear lists. Continue?
@@ -289,14 +527,14 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
               <button
                 type="button"
                 onClick={() => setConfirmOverwriteOpen(false)}
-                className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] rounded-lg cursor-pointer"
+                className="px-3 py-1.5 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] rounded-lg cursor-pointer"
               >
                 Keep my edits
               </button>
               <button
                 type="button"
                 onClick={() => void handleGenerateClick(true)}
-                className="px-3.5 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+                className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
               >
                 Replace with fresh plan
               </button>
@@ -305,25 +543,25 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
         )}
 
         {errorMsg && (
-          <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+          <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
             {errorMsg}
           </div>
         )}
 
         {/* Included Live & Hybrid Shots Reference Bar */}
-        <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-4 space-y-2.5">
+        <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-2.5">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-              <Clapperboard className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+              <Clapperboard className="w-3.5 h-3.5 text-emerald-700" />
               Live &amp; Hybrid Shots Included on Set ({liveHybridShots.length})
             </span>
-            <span className="text-zinc-500">
+            <span className="text-[#6E6E7A]">
               Intake notes:{' '}
               {project.intake.shootLocationDatesBudgetNotes || 'Not provided in intake'}
             </span>
           </div>
           {liveHybridShots.length === 0 ? (
-            <div className="text-xs text-zinc-400">
+            <div className="text-xs text-[#5A5A66]">
               All current shots are routed to AI video only. You can still review or add
               pickup shoot notes below.
             </div>
@@ -332,23 +570,23 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
               {liveHybridShots.map((shot) => (
                 <div
                   key={shot.id}
-                  className="bg-[#0B0D10] border border-[#262B36] rounded-lg p-3 text-xs space-y-1"
+                  className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg p-3 text-xs space-y-1"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-mono font-bold text-amber-400">{shot.id}</span>
+                    <span className="font-mono font-bold text-[#C6202F]">{shot.id}</span>
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
                         shot.route === 'live'
-                          ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-300'
+                          : 'bg-[#FDF2F3] text-[#891A23] border border-[#EABAC0]'
                       }`}
                     >
                       {shot.route === 'live' ? 'Live Shoot' : 'Hybrid'}
                     </span>
                   </div>
-                  <div className="text-zinc-200 line-clamp-2">{shot.scene}</div>
+                  <div className="text-[#24242B] line-clamp-2">{shot.scene}</div>
                   {shot.shootDirection && (
-                    <div className="text-[11px] text-zinc-400 line-clamp-2">
+                    <div className="text-[11px] text-[#5A5A66] line-clamp-2">
                       {shot.shootDirection}
                     </div>
                   )}
@@ -360,12 +598,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
 
         {/* Empty State Before First Generation */}
         {!plan.hasGenerated ? (
-          <div className="bg-[#14171D] border border-dashed border-[#262B36] rounded-xl p-12 text-center space-y-3">
-            <Calendar className="w-8 h-8 text-amber-400 mx-auto" />
-            <h2 className="text-base font-semibold text-zinc-100">
+          <div className="bg-white border border-dashed border-[#E2E2E6] rounded-xl p-12 text-center space-y-3">
+            <Calendar className="w-8 h-8 text-[#C6202F] mx-auto" />
+            <h2 className="text-base font-semibold text-[#111114]">
               Ready to Build the Live &amp; Hybrid Shoot Plan
             </h2>
-            <p className="text-xs text-zinc-400 max-w-lg mx-auto leading-relaxed">
+            <p className="text-xs text-[#5A5A66] max-w-lg mx-auto leading-relaxed">
               Gemini will group your live and hybrid shots by location and lighting, specify
               gear, crew, and backup product units, and flag any missing shoot dates or
               budget answers for the client.
@@ -375,7 +613,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                 type="button"
                 disabled={isGenerating}
                 onClick={() => void handleGenerateClick(true)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Generate shoot plan
@@ -385,23 +623,23 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
         ) : (
           <div className="space-y-6">
             {/* Client Questions Banner */}
-            <section className="bg-[#14171D] border border-amber-500/40 rounded-xl p-5 space-y-3">
+            <section className="bg-white border border-[#EABAC0] rounded-xl p-5 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                <h2 className="text-sm font-bold text-[#891A23] flex items-center gap-2">
                   <HelpCircle className="w-4 h-4" />
                   Questions for Client (Missing Dates, Budget, or Location Details)
                 </h2>
                 <button
                   type="button"
                   onClick={() => addStringListItem('clientQuestions', '')}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] rounded-lg cursor-pointer"
                 >
                   <Plus className="w-3 h-3" />
                   Add question
                 </button>
               </div>
               {plan.clientQuestions.length === 0 ? (
-                <p className="text-xs text-zinc-400">
+                <p className="text-xs text-[#5A5A66]">
                   No open client questions flagged.
                 </p>
               ) : (
@@ -415,12 +653,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                           updateStringList('clientQuestions', idx, e.target.value)
                         }
                         placeholder="Question for the client before confirming shoot..."
-                        className="flex-1 bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                        className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                       />
                       <button
                         type="button"
                         onClick={() => removeStringListItem('clientQuestions', idx)}
-                        className="p-2 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                        className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                         aria-label="Remove question"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -434,22 +672,22 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             {/* Shoot Days & Location/Lighting Setups */}
             <section className="space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-base font-bold text-zinc-100 flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-amber-400" />
+                <h2 className="text-base font-bold text-[#111114] flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-[#C6202F]" />
                   Shoot Days &amp; Location / Lighting Setups
                 </h2>
                 <button
                   type="button"
                   onClick={handleAddDay}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer"
                 >
-                  <Plus className="w-3.5 h-3.5 text-amber-400" />
+                  <Plus className="w-3.5 h-3.5 text-[#C6202F]" />
                   Add shoot day
                 </button>
               </div>
 
               {plan.shootDays.length === 0 ? (
-                <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-6 text-xs text-zinc-400">
+                <div className="bg-white border border-[#E2E2E6] rounded-xl p-6 text-xs text-[#5A5A66]">
                   No shoot days scheduled. Click <strong>Add shoot day</strong> to create
                   one manually.
                 </div>
@@ -458,11 +696,11 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                   {plan.shootDays.map((day) => (
                     <div
                       key={day.id}
-                      className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden"
+                      className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden"
                     >
-                      <div className="px-5 py-3.5 bg-[#101318] border-b border-[#262B36] grid grid-cols-1 md:grid-cols-[180px_1fr_140px_140px_auto] gap-3 items-end">
+                      <div className="px-5 py-3.5 bg-[#FBFBFC] border-b border-[#E2E2E6] grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-[160px_1fr_120px_120px_150px_120px_auto] gap-3 items-end">
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Shoot Day
                           </label>
                           <input
@@ -471,11 +709,11 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             onChange={(e) =>
                               updateDay(day.id, { dayLabel: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-semibold text-amber-300 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#891A23] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Location
                           </label>
                           <input
@@ -484,11 +722,11 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             onChange={(e) =>
                               updateDay(day.id, { location: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Call Time
                           </label>
                           <input
@@ -497,11 +735,41 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             onChange={(e) =>
                               updateDay(day.id, { callTime: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1 flex items-center gap-1">
+                            <Coffee className="w-3 h-3 text-[#5A5A66]" />
+                            Breakfast
+                          </label>
+                          <input
+                            type="text"
+                            value={day.breakfastTime || ''}
+                            placeholder="07:30 AM"
+                            onChange={(e) =>
+                              updateDay(day.id, { breakfastTime: e.target.value })
+                            }
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-[#5A5A66] block mb-1 flex items-center gap-1 font-semibold text-[#891A23]">
+                            <Utensils className="w-3 h-3 text-[#C6202F]" />
+                            Lunch Break
+                          </label>
+                          <input
+                            type="text"
+                            value={day.lunchTime || ''}
+                            placeholder="12:30 PM - 01:30 PM"
+                            onChange={(e) =>
+                              updateDay(day.id, { lunchTime: e.target.value })
+                            }
+                            className="w-full bg-[#FDF4F5] border border-[#EABAC0] rounded-lg px-2.5 py-1.5 text-xs font-mono font-semibold text-[#891A23] focus:outline-none focus:border-[#C6202F]"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Wrap Time
                           </label>
                           <input
@@ -510,28 +778,221 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             onChange={(e) =>
                               updateDay(day.id, { wrapTime: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
                         <button
                           type="button"
                           onClick={() => handleRemoveDay(day.id)}
-                          className="p-2 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                          className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                           aria-label="Delete shoot day"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
 
-                      <div className="p-5 space-y-3">
+                      <div className="p-5 space-y-6">
+                        {/* Chronological Schedule Breakdown & Timeline */}
+                        <div className="bg-[#FAFBFD] border border-[#D5D9E2] rounded-xl p-4 space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                              <Clock className="w-4 h-4 text-[#C6202F]" />
+                              <h3 className="text-xs font-bold text-[#111114] uppercase tracking-wider">
+                                Chronological Day Schedule &amp; Timeline
+                              </h3>
+                              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#EAECEF] text-[#4A4F59]">
+                                Includes Meals, Load-In &amp; Setups
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleAddLunchBreak(day.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EB] rounded-lg cursor-pointer transition-colors"
+                              >
+                                <Utensils className="w-3 h-3 text-[#C6202F]" />
+                                + Add Lunch Break
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAddScheduleBlock(day.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors shadow-sm"
+                              >
+                                <Plus className="w-3 h-3 text-[#C6202F]" />
+                                + Add Schedule Block
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleResetTimeline(day.id)}
+                                title="Re-generate timeline from setups and standard meals"
+                                className="inline-flex items-center gap-1 px-2 py-1 text-xs text-[#5A5A66] hover:text-[#111114] rounded-lg cursor-pointer"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                Reset Timeline
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Quick Time Milestones */}
+                          <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
+                            <div className="px-2.5 py-1 rounded-md bg-white border border-[#E2E2E6] font-mono text-[11px] text-[#3A3A44]">
+                              <span className="text-[#6E6E7A]">CALL:</span> <strong>{day.callTime}</strong>
+                            </div>
+                            <div className="px-2.5 py-1 rounded-md bg-white border border-[#E2E2E6] font-mono text-[11px] text-[#3A3A44] flex items-center gap-1">
+                              <Coffee className="w-3 h-3 text-amber-700" />
+                              <span className="text-[#6E6E7A]">BREAKFAST:</span> <strong>{day.breakfastTime || '07:30 AM'}</strong>
+                            </div>
+                            <div className="px-2.5 py-1 rounded-md bg-[#FDF4F5] border border-[#EABAC0] font-mono text-[11px] text-[#891A23] font-semibold flex items-center gap-1">
+                              <Utensils className="w-3 h-3 text-[#C6202F]" />
+                              <span>LUNCH BREAK:</span> <strong>{day.lunchTime || '12:30 PM - 01:30 PM'}</strong>
+                              <span className="text-[10px] font-normal text-[#891A23]/80">(Catering)</span>
+                            </div>
+                            <div className="px-2.5 py-1 rounded-md bg-white border border-[#E2E2E6] font-mono text-[11px] text-[#3A3A44]">
+                              <span className="text-[#6E6E7A]">WRAP:</span> <strong>{day.wrapTime}</strong>
+                            </div>
+                          </div>
+
+                          {/* Timeline Table */}
+                          <div className="space-y-1.5 pt-1">
+                            {(day.scheduleBreakdown?.length
+                              ? day.scheduleBreakdown
+                              : defaultScheduleBreakdown(day)
+                            ).map((block) => {
+                              const isMeal = block.category === 'meal';
+                              return (
+                                <div
+                                  key={block.id}
+                                  className={`p-2.5 rounded-lg border grid grid-cols-1 md:grid-cols-[130px_100px_1fr_130px_1fr_auto] gap-2 items-center text-xs ${
+                                    isMeal
+                                      ? 'bg-[#FDF4F5] border-[#EABAC0]'
+                                      : 'bg-white border-[#E2E2E6]'
+                                  }`}
+                                >
+                                  <div>
+                                    <input
+                                      type="text"
+                                      value={block.timeSlot}
+                                      onChange={(e) =>
+                                        updateScheduleBlock(day.id, block.id, {
+                                          timeSlot: e.target.value,
+                                        })
+                                      }
+                                      placeholder="00:00 - 00:00"
+                                      className={`w-full font-mono text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
+                                        isMeal
+                                          ? 'bg-white border-[#EABAC0] font-bold text-[#891A23]'
+                                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#111114]'
+                                      }`}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <select
+                                      value={block.category}
+                                      onChange={(e) =>
+                                        updateScheduleBlock(day.id, block.id, {
+                                          category: e.target.value as any,
+                                        })
+                                      }
+                                      className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#111114] focus:outline-none focus:border-[#C6202F]"
+                                    >
+                                      <option value="call">Call</option>
+                                      <option value="setup">Setup</option>
+                                      <option value="meal">Meal Break</option>
+                                      <option value="move">Move</option>
+                                      <option value="wrap">Wrap</option>
+                                      <option value="general">General</option>
+                                    </select>
+                                  </div>
+
+                                  <div>
+                                    <div className="relative">
+                                      <input
+                                        type="text"
+                                        value={block.activity}
+                                        onChange={(e) =>
+                                          updateScheduleBlock(day.id, block.id, {
+                                            activity: e.target.value,
+                                          })
+                                        }
+                                        placeholder="Activity / Milestone description"
+                                        className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
+                                          isMeal
+                                            ? 'bg-white border-[#EABAC0] font-bold text-[#891A23]'
+                                            : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#111114]'
+                                        }`}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div>
+                                    <input
+                                      type="text"
+                                      value={(block.shotIds || []).join(', ')}
+                                      onChange={(e) =>
+                                        updateScheduleBlock(day.id, block.id, {
+                                          shotIds: e.target.value
+                                            .split(',')
+                                            .map((x) => x.trim())
+                                            .filter(Boolean),
+                                        })
+                                      }
+                                      placeholder="Shots (optional)"
+                                      className="w-full font-mono text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#891A23] focus:outline-none focus:border-[#C6202F]"
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <input
+                                      type="text"
+                                      value={block.notes || ''}
+                                      onChange={(e) =>
+                                        updateScheduleBlock(day.id, block.id, {
+                                          notes: e.target.value,
+                                        })
+                                      }
+                                      placeholder="Notes (e.g. Catering provided, load-in)"
+                                      className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#5A5A66] focus:outline-none focus:border-[#C6202F]"
+                                    />
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveScheduleBlock(day.id, block.id)}
+                                    className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                                    title="Delete schedule row"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Setups Section Header */}
+                        <div className="flex items-center justify-between pt-2">
+                          <h4 className="text-xs font-bold text-[#111114] uppercase tracking-wider">
+                            Lighting &amp; Camera Setups ({day.setups.length})
+                          </h4>
+                          <button
+                            type="button"
+                            onClick={() => handleAddSetup(day.id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors shadow-sm"
+                          >
+                            <Plus className="w-3 h-3 text-[#C6202F]" />
+                            Add Setup
+                          </button>
+                        </div>
                         {day.setups.map((setup, sIdx) => (
                           <div
                             key={sIdx}
-                            className="bg-[#0B0D10] border border-[#262B36] rounded-lg p-4 space-y-3"
+                            className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg p-4 space-y-3"
                           >
                             <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_120px_auto] gap-3 items-end">
                               <div>
-                                <label className="text-[11px] text-zinc-400 block mb-1">
+                                <label className="text-[11px] text-[#5A5A66] block mb-1">
                                   Setup Name
                                 </label>
                                 <input
@@ -542,12 +1003,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                                       setupName: e.target.value,
                                     })
                                   }
-                                  className="w-full bg-[#14171D] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-semibold text-zinc-100 focus:outline-none focus:border-amber-500"
+                                  className="w-full bg-white border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#111114] focus:outline-none focus:border-[#C6202F]"
                                 />
                               </div>
 
                               <div>
-                                <label className="text-[11px] text-zinc-400 block mb-1">
+                                <label className="text-[11px] text-[#5A5A66] block mb-1">
                                   Shots in Setup (comma-separated)
                                 </label>
                                 <input
@@ -561,12 +1022,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                                         .filter(Boolean),
                                     })
                                   }
-                                  className="w-full bg-[#14171D] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-mono text-amber-300 focus:outline-none focus:border-amber-500"
+                                  className="w-full bg-white border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#891A23] focus:outline-none focus:border-[#C6202F]"
                                 />
                               </div>
 
                               <div>
-                                <label className="text-[11px] text-zinc-400 block mb-1">
+                                <label className="text-[11px] text-[#5A5A66] block mb-1">
                                   Est. Minutes
                                 </label>
                                 <input
@@ -579,14 +1040,14 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                                       estimatedMinutes: Number(e.target.value) || 30,
                                     })
                                   }
-                                  className="w-full bg-[#14171D] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:outline-none focus:border-amber-500"
+                                  className="w-full bg-white border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
                                 />
                               </div>
 
                               <button
                                 type="button"
                                 onClick={() => handleRemoveSetup(day.id, sIdx)}
-                                className="p-2 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                                className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                                 aria-label="Delete setup"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -594,7 +1055,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             </div>
 
                             <div>
-                              <label className="text-[11px] text-zinc-400 block mb-1">
+                              <label className="text-[11px] text-[#5A5A66] block mb-1">
                                 Lighting &amp; Camera Approach
                               </label>
                               <textarea
@@ -605,7 +1066,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                                     lightingNotes: e.target.value,
                                   })
                                 }
-                                className="w-full bg-[#14171D] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                                className="w-full bg-white border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                               />
                             </div>
                           </div>
@@ -614,7 +1075,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         <button
                           type="button"
                           onClick={() => handleAddSetup(day.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-300 bg-[#0B0D10] border border-dashed border-[#262B36] hover:border-amber-500/60 rounded-lg cursor-pointer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#3A3A44] bg-[#F6F6F7] border border-dashed border-[#E2E2E6] hover:border-[#C6202F]/60 rounded-lg cursor-pointer"
                         >
                           <Plus className="w-3.5 h-3.5" />
                           Add setup to {day.dayLabel}
@@ -627,10 +1088,10 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             </section>
 
             {/* Props & Product Units Table Card */}
-            <section className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
+            <section className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                  <Package className="w-4 h-4 text-amber-400" />
+                <h2 className="text-sm font-bold text-[#111114] flex items-center gap-2">
+                  <Package className="w-4 h-4 text-[#C6202F]" />
                   Props &amp; Real Product Units (Including Backups)
                 </h2>
                 <button
@@ -643,7 +1104,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                       ],
                     })
                   }
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-amber-500 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer"
                 >
                   <Plus className="w-3 h-3" />
                   Add prop / unit
@@ -665,7 +1126,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         next[idx] = { ...next[idx], item: e.target.value };
                         updatePlan({ propsAndUnits: next });
                       }}
-                      className="bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                      className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                     />
                     <input
                       type="text"
@@ -676,7 +1137,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         next[idx] = { ...next[idx], quantity: e.target.value };
                         updatePlan({ propsAndUnits: next });
                       }}
-                      className="bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                      className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#24242B] focus:outline-none focus:border-[#C6202F]"
                     />
                     <input
                       type="text"
@@ -687,7 +1148,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         next[idx] = { ...next[idx], suppliedBy: e.target.value };
                         updatePlan({ propsAndUnits: next });
                       }}
-                      className="bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-amber-500"
+                      className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#3A3A44] focus:outline-none focus:border-[#C6202F]"
                     />
                     <button
                       type="button"
@@ -696,7 +1157,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                           propsAndUnits: plan.propsAndUnits.filter((_, i) => i !== idx),
                         })
                       }
-                      className="p-2 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                      className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                       aria-label="Remove prop row"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -709,16 +1170,16 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             {/* Equipment, Crew, Risks Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               {/* Equipment */}
-              <section className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
+              <section className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                    <Camera className="w-4 h-4 text-amber-400" />
+                  <h2 className="text-sm font-bold text-[#111114] flex items-center gap-2">
+                    <Camera className="w-4 h-4 text-[#C6202F]" />
                     Camera &amp; Grip Gear
                   </h2>
                   <button
                     type="button"
                     onClick={() => addStringListItem('equipment', '')}
-                    className="p-1 text-zinc-400 hover:text-amber-300 cursor-pointer"
+                    className="p-1 text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                     aria-label="Add equipment item"
                   >
                     <Plus className="w-4 h-4" />
@@ -733,12 +1194,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         onChange={(e) =>
                           updateStringList('equipment', idx, e.target.value)
                         }
-                        className="flex-1 bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                        className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                       />
                       <button
                         type="button"
                         onClick={() => removeStringListItem('equipment', idx)}
-                        className="p-1.5 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                        className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                         aria-label="Remove equipment"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -749,16 +1210,16 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
               </section>
 
               {/* Crew */}
-              <section className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
+              <section className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                    <Users className="w-4 h-4 text-emerald-400" />
+                  <h2 className="text-sm font-bold text-[#111114] flex items-center gap-2">
+                    <Users className="w-4 h-4 text-emerald-700" />
                     Crew Roles
                   </h2>
                   <button
                     type="button"
                     onClick={() => addStringListItem('crew', '')}
-                    className="p-1 text-zinc-400 hover:text-amber-300 cursor-pointer"
+                    className="p-1 text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                     aria-label="Add crew role"
                   >
                     <Plus className="w-4 h-4" />
@@ -771,12 +1232,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         type="text"
                         value={item}
                         onChange={(e) => updateStringList('crew', idx, e.target.value)}
-                        className="flex-1 bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                        className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                       />
                       <button
                         type="button"
                         onClick={() => removeStringListItem('crew', idx)}
-                        className="p-1.5 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                        className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                         aria-label="Remove crew"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -787,16 +1248,16 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
               </section>
 
               {/* Production Risks */}
-              <section className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-3">
+              <section className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 text-rose-400" />
+                  <h2 className="text-sm font-bold text-[#111114] flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-[#C6202F]" />
                     Risks &amp; Contingencies
                   </h2>
                   <button
                     type="button"
                     onClick={() => addStringListItem('risks', '')}
-                    className="p-1 text-zinc-400 hover:text-amber-300 cursor-pointer"
+                    className="p-1 text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                     aria-label="Add risk"
                   >
                     <Plus className="w-4 h-4" />
@@ -809,12 +1270,12 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                         type="text"
                         value={item}
                         onChange={(e) => updateStringList('risks', idx, e.target.value)}
-                        className="flex-1 bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                        className="flex-1 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                       />
                       <button
                         type="button"
                         onClick={() => removeStringListItem('risks', idx)}
-                        className="p-1.5 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                        className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                         aria-label="Remove risk"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

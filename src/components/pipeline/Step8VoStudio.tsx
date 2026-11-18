@@ -302,12 +302,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
     const width = canvas.width;
     const height = canvas.height;
     ctx2d.clearRect(0, 0, width, height);
-    ctx2d.fillStyle = '#0B0D10';
+    ctx2d.fillStyle = '#111114';
     ctx2d.fillRect(0, 0, width, height);
 
     const master = masterPlayBufferRef.current;
     if (!master || totalDuration <= 0) {
-      ctx2d.strokeStyle = '#262B36';
+      ctx2d.strokeStyle = '#2A2A34';
       ctx2d.beginPath();
       ctx2d.moveTo(0, height / 2);
       ctx2d.lineTo(width, height / 2);
@@ -672,8 +672,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
     setStatusNote(null);
     setIsGeneratingAll(true);
     try {
-      for (const line of speakable) {
+      for (let idx = 0; idx < speakable.length; idx++) {
+        const line = speakable[idx];
+        setStatusNote(
+          `Synthesizing voiceover ${idx + 1}/${speakable.length} (${line.shotId})...`
+        );
         await synthesizeLine(line);
+        if (idx < speakable.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
       }
       setStatusNote(
         `Rendered ${speakable.length} voiceover clip${speakable.length === 1 ? '' : 's'} with Gemini TTS.`
@@ -753,15 +760,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
   return (
     <div className="max-w-[1320px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 8 · VO Script &amp; Gemini Voice Studio
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             Voiceover Script &amp; Audio Production
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Timed at ~2.5 words per second to fit your shots. Cast from 30 Gemini voices,
             dial in emotional tone &amp; pacing, audition live, and export master WAV/MP3 or stems.
           </p>
@@ -772,12 +779,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             type="button"
             disabled={isWritingScript || project.shots.length === 0}
             onClick={() => void handleWriteScriptClick(false)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
           >
             {isWritingScript ? (
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-400" />
+              <Sparkles className="w-4 h-4 text-[#C6202F]" />
             )}
             {isWritingScript
               ? 'Writing VO Script...'
@@ -791,20 +798,20 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               type="button"
               disabled={project.voScript.length === 0}
               onClick={() => setTranslateOpen((o) => !o)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
             >
-              <Globe className="w-3.5 h-3.5 text-sky-400" />
+              <Globe className="w-3.5 h-3.5 text-[#891A23]" />
               Translate
             </button>
             {translateOpen && (
-              <div className="absolute right-0 mt-2 w-72 bg-[#14171D] border border-[#262B36] rounded-xl p-4 shadow-2xl z-30 space-y-3">
-                <div className="text-xs font-semibold text-zinc-100">
+              <div className="absolute right-0 mt-2 w-72 bg-white border border-[#E2E2E6] rounded-xl p-4 shadow-2xl z-30 space-y-3">
+                <div className="text-xs font-semibold text-[#111114]">
                   Translate Script for International Spot
                 </div>
                 <select
                   value={translateTargetLang}
                   onChange={(e) => setTranslateTargetLang(e.target.value)}
-                  className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                 >
                   {SUPPORTED_LANGUAGES.map((lang) => (
                     <option key={lang.code} value={lang.code}>
@@ -816,7 +823,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   <button
                     type="button"
                     onClick={() => setTranslateOpen(false)}
-                    className="px-2.5 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                    className="px-2.5 py-1.5 text-xs text-[#5A5A66] hover:text-[#24242B] cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -824,7 +831,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     type="button"
                     disabled={isTranslating}
                     onClick={() => void handleTranslateScript()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
                   >
                     {isTranslating && <Loader2 className="w-3 h-3 animate-spin" />}
                     Translate Lines
@@ -842,7 +849,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               project.voScript.every((v) => !v.line.trim())
             }
             onClick={() => void handleGenerateAllAudio()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
           >
             {isGeneratingAll ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -858,14 +865,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             type="button"
             disabled={processedBuffers.length === 0}
             onClick={() => setExportOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] hover:border-zinc-500 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             Export WAV / MP3
           </button>
 
           {project.approvals.voApproved ? (
-            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 rounded-lg whitespace-nowrap">
+            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap">
               <CheckCircle2 className="w-4 h-4" />
               VO Approved
             </span>
@@ -874,9 +881,9 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               type="button"
               disabled={project.voScript.length === 0}
               onClick={() => void onApproveVo()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-emerald-500/50 hover:bg-emerald-500/15 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-[#111114] bg-white border border-emerald-600 hover:bg-emerald-50 disabled:opacity-40 rounded-lg transition-colors cursor-pointer"
             >
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-700" />
               Approve VO &amp; go to Shoot Plan
             </button>
           )}
@@ -885,9 +892,9 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
       {/* Overwrite manual edit confirmation */}
       {confirmOverwriteOpen && (
-        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start gap-2.5 text-xs text-amber-100">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+        <div className="p-4 rounded-xl bg-[#FDF4F5] border border-[#C6202F]/55 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs text-[#6E141C]">
+            <AlertTriangle className="w-4 h-4 text-[#C6202F] shrink-0 mt-0.5" />
             <div>
               <strong>You have manual edits in the VO script.</strong> Refreshing from
               Gemini will replace your current lines. Continue?
@@ -897,14 +904,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             <button
               type="button"
               onClick={() => setConfirmOverwriteOpen(false)}
-              className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] rounded-lg cursor-pointer"
             >
               Keep my edits
             </button>
             <button
               type="button"
               onClick={() => void handleWriteScriptClick(true)}
-              className="px-3.5 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
             >
               Replace with fresh Gemini script
             </button>
@@ -913,13 +920,13 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       )}
 
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
 
       {statusNote && (
-        <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200">
+        <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-xs text-emerald-900">
           {statusNote}
         </div>
       )}
@@ -927,15 +934,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       {/* Main Split Studio Layout: Left Voice & Delivery Casting, Right Waveform + Script Lines */}
       <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-6 items-start">
         {/* LEFT PANEL: Gemini Voice Casting & Delivery Studio */}
-        <aside className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-5">
+        <aside className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Sliders className="w-4 h-4 text-amber-400" />
-              <h2 className="text-sm font-bold text-zinc-100">
+              <Sliders className="w-4 h-4 text-[#C6202F]" />
+              <h2 className="text-sm font-bold text-[#111114]">
                 Voice Casting &amp; Delivery
               </h2>
             </div>
-            <span className="text-[11px] font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
+            <span className="text-[11px] font-mono text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] px-2 py-0.5 rounded">
               Gemini 3.8 TTS
             </span>
           </div>
@@ -943,7 +950,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           {/* Core Featured Voices Quick Picker + 30 Voice Dropdown */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between text-xs">
-              <label className="font-medium text-zinc-300">
+              <label className="font-medium text-[#3A3A44]">
                 Cast Voice (30 Gemini Studio Voices)
               </label>
               <button
@@ -955,7 +962,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     selectedVoiceMeta.sampleSentence
                   )
                 }
-                className="inline-flex items-center gap-1 text-amber-400 hover:text-amber-300 font-medium cursor-pointer disabled:opacity-40"
+                className="inline-flex items-center gap-1 text-[#C6202F] hover:text-[#891A23] font-medium cursor-pointer disabled:opacity-40"
               >
                 {auditioningVoiceId === voSettings.voiceName ? (
                   <Loader2 className="w-3 h-3 animate-spin" />
@@ -969,7 +976,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             <select
               value={voSettings.voiceName}
               onChange={(e) => updateVoSettings({ voiceName: e.target.value })}
-              className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+              className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
             >
               {ALL_GEMINI_VOICE_PRESETS.map((v) => (
                 <option key={v.id} value={v.id}>
@@ -988,30 +995,30 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => updateVoSettings({ voiceName: voice.id })}
                     className={`text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${
                       selected
-                        ? 'bg-amber-500/15 border-amber-500 text-zinc-100'
-                        : 'bg-[#0B0D10] border-[#262B36] hover:border-zinc-500 text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#111114]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] hover:border-[#891A23] text-[#3A3A44]'
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold">{voice.displayName}</span>
-                      <span className="text-[10px] text-zinc-400">{voice.gender}</span>
+                      <span className="text-[10px] text-[#5A5A66]">{voice.gender}</span>
                     </div>
-                    <div className="text-[10px] text-zinc-400 mt-0.5 truncate">
+                    <div className="text-[10px] text-[#5A5A66] mt-0.5 truncate">
                       {voice.timbre}
                     </div>
                   </button>
                 );
               })}
             </div>
-            <p className="text-[11px] text-zinc-400 leading-relaxed">
-              <strong className="text-zinc-200">{selectedVoiceMeta.displayName}:</strong>{' '}
+            <p className="text-[11px] text-[#5A5A66] leading-relaxed">
+              <strong className="text-[#24242B]">{selectedVoiceMeta.displayName}:</strong>{' '}
               {selectedVoiceMeta.description} Best for {selectedVoiceMeta.bestFor}.
             </p>
           </div>
 
           {/* 10 Emotional Tone Presets */}
           <div className="space-y-2">
-            <label className="text-xs font-medium text-zinc-300 block">
+            <label className="text-xs font-medium text-[#3A3A44] block">
               Emotional Performance Tone
             </label>
             <div className="grid grid-cols-2 gap-1.5">
@@ -1024,8 +1031,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => updateVoSettings({ emotionalTone: tone.id })}
                     className={`px-2.5 py-2 rounded-lg border text-left text-[11px] transition-colors cursor-pointer ${
                       active
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-200 font-semibold'
-                        : 'bg-[#0B0D10] border-[#262B36] hover:border-zinc-500 text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23] font-semibold'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] hover:border-[#891A23] text-[#3A3A44]'
                     }`}
                   >
                     {tone.label}
@@ -1036,11 +1043,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           </div>
 
           {/* Sliders: Emotion Intensity, Speed, Pitch, Gap */}
-          <div className="space-y-3.5 pt-1 border-t border-[#262B36]">
+          <div className="space-y-3.5 pt-1 border-t border-[#E2E2E6]">
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-zinc-300">Emotion Intensity</span>
-                <span className="font-mono text-amber-300 tabular-nums">
+                <span className="text-[#3A3A44]">Emotion Intensity</span>
+                <span className="font-mono text-[#891A23] tabular-nums">
                   {Math.round(voSettings.emotionIntensity * 100)}%
                 </span>
               </div>
@@ -1053,14 +1060,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 onChange={(e) =>
                   updateVoSettings({ emotionIntensity: Number(e.target.value) })
                 }
-                className="w-full accent-amber-500 cursor-pointer"
+                className="w-full accent-[#C6202F] cursor-pointer"
               />
             </div>
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-zinc-300">Speaking Speed</span>
-                <span className="font-mono text-amber-300 tabular-nums">
+                <span className="text-[#3A3A44]">Speaking Speed</span>
+                <span className="font-mono text-[#891A23] tabular-nums">
                   {voSettings.speed.toFixed(2)}x
                 </span>
               </div>
@@ -1071,14 +1078,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 step={0.05}
                 value={voSettings.speed}
                 onChange={(e) => updateVoSettings({ speed: Number(e.target.value) })}
-                className="w-full accent-amber-500 cursor-pointer"
+                className="w-full accent-[#C6202F] cursor-pointer"
               />
             </div>
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-zinc-300">Vocal Pitch</span>
-                <span className="font-mono text-amber-300 tabular-nums">
+                <span className="text-[#3A3A44]">Vocal Pitch</span>
+                <span className="font-mono text-[#891A23] tabular-nums">
                   {pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones} st
                 </span>
               </div>
@@ -1093,14 +1100,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     pitch: semitonesToPitchRatio(Number(e.target.value)),
                   })
                 }
-                className="w-full accent-amber-500 cursor-pointer"
+                className="w-full accent-[#C6202F] cursor-pointer"
               />
             </div>
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-zinc-300">Gap Between Shots</span>
-                <span className="font-mono text-amber-300 tabular-nums">
+                <span className="text-[#3A3A44]">Gap Between Shots</span>
+                <span className="font-mono text-[#891A23] tabular-nums">
                   {voSettings.pauseAfter.toFixed(2)}s
                 </span>
               </div>
@@ -1113,21 +1120,21 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 onChange={(e) =>
                   updateVoSettings({ pauseAfter: Number(e.target.value) })
                 }
-                className="w-full accent-amber-500 cursor-pointer"
+                className="w-full accent-[#C6202F] cursor-pointer"
               />
             </div>
           </div>
 
           {/* Language, Model, DSP Toggle, Director Prompt */}
-          <div className="space-y-3 pt-2 border-t border-[#262B36]">
+          <div className="space-y-3 pt-2 border-t border-[#E2E2E6]">
             <div>
-              <label className="text-xs font-medium text-zinc-300 block mb-1">
+              <label className="text-xs font-medium text-[#3A3A44] block mb-1">
                 Voice Accent / Language
               </label>
               <select
                 value={voSettings.language}
                 onChange={(e) => updateVoSettings({ language: e.target.value })}
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
               >
                 {SUPPORTED_LANGUAGES.map((lang) => (
                   <option key={lang.code} value={lang.code}>
@@ -1138,7 +1145,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             </div>
 
             <div>
-              <label className="text-xs font-medium text-zinc-300 block mb-1">
+              <label className="text-xs font-medium text-[#3A3A44] block mb-1">
                 Gemini Voice Engine
               </label>
               <div className="grid grid-cols-2 gap-2">
@@ -1149,8 +1156,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   }
                   className={`px-2.5 py-2 rounded-lg border text-xs font-medium cursor-pointer ${
                     voSettings.ttsModel === 'gemini-3.8-flash-tts'
-                      ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                      : 'bg-[#0B0D10] border-[#262B36] text-zinc-400'
+                      ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                      : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#5A5A66]'
                   }`}
                 >
                   Flash 3.8 Studio
@@ -1162,8 +1169,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   }
                   className={`px-2.5 py-2 rounded-lg border text-xs font-medium cursor-pointer ${
                     voSettings.ttsModel === 'gemini-3.8-flash-lite-tts'
-                      ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                      : 'bg-[#0B0D10] border-[#262B36] text-zinc-400'
+                      ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                      : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#5A5A66]'
                   }`}
                 >
                   Flash 3.8 Lite
@@ -1172,7 +1179,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             </div>
 
             <div>
-              <label className="text-xs font-medium text-zinc-300 block mb-1">
+              <label className="text-xs font-medium text-[#3A3A44] block mb-1">
                 Director Acting Note (Optional)
               </label>
               <textarea
@@ -1182,11 +1189,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   updateVoSettings({ customStylePrompt: e.target.value })
                 }
                 placeholder="e.g. Close-mic documentary warmth, subtle smile on the product name..."
-                className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
               />
             </div>
 
-            <label className="flex items-center justify-between text-xs text-zinc-300 cursor-pointer py-1">
+            <label className="flex items-center justify-between text-xs text-[#3A3A44] cursor-pointer py-1">
               <span>Studio DSP Polish (EQ &amp; Compression)</span>
               <input
                 type="checkbox"
@@ -1194,11 +1201,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 onChange={(e) =>
                   updateVoSettings({ enhanceWithDSP: e.target.checked })
                 }
-                className="accent-amber-500 w-4 h-4 cursor-pointer"
+                className="accent-[#C6202F] w-4 h-4 cursor-pointer"
               />
             </label>
 
-            <label className="flex items-center justify-between text-xs text-zinc-300 cursor-pointer py-1">
+            <label className="flex items-center justify-between text-xs text-[#3A3A44] cursor-pointer py-1">
               <span>Single Cast Voice Across All Lines</span>
               <input
                 type="checkbox"
@@ -1206,7 +1213,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 onChange={(e) =>
                   updateVoSettings({ singleVoiceMode: e.target.checked })
                 }
-                className="accent-amber-500 w-4 h-4 cursor-pointer"
+                className="accent-[#C6202F] w-4 h-4 cursor-pointer"
               />
             </label>
 
@@ -1214,9 +1221,9 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               <button
                 type="button"
                 onClick={handleApplySettingsToAllLines}
-                className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-amber-500 rounded-lg transition-colors cursor-pointer"
+                className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg transition-colors cursor-pointer"
               >
-                <Wand2 className="w-3.5 h-3.5 text-amber-400" />
+                <Wand2 className="w-3.5 h-3.5 text-[#C6202F]" />
                 Apply voice &amp; tone to all lines
               </button>
             )}
@@ -1226,20 +1233,20 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
         {/* RIGHT COLUMN: Master Waveform Timeline + Timed Shot VO Cards */}
         <div className="space-y-5 min-w-0">
           {/* Interactive Waveform Timeline Player */}
-          <div className="bg-[#14171D] border border-[#262B36] rounded-xl p-5 space-y-4">
+          <div className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-bold text-zinc-100">
+                <h2 className="text-sm font-bold text-[#111114]">
                   Master Voiceover Timeline
                 </h2>
-                <p className="text-xs text-zinc-400 mt-0.5">
+                <p className="text-xs text-[#5A5A66] mt-0.5">
                   {readyAudioLines.length} of {project.voScript.length} lines rendered · VO
                   runtime{' '}
-                  <span className="font-mono text-zinc-200 tabular-nums">
+                  <span className="font-mono text-[#24242B] tabular-nums">
                     {totalDuration.toFixed(1)}s
                   </span>{' '}
                   vs Shot Board{' '}
-                  <span className="font-mono text-zinc-200 tabular-nums">
+                  <span className="font-mono text-[#24242B] tabular-nums">
                     {totalShotSeconds}s
                   </span>
                 </p>
@@ -1250,7 +1257,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   type="button"
                   disabled={!masterPlayBufferRef.current || isDecodingAudio}
                   onClick={handleTogglePlay}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer"
                 >
                   {isDecodingAudio ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1270,7 +1277,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     setCurrentTime(0);
                     playOffsetRef.current = 0;
                   }}
-                  className="p-2 text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 disabled:opacity-40 rounded-lg cursor-pointer"
+                  className="p-2 text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-40 rounded-lg cursor-pointer"
                   aria-label="Stop playback"
                 >
                   <Square className="w-3.5 h-3.5" />
@@ -1279,11 +1286,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsMuted((m) => !m)}
-                  className="p-2 text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded-lg cursor-pointer"
+                  className="p-2 text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
                   aria-label={isMuted ? 'Unmute' : 'Mute'}
                 >
                   {isMuted ? (
-                    <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+                    <VolumeX className="w-3.5 h-3.5 text-[#C6202F]" />
                   ) : (
                     <Volume2 className="w-3.5 h-3.5" />
                   )}
@@ -1299,11 +1306,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     setIsMuted(false);
                     setVolume(Number(e.target.value));
                   }}
-                  className="w-20 accent-amber-500 cursor-pointer"
+                  className="w-20 accent-[#C6202F] cursor-pointer"
                   aria-label="Master volume"
                 />
 
-                <span className="font-mono text-xs text-zinc-300 tabular-nums pl-1">
+                <span className="font-mono text-xs text-[#3A3A44] tabular-nums pl-1">
                   {currentTime.toFixed(1)}s / {totalDuration.toFixed(1)}s
                 </span>
               </div>
@@ -1324,12 +1331,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   );
                   startPlaybackFrom(ratio * totalDuration);
                 }}
-                className="w-full h-[76px] rounded-lg border border-[#262B36] cursor-pointer block"
+                className="w-full h-[76px] rounded-lg border border-[#E2E2E6] cursor-pointer block"
               />
 
               {/* Per-Shot Segment Strip */}
               {processedBuffers.length > 0 && totalDuration > 0 && (
-                <div className="flex w-full h-6 rounded-md overflow-hidden border border-[#262B36] bg-[#0B0D10]">
+                <div className="flex w-full h-6 rounded-md overflow-hidden border border-[#E2E2E6] bg-[#F6F6F7]">
                   {processedBuffers.map((seg, idx) => {
                     const widthPct = Math.max(
                       4,
@@ -1345,10 +1352,10 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                         style={{ width: `${widthPct}%`, borderBottomColor: color }}
                         onClick={() => startPlaybackFrom(seg.startSec)}
                         title={`${seg.line.shotId}: ${seg.line.line}`}
-                        className={`px-1.5 text-[10px] font-mono truncate border-b-2 border-r border-[#262B36] text-left cursor-pointer transition-colors ${
+                        className={`px-1.5 text-[10px] font-mono truncate border-b-2 border-r border-[#E2E2E6] text-left cursor-pointer transition-colors ${
                           isSegActive
-                            ? 'bg-amber-500/25 text-amber-100 font-bold'
-                            : 'bg-[#14171D] text-zinc-300 hover:bg-[#1D222B]'
+                            ? 'bg-[#FADEE1] text-[#6E141C] font-bold'
+                            : 'bg-white text-[#3A3A44] hover:bg-[#1D222B]'
                         }`}
                       >
                         {seg.line.shotId}
@@ -1362,13 +1369,13 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
           {/* Empty State */}
           {project.voScript.length === 0 ? (
-            <div className="bg-[#14171D] border border-dashed border-[#262B36] rounded-xl p-10 text-center space-y-3">
-              <Mic2 className="w-8 h-8 text-amber-400 mx-auto" />
-              <h3 className="text-base font-semibold text-zinc-100">
+            <div className="bg-white border border-dashed border-[#E2E2E6] rounded-xl p-10 text-center space-y-3">
+              <Mic2 className="w-8 h-8 text-[#C6202F] mx-auto" />
+              <h3 className="text-base font-semibold text-[#111114]">
                 No Voiceover Script Written Yet
               </h3>
-              <p className="text-xs text-zinc-400 max-w-md mx-auto leading-relaxed">
-                Click <strong className="text-zinc-200">Write VO script (Gemini)</strong>{' '}
+              <p className="text-xs text-[#5A5A66] max-w-md mx-auto leading-relaxed">
+                Click <strong className="text-[#24242B]">Write VO script (Gemini)</strong>{' '}
                 above to draft timed lines matched to your shots (~2.5 words/sec) and Brand
                 Bible claims rules, or add a custom line manually.
               </p>
@@ -1377,7 +1384,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   type="button"
                   disabled={isWritingScript}
                   onClick={() => void handleWriteScriptClick(true)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
                   Write VO script (Gemini)
@@ -1385,7 +1392,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 <button
                   type="button"
                   onClick={handleAddLine}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded-lg cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   Add line manually
@@ -1406,13 +1413,13 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 return (
                   <div
                     key={line.id}
-                    className={`bg-[#14171D] border rounded-xl overflow-hidden transition-colors ${
-                      isPlayingThis ? 'border-amber-500' : 'border-[#262B36]'
+                    className={`bg-white border rounded-xl overflow-hidden transition-colors ${
+                      isPlayingThis ? 'border-[#C6202F]' : 'border-[#E2E2E6]'
                     }`}
                   >
-                    <div className="px-4 py-2.5 bg-[#101318] border-b border-[#262B36] flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="px-4 py-2.5 bg-[#FBFBFC] border-b border-[#E2E2E6] flex flex-wrap items-center justify-between gap-3 text-xs">
                       <div className="flex flex-wrap items-center gap-2.5">
-                        <span className="text-zinc-500 font-mono">
+                        <span className="text-[#6E6E7A] font-mono">
                           #{String(index + 1).padStart(2, '0')}
                         </span>
                         <select
@@ -1429,7 +1436,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                               targetWords: Math.max(3, Math.round(nextSec * 2.5)),
                             });
                           }}
-                          className="bg-[#0B0D10] border border-[#262B36] rounded px-2 py-1 font-mono font-bold text-amber-400 text-xs focus:outline-none focus:border-amber-500"
+                          className="bg-[#F6F6F7] border border-[#E2E2E6] rounded px-2 py-1 font-mono font-bold text-[#C6202F] text-xs focus:outline-none focus:border-[#C6202F]"
                         >
                           {project.shots.map((s) => (
                             <option key={s.id} value={s.id}>
@@ -1444,15 +1451,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                         <span
                           className={`px-2 py-0.5 rounded font-mono text-[11px] tabular-nums ${
                             isOverBudget
-                              ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
-                              : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
+                              ? 'bg-rose-50 text-[#891A23] border border-rose-300'
+                              : 'bg-emerald-50 text-emerald-800 border border-emerald-300'
                           }`}
                         >
                           {actualWords} / ~{targetWords} words ({shotSec}s)
                         </span>
 
                         {line.audioUrl && (
-                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px] font-medium">
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 text-[11px] font-medium">
                             Audio ready
                           </span>
                         )}
@@ -1463,9 +1470,9 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                           <button
                             type="button"
                             onClick={() => void handlePlaySingleLine(line)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-100 bg-[#0B0D10] border border-[#262B36] hover:border-amber-500 rounded-lg cursor-pointer"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#111114] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer"
                           >
-                            <Play className="w-3 h-3 text-amber-400" />
+                            <Play className="w-3 h-3 text-[#C6202F]" />
                             Play
                           </button>
                         )}
@@ -1474,7 +1481,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                           type="button"
                           disabled={isGeneratingThis || isGeneratingAll || !line.line.trim()}
                           onClick={() => void handleGenerateSingleLine(line)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg cursor-pointer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer"
                         >
                           {isGeneratingThis ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1491,7 +1498,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                         <button
                           type="button"
                           onClick={() => handleRemoveLine(line.id)}
-                          className="p-1.5 text-zinc-500 hover:text-rose-400 rounded-lg cursor-pointer"
+                          className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] rounded-lg cursor-pointer"
                           aria-label="Delete VO line"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -1501,15 +1508,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
                     <div className="p-4 space-y-3">
                       {linkedShot && (
-                        <div className="text-[11px] text-zinc-400">
-                          <span className="text-zinc-500 font-medium">Shot action: </span>
+                        <div className="text-[11px] text-[#5A5A66]">
+                          <span className="text-[#6E6E7A] font-medium">Shot action: </span>
                           {linkedShot.scene}
                         </div>
                       )}
 
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Speaker
                           </label>
                           <input
@@ -1518,12 +1525,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                             onChange={(e) =>
                               updateVoLine(line.id, { speaker: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
 
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Delivery Direction (Plain English)
                           </label>
                           <input
@@ -1533,12 +1540,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                               updateVoLine(line.id, { direction: e.target.value })
                             }
                             placeholder="e.g. warm, unhurried, quiet confidence"
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
 
                         <div>
-                          <label className="text-[11px] text-zinc-400 block mb-1">
+                          <label className="text-[11px] text-[#5A5A66] block mb-1">
                             Line Emotion Tone
                           </label>
                           <select
@@ -1546,7 +1553,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                             onChange={(e) =>
                               updateVoLine(line.id, { emotionalTone: e.target.value })
                             }
-                            className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           >
                             {EMOTIONAL_TONES.map((t) => (
                               <option key={t.id} value={t.id}>
@@ -1559,7 +1566,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
                       <div>
                         <div className="flex items-center justify-between mb-1">
-                          <label className="text-[11px] text-zinc-400">
+                          <label className="text-[11px] text-[#5A5A66]">
                             Spoken Voiceover Line
                           </label>
                           <div className="flex items-center gap-1.5">
@@ -1570,7 +1577,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                                   line: `${line.line.trimEnd()}... `,
                                 })
                               }
-                              className="px-2 py-0.5 text-[10px] text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded cursor-pointer"
+                              className="px-2 py-0.5 text-[10px] text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded cursor-pointer"
                             >
                               + Breath pause (...)
                             </button>
@@ -1581,7 +1588,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                                   line: `${line.line.trimEnd()} — `,
                                 })
                               }
-                              className="px-2 py-0.5 text-[10px] text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded cursor-pointer"
+                              className="px-2 py-0.5 text-[10px] text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded cursor-pointer"
                             >
                               + Emphasis beat (—)
                             </button>
@@ -1594,14 +1601,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                             updateVoLine(line.id, { line: e.target.value })
                           }
                           placeholder="Write spoken line timed to ~2.5 words/sec..."
-                          className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500 leading-relaxed"
+                          className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-sm text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
                         />
                       </div>
 
                       {!voSettings.singleVoiceMode && (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                           <div>
-                            <label className="text-[11px] text-zinc-400 block mb-1">
+                            <label className="text-[11px] text-[#5A5A66] block mb-1">
                               Line Cast Voice
                             </label>
                             <select
@@ -1609,7 +1616,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                               onChange={(e) =>
                                 updateVoLine(line.id, { voiceName: e.target.value })
                               }
-                              className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-amber-500"
+                              className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                             >
                               {ALL_GEMINI_VOICE_PRESETS.map((v) => (
                                 <option key={v.id} value={v.id}>
@@ -1619,7 +1626,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                             </select>
                           </div>
                           <div>
-                            <label className="text-[11px] text-zinc-400 block mb-1">
+                            <label className="text-[11px] text-[#5A5A66] block mb-1">
                               Pause After Shot (seconds)
                             </label>
                             <input
@@ -1633,7 +1640,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                                   pauseAfter: Number(e.target.value) || 0,
                                 })
                               }
-                              className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:outline-none focus:border-amber-500"
+                              className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
                             />
                           </div>
                         </div>
@@ -1646,7 +1653,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               <button
                 type="button"
                 onClick={handleAddLine}
-                className="w-full py-2.5 border border-dashed border-[#262B36] hover:border-amber-500/60 rounded-xl text-xs font-medium text-zinc-300 hover:text-amber-300 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                className="w-full py-2.5 border border-dashed border-[#E2E2E6] hover:border-[#C6202F]/60 rounded-xl text-xs font-medium text-[#3A3A44] hover:text-[#891A23] inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 Add VO line
@@ -1659,15 +1666,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       {/* Export Audio Modal */}
       {exportOpen && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#14171D] border border-[#262B36] rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+          <div className="bg-white border border-[#E2E2E6] rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-zinc-100">
+              <h3 className="text-base font-bold text-[#111114]">
                 Export Voiceover Audio
               </h3>
               <button
                 type="button"
                 onClick={() => setExportOpen(false)}
-                className="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                className="text-xs text-[#5A5A66] hover:text-[#24242B] cursor-pointer"
               >
                 Close
               </button>
@@ -1675,7 +1682,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
             <div className="space-y-4 text-xs">
               <div>
-                <label className="text-zinc-300 font-medium block mb-1.5">
+                <label className="text-[#3A3A44] font-medium block mb-1.5">
                   Deliverable Package
                 </label>
                 <div className="grid grid-cols-2 gap-2">
@@ -1684,12 +1691,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => setExportMode('master')}
                     className={`p-3 rounded-lg border text-left cursor-pointer ${
                       exportMode === 'master'
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                        : 'bg-[#0B0D10] border-[#262B36] text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44]'
                     }`}
                   >
                     <div className="font-semibold">Single Master Track</div>
-                    <div className="text-[11px] text-zinc-400 mt-0.5">
+                    <div className="text-[11px] text-[#5A5A66] mt-0.5">
                       Combined with timed pauses
                     </div>
                   </button>
@@ -1698,12 +1705,12 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => setExportMode('stems')}
                     className={`p-3 rounded-lg border text-left cursor-pointer ${
                       exportMode === 'stems'
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                        : 'bg-[#0B0D10] border-[#262B36] text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44]'
                     }`}
                   >
                     <div className="font-semibold">Individual Stems (.ZIP)</div>
-                    <div className="text-[11px] text-zinc-400 mt-0.5">
+                    <div className="text-[11px] text-[#5A5A66] mt-0.5">
                       One file per shot + tracklist
                     </div>
                   </button>
@@ -1711,7 +1718,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               </div>
 
               <div>
-                <label className="text-zinc-300 font-medium block mb-1.5">
+                <label className="text-[#3A3A44] font-medium block mb-1.5">
                   Audio Format
                 </label>
                 <div className="grid grid-cols-2 gap-2">
@@ -1720,8 +1727,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => setExportFormat('wav')}
                     className={`py-2 px-3 rounded-lg border font-medium cursor-pointer ${
                       exportFormat === 'wav'
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                        : 'bg-[#0B0D10] border-[#262B36] text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44]'
                     }`}
                   >
                     WAV (Uncompressed)
@@ -1731,8 +1738,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                     onClick={() => setExportFormat('mp3')}
                     className={`py-2 px-3 rounded-lg border font-medium cursor-pointer ${
                       exportFormat === 'mp3'
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                        : 'bg-[#0B0D10] border-[#262B36] text-zinc-300'
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44]'
                     }`}
                   >
                     MP3 (Compressed)
@@ -1742,7 +1749,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
               {exportFormat === 'mp3' && (
                 <div>
-                  <label className="text-zinc-300 font-medium block mb-1.5">
+                  <label className="text-[#3A3A44] font-medium block mb-1.5">
                     MP3 Bitrate
                   </label>
                   <div className="grid grid-cols-3 gap-2">
@@ -1753,8 +1760,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                         onClick={() => setExportBitrate(rate)}
                         className={`py-1.5 rounded-lg border font-mono cursor-pointer ${
                           exportBitrate === rate
-                            ? 'bg-amber-500/15 border-amber-500 text-amber-200'
-                            : 'bg-[#0B0D10] border-[#262B36] text-zinc-300'
+                            ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                            : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44]'
                         }`}
                       >
                         {rate} kbps
@@ -1764,22 +1771,22 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 </div>
               )}
 
-              <label className="flex items-center justify-between text-zinc-300 cursor-pointer pt-1">
+              <label className="flex items-center justify-between text-[#3A3A44] cursor-pointer pt-1">
                 <span>Broadcast Peak Normalization (-1 dB)</span>
                 <input
                   type="checkbox"
                   checked={exportNormalize}
                   onChange={(e) => setExportNormalize(e.target.checked)}
-                  className="accent-amber-500 w-4 h-4 cursor-pointer"
+                  className="accent-[#C6202F] w-4 h-4 cursor-pointer"
                 />
               </label>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#262B36]">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E2E2E6]">
               <button
                 type="button"
                 onClick={() => setExportOpen(false)}
-                className="px-3.5 py-2 text-xs text-zinc-300 hover:text-zinc-100 cursor-pointer"
+                className="px-3.5 py-2 text-xs text-[#3A3A44] hover:text-[#111114] cursor-pointer"
               >
                 Cancel
               </button>
@@ -1787,7 +1794,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 type="button"
                 disabled={isExporting}
                 onClick={() => void handleRunExport()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer"
               >
                 {isExporting ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />

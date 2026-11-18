@@ -223,15 +223,15 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
   return (
     <div className="max-w-[1320px] mx-auto px-6 py-7 space-y-6">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#262B36]">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-[#E2E2E6]">
         <div>
-          <div className="text-xs font-medium text-amber-400">
+          <div className="text-xs font-medium text-[#C6202F]">
             Step 7 · Video Prompts, AI Generation &amp; Topaz Upscaling
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100 mt-1">
+          <h1 className="text-2xl font-bold tracking-tight text-[#111114] mt-1">
             Motion Prompts &amp; Video Studio
           </h1>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm text-[#5A5A66] mt-1">
             Generate with FLUX 3, Seedance, Kling 4.0, Wan 3.0 Prime, or Luma Ray 3.2,
             then upscale any clip to H.264 Premiere-ready quality via Topaz Video.
           </p>
@@ -241,9 +241,9 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
           <button
             type="button"
             onClick={() => openUpscaleModalForShot(null)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <UploadCloud className="w-4 h-4 text-amber-400" />
+            <UploadCloud className="w-4 h-4 text-[#C6202F]" />
             Upscale Existing Video
           </button>
 
@@ -251,12 +251,12 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
             type="button"
             disabled={isWritingPrompts || aiHybridShots.length === 0}
             onClick={() => void handleWriteAllPrompts()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-[#262B36] hover:border-amber-500 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#111114] bg-white border border-[#E2E2E6] hover:border-[#C6202F] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isWritingPrompts ? (
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-[#C6202F]" />
             ) : (
-              <Sparkles className="w-4 h-4 text-amber-400" />
+              <Sparkles className="w-4 h-4 text-[#C6202F]" />
             )}
             {isWritingPrompts ? 'Writing Prompts...' : 'Write all video prompts'}
           </button>
@@ -269,7 +269,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
               readyForGeneration.length === 0
             }
             onClick={() => setConfirmBatchOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isGeneratingAll ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -282,7 +282,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
           </button>
 
           {project.approvals.videoPromptsApproved ? (
-            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-zinc-950 bg-emerald-400 rounded-lg whitespace-nowrap shrink-0">
+            <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap shrink-0">
               <CheckCircle2 className="w-4 h-4" />
               Video Step Approved
             </span>
@@ -291,9 +291,9 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
               type="button"
               disabled={readyForGeneration.length === 0 && aiHybridShots.length > 0}
               onClick={() => void onApproveVideoStep()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-100 bg-[#14171D] border border-emerald-500/50 hover:bg-emerald-500/15 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-[#111114] bg-white border border-emerald-600 hover:bg-emerald-50 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-700" />
               Approve video step
             </button>
           )}
@@ -302,9 +302,9 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
 
       {/* Paid Batch Confirmation Banner */}
       {confirmBatchOpen && (
-        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start gap-2.5 text-xs text-amber-100">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+        <div className="p-4 rounded-xl bg-[#FDF4F5] border border-[#C6202F]/55 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs text-[#6E141C]">
+            <AlertTriangle className="w-4 h-4 text-[#C6202F] shrink-0 mt-0.5" />
             <div>
               <strong>Confirm paid generation:</strong> This will run{' '}
               <strong>{readyForGeneration.length}</strong> fal.ai video generation
@@ -316,14 +316,14 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
             <button
               type="button"
               onClick={() => setConfirmBatchOpen(false)}
-              className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#14171D] border border-[#262B36] rounded-lg cursor-pointer"
+              className="px-3 py-1.5 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] rounded-lg cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="button"
               onClick={() => void handleConfirmBatchGenerate()}
-              className="px-3.5 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 rounded-lg cursor-pointer"
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg cursor-pointer"
             >
               Run {readyForGeneration.length} video generations
             </button>
@@ -331,14 +331,25 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
         </div>
       )}
 
+      {(isWritingPrompts || writingShotId) && (
+        <div className="p-3.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] text-xs text-[#891A23] flex items-center gap-2.5">
+          <Loader2 className="w-4 h-4 animate-spin text-[#C6202F] shrink-0" />
+          <span>
+            {writingShotId
+              ? `Writing motion video prompt & negative prompt for ${writingShotId}...`
+              : `Writing motion video prompts & negative prompts for ${aiHybridShots.length} shots in a single fast batch...`}
+          </span>
+        </div>
+      )}
+
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+        <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
           {errorMsg}
         </div>
       )}
 
       {liveShots.length > 0 && (
-        <div className="text-xs text-zinc-400">
+        <div className="text-xs text-[#5A5A66]">
           Note: {liveShots.length} Live shoot shot(s) ({liveShots.map((s) => s.id).join(', ')})
           are excluded here and go straight into the Step 9 Shoot Plan.
         </div>
@@ -354,49 +365,54 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
           return (
             <div
               key={shot.id}
-              className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden"
+              className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden"
             >
-              <div className="px-5 py-3 bg-[#101318] border-b border-[#262B36] flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="px-5 py-3 bg-[#FBFBFC] border-b border-[#E2E2E6] flex flex-wrap items-center justify-between gap-3 text-xs">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="font-mono font-bold text-amber-400 text-sm">
+                  <span className="font-mono font-bold text-[#C6202F] text-sm">
                     {shot.id}
                   </span>
-                  <span className="text-zinc-200 font-medium">
+                  <span className="text-[#24242B] font-medium">
                     {shot.route === 'hybrid' ? 'Hybrid' : 'AI video'}
                   </span>
-                  <span className="text-zinc-500">·</span>
-                  <span className="text-zinc-300">
+                  <span className="text-[#6E6E7A]">·</span>
+                  <span className="text-[#3A3A44]">
                     Model: <strong>{modelLabel}</strong>
                   </span>
-                  <span className="text-zinc-500">·</span>
-                  <span className="font-mono text-zinc-400 tabular-nums">
+                  <span className="text-[#6E6E7A]">·</span>
+                  <span className="font-mono text-[#5A5A66] tabular-nums">
                     {shot.durationSec}s
                   </span>
                   {shot.videoResolution && (
                     <>
-                      <span className="text-zinc-500">·</span>
-                      <span className="font-mono text-zinc-300">
+                      <span className="text-[#6E6E7A]">·</span>
+                      <span className="font-mono text-[#3A3A44]">
                         {shot.videoResolution}
                       </span>
                     </>
                   )}
                   {shot.upscaledVideoUrl && (
-                    <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-mono font-semibold text-[11px]">
+                    <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-800 font-mono font-semibold text-[11px]">
                       {shot.upscaledResolution || '4K / Upscaled'}
+                    </span>
+                  )}
+                  {(shot.videoHistory?.length ?? 0) > 1 && (
+                    <span className="px-2 py-0.5 rounded bg-[#FDF2F3] border border-[#EABAC0] text-[#891A23] font-mono text-[11px]">
+                      {shot.videoHistory?.length} takes
                     </span>
                   )}
                   {shot.chainFrom !== 'none' && (
                     <>
-                      <span className="text-zinc-500">·</span>
-                      <span className="text-amber-300">
+                      <span className="text-[#6E6E7A]">·</span>
+                      <span className="text-[#891A23]">
                         Chains from {shot.chainFrom} last frame
                       </span>
                     </>
                   )}
                   {shot.videoSeed !== null && (
                     <>
-                      <span className="text-zinc-500">·</span>
-                      <span className="font-mono text-emerald-300">
+                      <span className="text-[#6E6E7A]">·</span>
+                      <span className="font-mono text-emerald-800">
                         Seed: {shot.videoSeed}
                       </span>
                     </>
@@ -408,12 +424,12 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                     type="button"
                     disabled={isWritingThis || isWritingPrompts}
                     onClick={() => void handleWriteSinglePrompt(shot.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-amber-500 rounded-lg cursor-pointer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer"
                   >
                     {isWritingThis ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
                     ) : (
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <Sparkles className="w-3.5 h-3.5 text-[#C6202F]" />
                     )}
                     Write video prompt
                   </button>
@@ -422,7 +438,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                     <button
                       type="button"
                       onClick={() => openUpscaleModalForShot(shot.id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-emerald-200 bg-emerald-500/15 border border-emerald-500/40 hover:bg-emerald-500/25 rounded-lg cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-emerald-900 bg-emerald-50 border border-emerald-300 hover:bg-emerald-100 rounded-lg cursor-pointer"
                     >
                       <ArrowUpRight className="w-3.5 h-3.5" />
                       Upscale
@@ -433,7 +449,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                     type="button"
                     disabled={isGenerating || isGeneratingAll}
                     onClick={() => void handleOpenStudioForShot(shot)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 rounded-lg cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 rounded-lg cursor-pointer"
                   >
                     {isGenerating ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -448,7 +464,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
               <div className="p-5 grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6">
                 {/* Left: Original Clip + Linked Upscaled Clip + Downloads */}
                 <div className="space-y-3">
-                  <div className="aspect-video bg-[#0B0D10] border border-[#262B36] rounded-lg overflow-hidden flex items-center justify-center relative">
+                  <div className="aspect-video bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg overflow-hidden flex items-center justify-center relative">
                     {shot.videoUrl ? (
                       <video
                         src={shot.videoUrl}
@@ -463,13 +479,13 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <div className="text-center p-4 text-zinc-500 space-y-1">
+                      <div className="text-center p-4 text-[#6E6E7A] space-y-1">
                         <Film className="w-5 h-5 mx-auto" />
                         <div className="text-xs">No start frame</div>
                       </div>
                     )}
                     {shot.videoUrl && shot.videoResolution && (
-                      <span className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/75 border border-white/15 text-[10px] font-mono text-zinc-100">
+                      <span className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/75 border border-white/15 text-[10px] font-mono text-white">
                         Original · {shot.videoResolution}
                       </span>
                     )}
@@ -477,19 +493,19 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
 
                   {/* Linked Topaz Upscaled Video Card */}
                   {shot.upscaledVideoUrl && (
-                    <div className="p-2.5 rounded-lg bg-[#0B0D10] border border-emerald-500/40 space-y-2">
+                    <div className="p-2.5 rounded-lg bg-[#F6F6F7] border border-emerald-300 space-y-2">
                       <div className="flex items-center justify-between gap-2 text-[11px]">
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono font-semibold">
+                        <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-emerald-800 font-mono font-semibold">
                           {shot.upscaledResolution || '4K / Upscaled'}
                         </span>
                         {shot.upscaleDetails && (
-                          <span className="text-zinc-400 font-mono truncate">
+                          <span className="text-[#5A5A66] font-mono truncate">
                             {shot.upscaleDetails.subModel} ·{' '}
                             {shot.upscaleDetails.scaleFactor}x H.264
                           </span>
                         )}
                       </div>
-                      <div className="aspect-video rounded overflow-hidden bg-black border border-[#262B36]">
+                      <div className="aspect-video rounded overflow-hidden bg-black border border-[#E2E2E6]">
                         <video
                           src={shot.upscaledVideoUrl}
                           controls
@@ -499,7 +515,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                       <a
                         href={shot.upscaledVideoUrl}
                         download={`${project.id}-${shot.id}-upscaled.mp4`}
-                        className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-colors"
+                        className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#15803D] hover:bg-[#166534] rounded-lg transition-colors"
                       >
                         <Download className="w-3.5 h-3.5" />
                         Download Upscaled MP4
@@ -512,7 +528,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                       <a
                         href={shot.videoUrl}
                         download={`${project.id}-${shot.id}.mp4`}
-                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-200 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors"
+                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors"
                       >
                         <Download className="w-3.5 h-3.5" />
                         Download Clip
@@ -522,7 +538,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                       <a
                         href={shot.frameImageUrl}
                         download={`${project.id}-${shot.id}-start-frame.png`}
-                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded-lg transition-colors"
+                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors"
                       >
                         <Download className="w-3.5 h-3.5" />
                         Start Frame
@@ -533,20 +549,20 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
 
                 {/* Right: Video Prompt + Negative Prompt */}
                 <div className="space-y-3.5">
-                  <div className="text-xs text-zinc-400">
-                    <span className="text-zinc-500 font-medium">Scene: </span>
+                  <div className="text-xs text-[#5A5A66]">
+                    <span className="text-[#6E6E7A] font-medium">Scene: </span>
                     {shot.scene}
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-xs font-medium text-zinc-200">
+                      <label className="text-xs font-medium text-[#24242B]">
                         Video prompt ({modelLabel})
                       </label>
                       <button
                         type="button"
                         onClick={() => void handleCopy(`vp-${shot.id}`, shot.videoPrompt)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-amber-300 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 rounded cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded cursor-pointer"
                       >
                         {copiedKey === `vp-${shot.id}` ? (
                           <>
@@ -568,13 +584,13 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                         updateShot(shot.id, { videoPrompt: e.target.value })
                       }
                       placeholder="Motion, camera move, timing, preservation line, and ambient sound..."
-                      className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500 leading-relaxed"
+                      className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-xs font-medium text-zinc-300">
+                      <label className="text-xs font-medium text-[#3A3A44]">
                         Negative prompt (artifacts + Brand Bible banned list)
                       </label>
                       <button
@@ -582,11 +598,11 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                         onClick={() =>
                           void handleCopy(`np-${shot.id}`, shot.negativePrompt)
                         }
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-zinc-300 bg-[#0B0D10] border border-[#262B36] hover:border-zinc-500 rounded cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#3A3A44] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded cursor-pointer"
                       >
                         {copiedKey === `np-${shot.id}` ? (
                           <>
-                            <Check className="w-3 h-3 text-emerald-400" />
+                            <Check className="w-3 h-3 text-emerald-700" />
                             Copied
                           </>
                         ) : (
@@ -604,7 +620,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                         updateShot(shot.id, { negativePrompt: e.target.value })
                       }
                       placeholder="warping, extra limbs, text glitches, logo distortion..."
-                      className="w-full bg-[#0B0D10] border border-[#262B36] rounded-lg px-3 py-2 text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                      className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#3A3A44] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
                     />
                   </div>
                 </div>
@@ -616,16 +632,16 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
 
       {/* External Topaz Upscaled Clips Gallery */}
       {externalUpscales.length > 0 && (
-        <div className="bg-[#14171D] border border-[#262B36] rounded-xl overflow-hidden">
-          <div className="px-5 py-3 bg-[#101318] border-b border-[#262B36] flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-              <ArrowUpRight className="w-4 h-4 text-emerald-400" />
+        <div className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden">
+          <div className="px-5 py-3 bg-[#FBFBFC] border-b border-[#E2E2E6] flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#111114]">
+              <ArrowUpRight className="w-4 h-4 text-emerald-700" />
               Standalone Topaz Upscaled Videos ({externalUpscales.length})
             </div>
             <button
               type="button"
               onClick={() => openUpscaleModalForShot(null)}
-              className="text-xs text-amber-400 hover:text-amber-300 font-medium cursor-pointer"
+              className="text-xs text-[#C6202F] hover:text-[#891A23] font-medium cursor-pointer"
             >
               + Upscale Another Clip
             </button>
@@ -634,7 +650,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
             {externalUpscales.map((item) => (
               <div
                 key={item.id}
-                className="bg-[#0B0D10] border border-emerald-500/35 rounded-xl overflow-hidden flex flex-col"
+                className="bg-[#F6F6F7] border border-emerald-300 rounded-xl overflow-hidden flex flex-col"
               >
                 <div className="aspect-video bg-black relative">
                   <video
@@ -642,22 +658,22 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                     controls
                     className="w-full h-full object-contain"
                   />
-                  <span className="absolute top-2 left-2 px-2 py-0.5 rounded bg-emerald-500/90 text-zinc-950 font-mono font-semibold text-[10px]">
+                  <span className="absolute top-2 left-2 px-2 py-0.5 rounded bg-[#15803D]/90 text-white font-mono font-semibold text-[10px]">
                     {item.upscaledResolution || '4K / Upscaled'}
                   </span>
                 </div>
                 <div className="p-3 space-y-2 text-xs">
-                  <div className="font-semibold text-zinc-100 truncate">
+                  <div className="font-semibold text-[#111114] truncate">
                     {item.label}
                   </div>
-                  <div className="text-[11px] font-mono text-zinc-400">
+                  <div className="text-[11px] font-mono text-[#5A5A66]">
                     {item.details.mode} · {item.details.subModel} ·{' '}
                     {item.details.scaleFactor}x H.264
                   </div>
                   <a
                     href={item.upscaledVideoUrl}
                     download={`${project.id}-${item.id}.mp4`}
-                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-colors"
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#15803D] hover:bg-[#166534] rounded-lg transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
                     Download Upscaled MP4

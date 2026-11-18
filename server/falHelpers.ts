@@ -21,6 +21,7 @@ export interface StudioGenerateInput {
   modelId: StudioModelId;
   workflowMode: StudioWorkflowMode;
   prompt: string;
+  negativePrompt?: string;
   aspectRatio: StudioAspectRatio;
   duration: number;
   qualityTier: StudioQualityTier;
@@ -82,11 +83,16 @@ export async function buildFalVideoRequest(
     resolution: params.resolution,
   });
 
+  const trimmedNeg = (params.negativePrompt || '').trim();
+
   // 1. FLUX 3 (Black Forest Labs) — preserved intact
   if (model.family === 'flux-3') {
     const draft = params.qualityTier === 'draft';
+    const basePrompt = params.prompt.trim();
+    const fluxPrompt =
+      trimmedNeg && basePrompt ? `${basePrompt}\nAvoid: ${trimmedNeg}` : basePrompt;
     const input: Record<string, unknown> = {
-      prompt: params.prompt.trim(),
+      prompt: fluxPrompt,
       aspect_ratio: params.aspectRatio,
       duration: clampedDuration,
       generate_audio: params.nativeAudio,
@@ -192,6 +198,7 @@ export async function buildFalVideoRequest(
       resolution: klingRes,
       aspect_ratio: mappedAspect,
       generate_audio: params.nativeAudio,
+      ...(trimmedNeg ? { negative_prompt: trimmedNeg } : {}),
     };
 
     if (params.workflowMode === 'image_to_video' || params.workflowMode === 'first_last_frame') {
@@ -306,6 +313,7 @@ export async function buildFalVideoRequest(
       resolution: wanRes,
       aspect_ratio: mappedAspect,
       seed: params.seed,
+      ...(trimmedNeg ? { negative_prompt: trimmedNeg } : {}),
     };
 
     if (params.workflowMode === 'image_to_video' || params.workflowMode === 'first_last_frame') {
@@ -388,8 +396,14 @@ export async function buildFalVideoRequest(
         ? '16:9'
         : params.aspectRatio;
 
+    const lumaPromptBase = params.prompt.trim();
+    const lumaPrompt =
+      trimmedNeg && lumaPromptBase && params.workflowMode !== 'video_reframe'
+        ? `${lumaPromptBase}\nAvoid: ${trimmedNeg}`
+        : lumaPromptBase;
+
     const base: Record<string, unknown> = {
-      prompt: params.prompt.trim(),
+      prompt: lumaPrompt,
       duration: `${clampedDuration}s`,
       resolution: lumaRes,
       aspect_ratio: mappedAspect,
@@ -473,6 +487,7 @@ export async function buildFalVideoRequest(
     aspect_ratio: mappedAspect,
     generate_audio: params.nativeAudio,
     seed: params.seed,
+    ...(trimmedNeg ? { negative_prompt: trimmedNeg } : {}),
   };
 
   if (params.workflowMode === 'keyframes_timeline') {

@@ -37,9 +37,17 @@ import {
   Music,
   Layers,
   ShieldCheck,
+  FolderSync,
+  RotateCcw,
 } from 'lucide-react';
-import { PipelineProject, PipelineShot } from '../../types/pipeline';
+import {
+  PipelineProject,
+  PipelineShot,
+  ShotClipHistoryItem,
+} from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
+import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { DriveAssetPickerModal, DriveMediaFilter } from './DriveAssetPickerModal';
 import {
   clampStudioDuration,
   estimateStudioCostUsd,
@@ -141,7 +149,7 @@ function mapShotModelToStudioId(model: PipelineShot['model']): StudioModelId {
     case 'luma':
       return 'luma-ray-3.2';
     default:
-      return 'seedance-2.5';
+      return 'seedance-2.0';
   }
 }
 
@@ -153,13 +161,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   onClose,
   onProjectUpdated,
 }) => {
-  const [modelId, setModelId] = useState<StudioModelId>('seedance-2.5');
+  const [modelId, setModelId] = useState<StudioModelId>('seedance-2.0');
   const [workflowMode, setWorkflowMode] = useState<StudioWorkflowMode>('image_to_video');
   const [prompt, setPrompt] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
+  const [activeClipId, setActiveClipId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<StudioAspectRatio>('16:9');
   const [duration, setDuration] = useState(5);
-  const [qualityTier, setQualityTier] = useState<StudioQualityTier>('final');
-  const [resolution, setResolution] = useState<StudioResolution | undefined>(undefined);
+  const [qualityTier, setQualityTier] = useState<StudioQualityTier>('draft');
+  const [resolution, setResolution] = useState<StudioResolution | undefined>('480p');
   const [nativeAudio, setNativeAudio] = useState(true);
   const [safetyTolerance, setSafetyTolerance] = useState(2);
   const [enableSafetyChecker, setEnableSafetyChecker] = useState(false);
@@ -191,6 +201,17 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [isDraggingSourceVideo, setIsDraggingSourceVideo] = useState(false);
   const [upscaleModalOpen, setUpscaleModalOpen] = useState(false);
+  const [drivePickerTarget, setDrivePickerTarget] = useState<
+    | { kind: 'start' }
+    | { kind: 'end' }
+    | { kind: 'keyframe'; keyframeId: string }
+    | { kind: 'ref_image' }
+    | { kind: 'element' }
+    | { kind: 'source_video' }
+    | { kind: 'ref_video' }
+    | { kind: 'ref_audio' }
+    | null
+  >(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
@@ -210,48 +231,169 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
       ? project.shots.find((s) => s.id === shot.chainFrom)
       : undefined;
 
-  // Pre-fill all studio fields from the selected shot on open
+  const getClipGalleryForShot = (s: PipelineShot): ShotClipHistoryItem[] => {
+    if (s.videoHistory && s.videoHistory.length > 0) {
+      return s.videoHistory;
+    }
+    if (s.videoUrl) {
+      const mId = mapShotModelToStudioId(s.model);
+      const wf: StudioWorkflowMode = s.frameImageUrl ? 'image_to_video' : 'text_to_video';
+      return [
+        {
+          id: `clip-legacy-${s.id}`,
+          videoUrl: s.videoUrl,
+          createdAt: project.updatedAt,
+          modelId: mId,
+          workflowMode: wf,
+          prompt: s.videoPrompt || s.scene || '',
+          negativePrompt: s.negativePrompt || '',
+          aspectRatio: '16:9',
+          duration: clampStudioDuration(mId, s.durationSec || 5),
+          qualityTier: 'draft',
+          resolution:
+            s.videoResolution || getStudioAvailableResolutions(mId, wf)[0],
+          nativeAudio: true,
+          seed: s.videoSeed,
+          startFrameUrl: s.frameImageUrl || null,
+          draftCacheUrl: s.draftCacheUrl || null,
+          upscaledVideoUrl: s.upscaledVideoUrl || null,
+          upscaledResolution: s.upscaledResolution || null,
+        },
+      ];
+    }
+    return [];
+  };
+
+  const applyClipSettingsToPanel = (clip: ShotClipHistoryItem, fallbackShot: PipelineShot) => {
+    const validModelId: StudioModelId =
+      clip.modelId in STUDIO_MODELS
+        ? (clip.modelId as StudioModelId)
+        : mapShotModelToStudioId(fallbackShot.model);
+    const spec = getStudioModel(validModelId);
+    const nextMode: StudioWorkflowMode = spec.workflowModes.includes(
+      clip.workflowMode as StudioWorkflowMode
+    )
+      ? (clip.workflowMode as StudioWorkflowMode)
+      : spec.workflowModes[0];
+    const validAspects = getStudioAvailableAspectRatios(validModelId, nextMode);
+    const nextAspect: StudioAspectRatio = validAspects.includes(
+      clip.aspectRatio as StudioAspectRatio
+    )
+      ? (clip.aspectRatio as StudioAspectRatio)
+      : validAspects.includes('16:9')
+        ? '16:9'
+        : validAspects[0];
+    const validResList = getStudioAvailableResolutions(validModelId, nextMode);
+    const nextRes: StudioResolution = validResList.includes(
+      clip.resolution as StudioResolution
+    )
+      ? (clip.resolution as StudioResolution)
+      : validResList[0];
+    const dur = clampStudioDuration(validModelId, clip.duration || fallbackShot.durationSec || 5);
+
+    setActiveClipId(clip.id);
+    setModelId(validModelId);
+    setWorkflowMode(nextMode);
+    setPrompt(clip.prompt || fallbackShot.videoPrompt || fallbackShot.scene || '');
+    setNegativePrompt(clip.negativePrompt ?? fallbackShot.negativePrompt ?? '');
+    setAspectRatio(nextAspect);
+    setDuration(dur);
+    setQualityTier(clip.qualityTier === 'final' ? 'final' : 'draft');
+    setResolution(nextRes);
+    setNativeAudio(clip.nativeAudio !== undefined ? clip.nativeAudio : true);
+    if (clip.safetyTolerance !== undefined) setSafetyTolerance(clip.safetyTolerance);
+    if (clip.enableSafetyChecker !== undefined) {
+      setEnableSafetyChecker(clip.enableSafetyChecker);
+    }
+    if (clip.seed !== undefined && clip.seed !== null) {
+      setSeed(clip.seed);
+    }
+    setStartFrameUrl(clip.startFrameUrl ?? fallbackShot.frameImageUrl ?? null);
+    setEndFrameUrl(clip.endFrameUrl ?? null);
+    setSourceVideoUrl(clip.sourceVideoUrl ?? null);
+    setKeyframes(
+      clip.keyframes && clip.keyframes.length > 0
+        ? clip.keyframes
+        : [
+            {
+              id: 'kf-start',
+              timeSeconds: 0,
+              imageUrl: clip.startFrameUrl || fallbackShot.frameImageUrl || '',
+              label: 'Opening frame',
+            },
+            {
+              id: 'kf-end',
+              timeSeconds: dur,
+              imageUrl: clip.endFrameUrl || '',
+              label: 'Target ending',
+            },
+          ]
+    );
+    setReferenceImages(clip.referenceImages || []);
+    setReferenceElements(clip.referenceElements || []);
+    setReferenceVideos(clip.referenceVideos || []);
+    setReferenceAudioUrl(clip.referenceAudioUrl ?? null);
+    setReferenceTask((clip.referenceTask as StudioReferenceTask) || 'reference');
+    setPreviewVersion(clip.upscaledVideoUrl ? 'upscaled' : 'original');
+    setIsPlaying(false);
+    setCurrentTime(0);
+  };
+
+  // Pre-fill studio fields on open (cheapest draft defaults for new shots, or active clip settings if rendered)
   useEffect(() => {
     if (!isOpen || !shot) return;
-    const initialModel = mapShotModelToStudioId(shot.model);
-    const initialFrame = chainedStartFrameDataUrl || shot.frameImageUrl || null;
-    const initialDur = clampStudioDuration(initialModel, shot.durationSec || 5);
+    const gallery = getClipGalleryForShot(shot);
+    if (gallery.length > 0 && !chainedStartFrameDataUrl) {
+      applyClipSettingsToPanel(gallery[0], shot);
+    } else {
+      const initialModel = mapShotModelToStudioId(shot.model);
+      const initialFrame = chainedStartFrameDataUrl || shot.frameImageUrl || null;
+      const initialMode: StudioWorkflowMode = initialFrame
+        ? 'image_to_video'
+        : 'text_to_video';
+      const initialDur = clampStudioDuration(initialModel, shot.durationSec || 5);
+      const lowestRes = getStudioAvailableResolutions(initialModel, initialMode)[0];
 
-    setModelId(initialModel);
-    setWorkflowMode(initialFrame ? 'image_to_video' : 'text_to_video');
-    setPrompt(shot.videoPrompt || shot.scene || '');
-    setAspectRatio('16:9');
-    setDuration(initialDur);
-    setQualityTier('final');
-    setResolution(undefined);
-    setNativeAudio(true);
-    setSafetyTolerance(2);
-    setEnableSafetyChecker(false);
-    setSeed(shot.videoSeed ?? Math.floor(Math.random() * 900000 + 100000));
-    setStartFrameUrl(initialFrame);
-    setEndFrameUrl(null);
-    setSourceVideoUrl(null);
-    setKeyframes([
-      {
-        id: 'kf-start',
-        timeSeconds: 0,
-        imageUrl: initialFrame || '',
-        label: 'Opening frame',
-      },
-      {
-        id: 'kf-end',
-        timeSeconds: initialDur,
-        imageUrl: '',
-        label: 'Target ending',
-      },
-    ]);
-    setReferenceImages([]);
-    setReferenceElements([]);
-    setReferenceVideos([]);
-    setReferenceAudioUrl(null);
-    setReferenceTask('reference');
-    setPreviewVersion(shot.upscaledVideoUrl ? 'upscaled' : 'original');
+      setActiveClipId(gallery[0]?.id || null);
+      setModelId(initialModel);
+      setWorkflowMode(initialMode);
+      setPrompt(shot.videoPrompt || shot.scene || '');
+      setNegativePrompt(shot.negativePrompt || '');
+      setAspectRatio('16:9');
+      setDuration(initialDur);
+      setQualityTier('draft');
+      setResolution(lowestRes);
+      setNativeAudio(true);
+      setSafetyTolerance(2);
+      setEnableSafetyChecker(false);
+      setSeed(shot.videoSeed ?? Math.floor(Math.random() * 900000 + 100000));
+      setStartFrameUrl(initialFrame);
+      setEndFrameUrl(null);
+      setSourceVideoUrl(null);
+      setKeyframes([
+        {
+          id: 'kf-start',
+          timeSeconds: 0,
+          imageUrl: initialFrame || '',
+          label: 'Opening frame',
+        },
+        {
+          id: 'kf-end',
+          timeSeconds: initialDur,
+          imageUrl: '',
+          label: 'Target ending',
+        },
+      ]);
+      setReferenceImages([]);
+      setReferenceElements([]);
+      setReferenceVideos([]);
+      setReferenceAudioUrl(null);
+      setReferenceTask('reference');
+      setPreviewVersion(shot.upscaledVideoUrl ? 'upscaled' : 'original');
+    }
+
     setUpscaleModalOpen(false);
+    setDrivePickerTarget(null);
     setErrorMsg(null);
     setIsPlaying(false);
     setCurrentTime(0);
@@ -301,19 +443,13 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
       : nextAspectList.includes('16:9')
         ? '16:9'
         : nextAspectList[0];
+    const nextResolutions = getStudioAvailableResolutions(nextId, nextMode);
     setModelId(nextId);
     setDuration(nextDuration);
     setWorkflowMode(nextMode);
     setAspectRatio(nextAspect);
-    if (nextId !== 'seedance-2.5' && nextId !== 'seedance-2.0' && nextId !== 'flux-3') {
-      setQualityTier('final');
-    }
-    if (
-      resolution &&
-      !getStudioAvailableResolutions(nextId, nextMode).includes(resolution)
-    ) {
-      setResolution(undefined);
-    }
+    setQualityTier('draft');
+    setResolution(nextResolutions[0]);
   };
 
   const handleModeSelect = (nextMode: StudioWorkflowMode) => {
@@ -467,6 +603,60 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     }
   };
 
+  const handleDriveAssetsImported = (assets: ImportedDriveAsset[]) => {
+    if (!drivePickerTarget || assets.length === 0) return;
+    setErrorMsg(null);
+    const urls = assets.map((a) => a.falUrl || a.url || '').filter(Boolean);
+    if (urls.length === 0) return;
+
+    switch (drivePickerTarget.kind) {
+      case 'start':
+        setStartFrameUrl(assets[0].url || urls[0]);
+        break;
+      case 'end':
+        setEndFrameUrl(assets[0].url || urls[0]);
+        break;
+      case 'keyframe': {
+        const kfUrl = assets[0].url || urls[0];
+        const targetId = drivePickerTarget.keyframeId;
+        setKeyframes((prev) =>
+          prev.map((k) => (k.id === targetId ? { ...k, imageUrl: kfUrl } : k))
+        );
+        break;
+      }
+      case 'ref_image': {
+        const maxAllowed =
+          model.family === 'flux-3'
+            ? STUDIO_MODELS['seedance-2.5'].maxReferenceImages
+            : model.maxReferenceImages;
+        if (model.family === 'flux-3') {
+          handleModelSelect('seedance-2.5');
+        }
+        const imgUrls = assets.map((a) => a.url || '').filter(Boolean);
+        setReferenceImages((prev) =>
+          [...prev, ...imgUrls].slice(0, Math.max(1, maxAllowed))
+        );
+        break;
+      }
+      case 'element': {
+        const elUrls = assets.map((a) => a.url || '').filter(Boolean);
+        setReferenceElements((prev) => [...prev, ...elUrls].slice(0, 6));
+        break;
+      }
+      case 'source_video':
+        setSourceVideoUrl(urls[0]);
+        break;
+      case 'ref_video': {
+        const maxVid = Math.max(1, model.maxReferenceVideos);
+        setReferenceVideos((prev) => [...prev, ...urls].slice(0, maxVid));
+        break;
+      }
+      case 'ref_audio':
+        setReferenceAudioUrl(urls[0]);
+        break;
+    }
+  };
+
   const handleGenerate = async () => {
     setErrorMsg(null);
     setIsGenerating(true);
@@ -480,10 +670,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           modelId,
           workflowMode,
           prompt,
+          negativePrompt,
           aspectRatio,
           duration,
-          qualityTier: supportsDraftTier ? qualityTier : 'final',
-          resolution,
+          qualityTier: supportsDraftTier ? qualityTier : 'draft',
+          resolution: effectiveResolution,
           nativeAudio,
           safetyTolerance,
           enableSafetyChecker,
@@ -502,6 +693,9 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Video generation failed.');
       onProjectUpdated(data.project);
+      if (data.clipId) {
+        setActiveClipId(data.clipId);
+      }
       setPreviewVersion('original');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Video generation failed.');
@@ -576,15 +770,27 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
   const busy = isGenerating || isEnhancing || isUploadingMedia;
 
+  const clipGallery = getClipGalleryForShot(shot);
+  const activeClip =
+    clipGallery.find((c) => c.id === activeClipId) || clipGallery[0] || null;
+
+  const activeClipUpscaledUrl =
+    activeClip?.upscaledVideoUrl ??
+    (!activeClip || activeClip.videoUrl === shot.videoUrl ? shot.upscaledVideoUrl : null);
+  const activeClipUpscaledRes =
+    activeClip?.upscaledResolution ??
+    (!activeClip || activeClip.videoUrl === shot.videoUrl ? shot.upscaledResolution : null);
+  const activeClipOrigUrl = activeClip?.videoUrl || shot.videoUrl;
+
   const activeStageVideoUrl =
-    previewVersion === 'upscaled' && shot.upscaledVideoUrl
-      ? shot.upscaledVideoUrl
-      : shot.videoUrl;
+    previewVersion === 'upscaled' && activeClipUpscaledUrl
+      ? activeClipUpscaledUrl
+      : activeClipOrigUrl;
 
   const activeStageBadge =
-    previewVersion === 'upscaled' && shot.upscaledVideoUrl
-      ? shot.upscaledResolution || '4K / Upscaled'
-      : shot.videoResolution || null;
+    previewVersion === 'upscaled' && activeClipUpscaledUrl
+      ? activeClipUpscaledRes || '4K / Upscaled'
+      : activeClip?.resolution || shot.videoResolution || null;
 
   // Build prompt tag chips for Reference-to-Video tray
   const promptChips: string[] = [
@@ -602,18 +808,18 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
       aria-modal="true"
       aria-label={`52Video Studio — Shot ${shot.id}`}
     >
-      <div className="bg-neutral-950 border border-white/10 rounded-2xl w-full max-w-[1280px] h-[92vh] flex flex-col overflow-hidden shadow-2xl text-neutral-100">
+      <div className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-2xl w-full max-w-[1280px] h-[92vh] flex flex-col overflow-hidden shadow-2xl text-[#111114]">
         {/* Top Modal Header */}
-        <div className="px-5 py-3 bg-neutral-900/80 border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0">
+        <div className="px-5 py-3 bg-[#111114] border-b-2 border-[#C6202F] flex items-center justify-between gap-4 shrink-0 text-white">
           <div className="flex items-center gap-3 min-w-0">
             <span className="text-sm font-bold text-white tracking-tight">
               52Video Studio
             </span>
-            <span className="text-neutral-600" aria-hidden="true">
+            <span className="text-white/40" aria-hidden="true">
               /
             </span>
-            <span className="font-mono font-bold text-amber-400 text-xs">{shot.id}</span>
-            <span className="text-xs text-neutral-400 truncate hidden sm:inline">
+            <span className="font-mono font-bold text-[#F39CA4] text-xs">{shot.id}</span>
+            <span className="text-xs text-white/70 truncate hidden sm:inline">
               {shot.scene}
             </span>
           </div>
@@ -621,7 +827,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-300 hover:text-white bg-neutral-900 border border-white/10 rounded-lg cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white/80 hover:text-white bg-white/10 hover:bg-white/15 border border-white/15 rounded-lg cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
             Close
@@ -630,8 +836,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
         {/* Missing FAL_KEY Info Strip */}
         {falKeyConfigured === false && (
-          <div className="px-5 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center gap-2 text-xs text-amber-200 shrink-0">
-            <Info className="w-4 h-4 text-amber-400 shrink-0" />
+          <div className="px-5 py-2 bg-[#FDF4F5] border-b border-[#EABAC0] flex items-center gap-2 text-xs text-[#891A23] shrink-0">
+            <Info className="w-4 h-4 text-[#C6202F] shrink-0" />
             <span>
               Your shot frame and prompt are pre-loaded. Add{' '}
               <strong className="font-mono">FAL_KEY</strong> in Settings &gt; Secrets to
@@ -643,10 +849,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
         {/* Two-Column Studio Workspace */}
         <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
           {/* Left Panel: Studio Controls */}
-          <div className="w-full lg:w-[470px] shrink-0 h-full border-b lg:border-b-0 lg:border-r border-white/[0.08] bg-neutral-950 flex flex-col overflow-y-auto p-4 sm:p-5 space-y-5">
+          <div className="w-full lg:w-[470px] shrink-0 h-full border-b lg:border-b-0 lg:border-r border-[#E2E2E6] bg-[#F6F6F7] flex flex-col overflow-y-auto p-4 sm:p-5 space-y-5">
             {/* Grouped Model Dropdown (FLUX 3 + Seedance + Kling 4.0 + Wan 3.0 Prime + Luma Ray 3.2) */}
             <div className="space-y-1.5">
-              <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+              <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                 Model
               </label>
               <div className="relative">
@@ -654,11 +860,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   value={modelId}
                   disabled={busy}
                   onChange={(e) => handleModelSelect(e.target.value as StudioModelId)}
-                  className="w-full appearance-none bg-neutral-900 border border-white/10 rounded-xl pl-3 pr-9 py-2.5 text-xs font-medium text-white focus:outline-none focus:border-white/30 cursor-pointer"
+                  className="w-full appearance-none bg-white border border-[#D8D8DF] rounded-xl pl-3 pr-9 py-2.5 text-xs font-semibold text-[#111114] focus:outline-none focus:border-[#C6202F] cursor-pointer"
                 >
                   <optgroup label="ByteDance Seedance">
+                    <option value="seedance-2.0">Seedance 2.0 Fast (Lowest Cost · 480p–720p)</option>
                     <option value="seedance-2.5">Seedance 2.5 (1080p, 30s, 30 refs)</option>
-                    <option value="seedance-2.0">Seedance 2.0 Fast (720p, 15s)</option>
                   </optgroup>
                   <optgroup label="Black Forest Labs">
                     <option value="flux-3">FLUX 3 (Native Audio, up to 4K)</option>
@@ -679,19 +885,19 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     </option>
                   </optgroup>
                 </select>
-                <ChevronDown className="w-3.5 h-3.5 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <ChevronDown className="w-3.5 h-3.5 text-[#5A5A66] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
-              <p className="text-[10px] text-neutral-500">{model.tagline}</p>
+              <p className="text-[10px] text-[#6E6E7A]">{model.tagline}</p>
             </div>
 
             {/* Version Pills only when a provider family has multiple versions (Seedance) */}
             {family.modelIds.length > 1 && (
               <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+                <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                   Seedance Engine Tier
                 </label>
                 <div
-                  className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+                  className="grid gap-1.5 p-1 bg-white rounded-xl border border-[#E2E2E6]"
                   style={{
                     gridTemplateColumns: `repeat(${family.modelIds.length}, minmax(0, 1fr))`,
                   }}
@@ -707,14 +913,14 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         onClick={() => handleModelSelect(id)}
                         className={`p-2 rounded-lg text-left transition-all cursor-pointer ${
                           active
-                            ? 'bg-neutral-800 text-white border border-white/15'
-                            : 'text-neutral-400 hover:text-white border border-transparent'
+                            ? 'bg-[#111114] text-white border border-[#111114]'
+                            : 'text-[#5A5A66] hover:text-[#111114] hover:bg-[#F6F6F7] border border-transparent'
                         }`}
                       >
-                        <div className="text-xs font-semibold text-white leading-tight">
+                        <div className={`text-xs font-semibold leading-tight ${active ? 'text-white' : 'text-[#111114]'}`}>
                           {m.label}
                         </div>
-                        <div className="text-[10px] text-neutral-400 mt-0.5 leading-tight">
+                        <div className={`text-[10px] mt-0.5 leading-tight ${active ? 'text-white/75' : 'text-[#5A5A66]'}`}>
                           {m.tagline}
                         </div>
                       </button>
@@ -726,11 +932,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
             {/* Dynamic Workflow Mode Tabs */}
             <div className="space-y-1.5">
-              <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+              <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                 Workflow Mode
               </label>
               <div
-                className="grid gap-1 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+                className="grid gap-1 p-1 bg-white rounded-xl border border-[#E2E2E6]"
                 style={{
                   gridTemplateColumns: `repeat(${availableModes.length}, minmax(0, 1fr))`,
                 }}
@@ -747,8 +953,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       title={tab.label}
                       className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg transition-all cursor-pointer ${
                         active
-                          ? 'bg-neutral-800 text-white font-medium'
-                          : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                          ? 'bg-[#111114] text-white font-semibold'
+                          : 'text-[#5A5A66] hover:text-[#111114] hover:bg-[#F6F6F7]'
                       }`}
                     >
                       <Icon className="w-3.5 h-3.5 mb-1 shrink-0" />
@@ -770,14 +976,22 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   <div className="space-y-3">
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-zinc-200">
+                        <span className="font-semibold text-[#24242B]">
                           Start Frame{chainedStartFrameDataUrl ? ' (chained)' : ''}
                         </span>
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => setDrivePickerTarget({ kind: 'start' })}
+                            className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                          >
+                            <FolderSync className="w-3 h-3" />
+                            Drive
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => startInputRef.current?.click()}
-                            className="text-[11px] text-amber-400 hover:text-amber-300 cursor-pointer"
+                            className="text-[11px] text-[#C6202F] hover:text-[#891A23] cursor-pointer"
                           >
                             Replace
                           </button>
@@ -785,7 +999,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <button
                               type="button"
                               onClick={() => setStartFrameUrl(null)}
-                              className="text-zinc-400 hover:text-rose-400 cursor-pointer"
+                              className="text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
                               aria-label="Clear start frame"
                             >
                               <Trash2 className="w-3 h-3" />
@@ -806,7 +1020,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       />
                       <div
                         onClick={() => startInputRef.current?.click()}
-                        className="rounded-xl border-2 border-dashed border-zinc-700 hover:border-amber-500/70 bg-zinc-950/60 overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
+                        className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
                       >
                         {startFrameUrl ? (
                           <img
@@ -816,8 +1030,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             className="w-full h-full object-cover"
                           />
                         ) : (
-                          <div className="text-center p-4 text-zinc-400 text-xs">
-                            <UploadCloud className="w-5 h-5 mx-auto mb-1 text-amber-400" />
+                          <div className="text-center p-4 text-[#5A5A66] text-xs">
+                            <UploadCloud className="w-5 h-5 mx-auto mb-1 text-[#C6202F]" />
                             Drop opening image or browse
                           </div>
                         )}
@@ -828,20 +1042,30 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       model.supportsOptionalEndFrameInI2V) && (
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-zinc-200">
+                          <span className="font-semibold text-[#24242B]">
                             {workflowMode === 'first_last_frame'
                               ? `End Frame (${duration}s)`
                               : 'End Frame (Optional)'}
                           </span>
-                          {endFrameUrl && (
+                          <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => setEndFrameUrl(null)}
-                              className="text-zinc-400 hover:text-rose-400 cursor-pointer"
+                              onClick={() => setDrivePickerTarget({ kind: 'end' })}
+                              className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                             >
-                              <Trash2 className="w-3 h-3" />
+                              <FolderSync className="w-3 h-3" />
+                              Drive
                             </button>
-                          )}
+                            {endFrameUrl && (
+                              <button
+                                type="button"
+                                onClick={() => setEndFrameUrl(null)}
+                                className="text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <input
                           ref={endInputRef}
@@ -856,7 +1080,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         />
                         <div
                           onClick={() => endInputRef.current?.click()}
-                          className="rounded-xl border-2 border-dashed border-zinc-700 hover:border-amber-500/70 bg-zinc-950/60 overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
+                          className="rounded-xl border-2 border-dashed border-[#D8D8DF] hover:border-[#C6202F]/70 bg-[#F6F6F7] overflow-hidden cursor-pointer aspect-video flex items-center justify-center"
                         >
                           {endFrameUrl ? (
                             <img
@@ -866,8 +1090,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               className="w-full h-full object-cover"
                             />
                           ) : (
-                            <div className="text-center p-4 text-zinc-400 text-xs">
-                              <UploadCloud className="w-5 h-5 mx-auto mb-1 text-amber-400" />
+                            <div className="text-center p-4 text-[#5A5A66] text-xs">
+                              <UploadCloud className="w-5 h-5 mx-auto mb-1 text-[#C6202F]" />
                               {workflowMode === 'first_last_frame'
                                 ? 'Drop target ending image or browse'
                                 : 'Optional closing keyframe (end_image_url)'}
@@ -881,7 +1105,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                 {/* Timeline Keyframes (Seedance / FLUX 3) */}
                 {workflowMode === 'keyframes_timeline' && (
-                  <div className="space-y-2.5 p-3 rounded-xl bg-neutral-900/70 border border-white/[0.08]">
+                  <div className="space-y-2.5 p-3 rounded-xl bg-white border border-[#E2E2E6]">
                     <input
                       ref={keyframeInputRef}
                       type="file"
@@ -898,8 +1122,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       }}
                     />
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-[#891A23]" />
                         Reference Timeline ({keyframes.length}/{model.maxTimelineFrames})
                       </span>
                       <button
@@ -919,7 +1143,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             },
                           ])
                         }
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 text-[11px] disabled:opacity-40 cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FDF4F5] hover:bg-[#891A23] text-[#891A23] border border-[#EABAC0] text-[11px] disabled:opacity-40 cursor-pointer"
                       >
                         <Plus className="w-3 h-3" />
                         Add Frame
@@ -930,7 +1154,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       {keyframes.map((kf) => (
                         <div
                           key={kf.id}
-                          className="flex items-center gap-2 bg-neutral-950 border border-zinc-800 rounded-lg p-2"
+                          className="flex items-center gap-2 bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg p-2"
                         >
                           <button
                             type="button"
@@ -938,7 +1162,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               keyframeTargetIdRef.current = kf.id;
                               keyframeInputRef.current?.click();
                             }}
-                            className="w-16 h-10 rounded border border-zinc-700 bg-black overflow-hidden shrink-0 flex items-center justify-center text-[10px] text-zinc-400 hover:border-cyan-400 cursor-pointer"
+                            className="w-16 h-10 rounded border border-[#D8D8DF] bg-black overflow-hidden shrink-0 flex items-center justify-center text-[10px] text-[#5A5A66] hover:border-[#C6202F] cursor-pointer"
                           >
                             {kf.imageUrl ? (
                               <img
@@ -970,11 +1194,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                     )
                                   );
                                 }}
-                                className="w-14 bg-neutral-900 border border-zinc-700 rounded px-1.5 py-0.5 text-xs font-mono text-white"
+                                className="w-14 bg-white border border-[#D8D8DF] rounded px-1.5 py-0.5 text-xs font-mono text-[#111114]"
                               />
-                              <span className="text-[10px] text-zinc-500">s</span>
+                              <span className="text-[10px] text-[#6E6E7A]">s</span>
                               {model.family === 'flux-3' && (
-                                <span className="text-[10px] font-mono text-cyan-400">
+                                <span className="text-[10px] font-mono text-[#891A23]">
                                   f{keyframeFrameIndex(kf.timeSeconds, duration)}
                                 </span>
                               )}
@@ -992,15 +1216,25 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                   )
                                 )
                               }
-                              className="w-full bg-neutral-900 border border-zinc-800 rounded px-1.5 py-0.5 text-[11px] text-zinc-200"
+                              className="w-full bg-white border border-[#E2E2E6] rounded px-1.5 py-0.5 text-[11px] text-[#24242B]"
                             />
                           </div>
                           <button
                             type="button"
                             onClick={() =>
+                              setDrivePickerTarget({ kind: 'keyframe', keyframeId: kf.id })
+                            }
+                            title="Pick keyframe from Google Drive"
+                            className="p-1 text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                          >
+                            <FolderSync className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
                               setKeyframes((prev) => prev.filter((item) => item.id !== kf.id))
                             }
-                            className="p-1 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                            className="p-1 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
                             aria-label="Remove keyframe"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1013,26 +1247,36 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                 {/* Dedicated Drag-and-Drop Source Video Uploader for V2V Edit / Reframe */}
                 {(workflowMode === 'video_edit' || workflowMode === 'video_reframe') && (
-                  <div className="space-y-3 p-3 rounded-xl bg-neutral-900/60 border border-white/[0.08]">
+                  <div className="space-y-3 p-3 rounded-xl bg-white border border-[#E2E2E6]">
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <Film className="w-3.5 h-3.5 text-purple-400" />
+                        <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                          <Film className="w-3.5 h-3.5 text-[#891A23]" />
                           {workflowMode === 'video_reframe'
                             ? 'Source Video to Reframe'
                             : model.family === 'kling'
                               ? 'Source Video to Edit (3–30s)'
                               : 'Source Video to Restyle'}
                         </span>
-                        {sourceVideoUrl && (
+                        <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => setSourceVideoUrl(null)}
-                            className="text-[11px] text-zinc-400 hover:text-rose-400 cursor-pointer"
+                            onClick={() => setDrivePickerTarget({ kind: 'source_video' })}
+                            className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                           >
-                            Clear
+                            <FolderSync className="w-3 h-3" />
+                            Pick from Drive
                           </button>
-                        )}
+                          {sourceVideoUrl && (
+                            <button
+                              type="button"
+                              onClick={() => setSourceVideoUrl(null)}
+                              className="text-[11px] text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       <input
@@ -1048,21 +1292,21 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       />
 
                       {sourceVideoUrl ? (
-                        <div className="rounded-xl overflow-hidden border border-zinc-700 bg-black space-y-1.5">
+                        <div className="rounded-xl overflow-hidden border border-[#D8D8DF] bg-black space-y-1.5">
                           <video
                             src={sourceVideoUrl}
                             controls
                             playsInline
                             className="w-full max-h-[160px] object-contain"
                           />
-                          <div className="px-2.5 pb-2 flex items-center justify-between text-[10px] text-zinc-400">
+                          <div className="px-2.5 pb-2 flex items-center justify-between text-[10px] text-[#5A5A66]">
                             <span className="font-mono truncate">
                               Uploaded for Fal ({workflowMode === 'video_reframe' ? 'reframe' : 'video_url'})
                             </span>
                             <button
                               type="button"
                               onClick={() => sourceVideoInputRef.current?.click()}
-                              className="text-purple-400 hover:text-purple-300 font-medium cursor-pointer shrink-0 ml-2"
+                              className="text-[#891A23] hover:text-[#891A23] font-medium cursor-pointer shrink-0 ml-2"
                             >
                               Replace
                             </button>
@@ -1084,24 +1328,24 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           }}
                           className={`py-4 px-3 rounded-xl border-2 border-dashed flex flex-col items-center text-center cursor-pointer transition-colors ${
                             isDraggingSourceVideo
-                              ? 'border-purple-400 bg-purple-500/10'
-                              : 'border-zinc-700 hover:border-purple-500/70 bg-zinc-950/60'
+                              ? 'border-[#891A23] bg-[#FDF4F5]'
+                              : 'border-[#D8D8DF] hover:border-[#891A23]/60 bg-[#F6F6F7]'
                           }`}
                         >
                           {isUploadingMedia ? (
                             <>
-                              <Loader2 className="w-5 h-5 text-purple-400 animate-spin mb-1" />
-                              <span className="text-xs text-zinc-200">
+                              <Loader2 className="w-5 h-5 text-[#891A23] animate-spin mb-1" />
+                              <span className="text-xs text-[#24242B]">
                                 Uploading clip to Fal storage...
                               </span>
                             </>
                           ) : (
                             <>
-                              <UploadCloud className="w-5 h-5 text-purple-400 mb-1" />
-                              <span className="text-xs text-zinc-200 font-medium">
+                              <UploadCloud className="w-5 h-5 text-[#891A23] mb-1" />
+                              <span className="text-xs text-[#24242B] font-medium">
                                 Drag &amp; drop .mp4 or .mov here, or browse
                               </span>
-                              <span className="text-[10px] text-zinc-500 mt-0.5">
+                              <span className="text-[10px] text-[#6E6E7A] mt-0.5">
                                 {workflowMode === 'video_reframe'
                                   ? 'Outpaints your clip to the target aspect ratio'
                                   : 'Uploads via studio helper and passes video_url'}
@@ -1113,12 +1357,12 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                       {(shot.videoUrl || parentShot?.videoUrl) && (
                         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                          <span className="text-[10px] text-zinc-500">Use clip:</span>
+                          <span className="text-[10px] text-[#6E6E7A]">Use clip:</span>
                           {shot.videoUrl && sourceVideoUrl !== shot.videoUrl && (
                             <button
                               type="button"
                               onClick={() => setSourceVideoUrl(shot.videoUrl!)}
-                              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                             >
                               + {shot.id} Generated Clip
                             </button>
@@ -1128,7 +1372,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               <button
                                 type="button"
                                 onClick={() => setSourceVideoUrl(parentShot.videoUrl!)}
-                                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                                className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                               >
                                 + {parentShot.id} Chained Clip
                               </button>
@@ -1139,19 +1383,29 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                     {/* Optional Reference Images for Kling 4.0 V2V Edit */}
                     {model.family === 'kling' && workflowMode === 'video_edit' && (
-                      <div className="space-y-1.5 pt-2.5 border-t border-zinc-800">
+                      <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                            <Images className="w-3.5 h-3.5 text-cyan-400" />
+                          <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                            <Images className="w-3.5 h-3.5 text-[#891A23]" />
                             Reference Images (Optional)
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => refImagesInputRef.current?.click()}
-                            className="text-[11px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
-                          >
-                            + Add images
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setDrivePickerTarget({ kind: 'ref_image' })}
+                              className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                            >
+                              <FolderSync className="w-3 h-3" />
+                              + Drive
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => refImagesInputRef.current?.click()}
+                              className="text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                            >
+                              + Add images
+                            </button>
+                          </div>
                         </div>
                         <input
                           ref={refImagesInputRef}
@@ -1172,7 +1426,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                 key={idx}
                                 type="button"
                                 onClick={() => handleInsertPromptTag(`@Image${idx + 1}`)}
-                                className="relative group aspect-square rounded-lg overflow-hidden border border-zinc-700 hover:border-cyan-400 bg-black cursor-pointer"
+                                className="relative group aspect-square rounded-lg overflow-hidden border border-[#D8D8DF] hover:border-[#C6202F] bg-black cursor-pointer"
                               >
                                 <img
                                   src={img}
@@ -1180,7 +1434,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                   referrerPolicy="no-referrer"
                                   className="w-full h-full object-cover"
                                 />
-                                <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-cyan-300 px-1 rounded">
+                                <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
                                   @Image{idx + 1}
                                 </span>
                                 <span
@@ -1192,7 +1446,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                       prev.filter((_, i) => i !== idx)
                                     );
                                   }}
-                                  className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-zinc-300 hover:text-rose-400 opacity-0 group-hover:opacity-100"
+                                  className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-white/80 hover:text-[#FCA5A5] opacity-0 group-hover:opacity-100"
                                 >
                                   <Trash2 className="w-2.5 h-2.5" />
                                 </span>
@@ -1208,11 +1462,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                 {/* Unified Multi-Reference / Video & Ref Tray */}
                 {(workflowMode === 'reference_to_video' ||
                   workflowMode === 'video_extend') && (
-                  <div className="space-y-3 p-3 rounded-xl bg-neutral-900/60 border border-white/[0.08]">
+                  <div className="space-y-3 p-3 rounded-xl bg-white border border-[#E2E2E6]">
                     {/* Clickable Prompt Tag Chips (@Image1, @Element1, @Video1) */}
                     {promptChips.length > 0 && (
-                      <div className="p-2 rounded-lg bg-neutral-950 border border-white/[0.06] space-y-1">
-                        <span className="text-[10px] font-medium text-neutral-400 block">
+                      <div className="p-2 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] space-y-1">
+                        <span className="text-[10px] font-medium text-[#5A5A66] block">
                           Click a tag to insert into prompt:
                         </span>
                         <div className="flex flex-wrap gap-1.5">
@@ -1221,7 +1475,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               key={chip}
                               type="button"
                               onClick={() => handleInsertPromptTag(chip)}
-                              className="px-2 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 font-mono text-[11px] text-cyan-300 cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-[#FDF2F3] hover:bg-[#FADEE1] border border-[#EABAC0] font-mono text-[11px] text-[#891A23] cursor-pointer"
                             >
                               + {chip}
                             </button>
@@ -1233,10 +1487,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     {/* Reference Videos */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <Film className="w-3.5 h-3.5 text-purple-400" />
+                        <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                          <Film className="w-3.5 h-3.5 text-[#891A23]" />
                           Reference Videos
-                          <span className="text-[10px] text-zinc-500 font-mono">
+                          <span className="text-[10px] text-[#6E6E7A] font-mono">
                             ({referenceVideos.length}/{Math.max(1, model.maxReferenceVideos)})
                           </span>
                         </span>
@@ -1244,8 +1498,17 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           <button
                             type="button"
                             disabled={isUploadingMedia}
+                            onClick={() => setDrivePickerTarget({ kind: 'ref_video' })}
+                            className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                          >
+                            <FolderSync className="w-3 h-3" />
+                            + Drive
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isUploadingMedia}
                             onClick={() => refVideosInputRef.current?.click()}
-                            className="text-[11px] text-purple-400 hover:text-purple-300 cursor-pointer"
+                            className="text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                           >
                             {isUploadingMedia ? 'Uploading...' : '+ Add video'}
                           </button>
@@ -1253,7 +1516,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <button
                               type="button"
                               onClick={() => setReferenceVideos([])}
-                              className="text-[11px] text-zinc-400 hover:text-rose-400 cursor-pointer"
+                              className="text-[11px] text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
                             >
                               Clear
                             </button>
@@ -1280,7 +1543,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               type="button"
                               onClick={() => handleInsertPromptTag(`@Video${idx + 1}`)}
                               title={`Click to insert @Video${idx + 1} into prompt`}
-                              className="relative group aspect-video rounded-lg overflow-hidden border border-zinc-700 hover:border-purple-400 bg-black cursor-pointer"
+                              className="relative group aspect-video rounded-lg overflow-hidden border border-[#D8D8DF] hover:border-[#891A23] bg-black cursor-pointer"
                             >
                               <video
                                 src={vidUrl}
@@ -1288,7 +1551,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                 playsInline
                                 className="w-full h-full object-cover"
                               />
-                              <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-purple-300 px-1 rounded">
+                              <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
                                 @Video{idx + 1}
                               </span>
                               <span
@@ -1300,7 +1563,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                     prev.filter((_, i) => i !== idx)
                                   );
                                 }}
-                                className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-zinc-300 hover:text-rose-400 opacity-0 group-hover:opacity-100"
+                                className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-white/80 hover:text-[#FCA5A5] opacity-0 group-hover:opacity-100"
                               >
                                 <Trash2 className="w-2.5 h-2.5" />
                               </span>
@@ -1310,7 +1573,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <button
                               type="button"
                               onClick={() => refVideosInputRef.current?.click()}
-                              className="aspect-video rounded-lg border border-dashed border-zinc-700 hover:border-purple-400 bg-zinc-900/50 flex flex-col items-center justify-center text-zinc-400 hover:text-purple-300 cursor-pointer"
+                              className="aspect-video rounded-lg border border-dashed border-[#D8D8DF] hover:border-[#891A23] bg-[#FAFAFB] flex flex-col items-center justify-center text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                             >
                               <Plus className="w-3.5 h-3.5" />
                               <span className="text-[9px] mt-0.5">Add</span>
@@ -1320,15 +1583,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       ) : (
                         <div
                           onClick={() => refVideosInputRef.current?.click()}
-                          className="py-3 rounded-lg border-2 border-dashed border-zinc-800 hover:border-purple-500/60 bg-zinc-950/60 flex flex-col items-center cursor-pointer"
+                          className="py-3 rounded-lg border-2 border-dashed border-[#E2E2E6] hover:border-[#891A23]/55 bg-[#F6F6F7] flex flex-col items-center cursor-pointer"
                         >
-                          <UploadCloud className="w-4 h-4 text-purple-400 mb-1" />
-                          <p className="text-xs text-zinc-300">
+                          <UploadCloud className="w-4 h-4 text-[#891A23] mb-1" />
+                          <p className="text-xs text-[#3A3A44]">
                             Drop up to {Math.max(1, model.maxReferenceVideos)} video
                             {Math.max(1, model.maxReferenceVideos) > 1 ? 's' : ''} (.mp4/.mov) or{' '}
-                            <span className="text-purple-400">browse</span>
+                            <span className="text-[#891A23]">browse</span>
                           </p>
-                          <p className="text-[10px] text-zinc-500 mt-0.5">
+                          <p className="text-[10px] text-[#6E6E7A] mt-0.5">
                             Tag @Video1 in prompt or combine with reference images below
                           </p>
                         </div>
@@ -1336,7 +1599,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                       {(shot.videoUrl || parentShot?.videoUrl) && (
                         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                          <span className="text-[10px] text-zinc-500">Quick add:</span>
+                          <span className="text-[10px] text-[#6E6E7A]">Quick add:</span>
                           {shot.videoUrl && !referenceVideos.includes(shot.videoUrl) && (
                             <button
                               type="button"
@@ -1348,7 +1611,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                   )
                                 )
                               }
-                              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                             >
                               + {shot.id} Clip
                             </button>
@@ -1365,7 +1628,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                     )
                                   )
                                 }
-                                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                                className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                               >
                                 + {parentShot.id} Chained Clip
                               </button>
@@ -1375,12 +1638,12 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     </div>
 
                     {/* Reference Images (@Image1, @Image2...) */}
-                    <div className="space-y-1.5 pt-2.5 border-t border-zinc-800">
+                    <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <Images className="w-3.5 h-3.5 text-cyan-400" />
+                        <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                          <Images className="w-3.5 h-3.5 text-[#891A23]" />
                           Reference Images
-                          <span className="text-[10px] text-zinc-500 font-mono">
+                          <span className="text-[10px] text-[#6E6E7A] font-mono">
                             ({referenceImages.length}/
                             {model.family === 'flux-3'
                               ? STUDIO_MODELS['seedance-2.5'].maxReferenceImages
@@ -1391,8 +1654,16 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            onClick={() => setDrivePickerTarget({ kind: 'ref_image' })}
+                            className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                          >
+                            <FolderSync className="w-3 h-3" />
+                            + Drive
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => refImagesInputRef.current?.click()}
-                            className="text-[11px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+                            className="text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                           >
                             + Add images
                           </button>
@@ -1400,7 +1671,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <button
                               type="button"
                               onClick={() => setReferenceImages([])}
-                              className="text-[11px] text-zinc-400 hover:text-rose-400 cursor-pointer"
+                              className="text-[11px] text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
                             >
                               Clear
                             </button>
@@ -1428,7 +1699,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               type="button"
                               onClick={() => handleInsertPromptTag(`@Image${idx + 1}`)}
                               title={`Click to insert @Image${idx + 1} into prompt`}
-                              className="relative group aspect-square rounded-lg overflow-hidden border border-zinc-700 hover:border-cyan-400 bg-black cursor-pointer"
+                              className="relative group aspect-square rounded-lg overflow-hidden border border-[#D8D8DF] hover:border-[#C6202F] bg-black cursor-pointer"
                             >
                               <img
                                 src={img}
@@ -1436,7 +1707,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                 referrerPolicy="no-referrer"
                                 className="w-full h-full object-cover"
                               />
-                              <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-cyan-300 px-1 rounded">
+                              <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
                                 @Image{idx + 1}
                               </span>
                               <span
@@ -1448,7 +1719,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                     prev.filter((_, i) => i !== idx)
                                   );
                                 }}
-                                className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-zinc-300 hover:text-rose-400 opacity-0 group-hover:opacity-100"
+                                className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-white/80 hover:text-[#FCA5A5] opacity-0 group-hover:opacity-100"
                               >
                                 <Trash2 className="w-2.5 h-2.5" />
                               </span>
@@ -1461,7 +1732,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             <button
                               type="button"
                               onClick={() => refImagesInputRef.current?.click()}
-                              className="aspect-square rounded-lg border border-dashed border-zinc-700 hover:border-cyan-400 bg-zinc-900/50 flex flex-col items-center justify-center text-zinc-400 hover:text-cyan-300 cursor-pointer"
+                              className="aspect-square rounded-lg border border-dashed border-[#D8D8DF] hover:border-[#C6202F] bg-[#FAFAFB] flex flex-col items-center justify-center text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                             >
                               <Plus className="w-3.5 h-3.5" />
                               <span className="text-[9px] mt-0.5">Add</span>
@@ -1471,13 +1742,13 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       ) : (
                         <div
                           onClick={() => refImagesInputRef.current?.click()}
-                          className="py-3 px-2 rounded-lg border border-dashed border-zinc-700 hover:border-cyan-400 bg-zinc-950/60 flex flex-col items-center text-center cursor-pointer"
+                          className="py-3 px-2 rounded-lg border border-dashed border-[#D8D8DF] hover:border-[#C6202F] bg-[#F6F6F7] flex flex-col items-center text-center cursor-pointer"
                         >
-                          <UploadCloud className="w-4 h-4 text-cyan-400 mb-1" />
-                          <p className="text-[11px] text-zinc-300">
+                          <UploadCloud className="w-4 h-4 text-[#891A23] mb-1" />
+                          <p className="text-[11px] text-[#3A3A44]">
                             Upload reference images for @Image1 / @Image2 guidance
                           </p>
-                          <p className="text-[10px] text-zinc-500 mt-0.5">
+                          <p className="text-[10px] text-[#6E6E7A] mt-0.5">
                             {model.family === 'flux-3'
                               ? 'Adding images switches to Seedance 2.5 (supports video + images)'
                               : 'Click thumbnails to insert tags into your prompt'}
@@ -1487,7 +1758,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                       {(project.product.photos.length > 0 || startFrameUrl) && (
                         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                          <span className="text-[10px] text-zinc-500">Quick add:</span>
+                          <span className="text-[10px] text-[#6E6E7A]">Quick add:</span>
                           {startFrameUrl && !referenceImages.includes(startFrameUrl) && (
                             <button
                               type="button"
@@ -1499,7 +1770,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                   [...prev, startFrameUrl].slice(0, 30)
                                 );
                               }}
-                              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                             >
                               + Shot Frame
                             </button>
@@ -1517,7 +1788,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                     [...prev, p.url].slice(0, 30)
                                   );
                                 }}
-                                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer"
+                                className="px-2 py-0.5 rounded bg-[#EFEFF2] hover:bg-[#E5E5EA] text-[10px] text-[#24242B] cursor-pointer"
                               >
                                 + Product Photo {idx + 1}
                               </button>
@@ -1529,19 +1800,29 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                     {/* Subject Elements (@Element1, @Element2...) for Kling 4.0 */}
                     {model.supportsReferenceElements && (
-                      <div className="space-y-1.5 pt-2.5 border-t border-zinc-800">
+                      <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                            <Layers className="w-3.5 h-3.5 text-amber-400" />
+                          <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                            <Layers className="w-3.5 h-3.5 text-[#C6202F]" />
                             Subject / Character Elements (@Element1)
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => refElementsInputRef.current?.click()}
-                            className="text-[11px] text-amber-400 hover:text-amber-300 cursor-pointer"
-                          >
-                            + Add element
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setDrivePickerTarget({ kind: 'element' })}
+                              className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
+                            >
+                              <FolderSync className="w-3 h-3" />
+                              + Drive
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => refElementsInputRef.current?.click()}
+                              className="text-[11px] text-[#C6202F] hover:text-[#891A23] cursor-pointer"
+                            >
+                              + Add element
+                            </button>
+                          </div>
                         </div>
                         <input
                           ref={refElementsInputRef}
@@ -1562,7 +1843,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                 key={idx}
                                 type="button"
                                 onClick={() => handleInsertPromptTag(`@Element${idx + 1}`)}
-                                className="relative group aspect-square rounded-lg overflow-hidden border border-zinc-700 hover:border-amber-400 bg-black cursor-pointer"
+                                className="relative group aspect-square rounded-lg overflow-hidden border border-[#D8D8DF] hover:border-[#C6202F] bg-black cursor-pointer"
                               >
                                 <img
                                   src={img}
@@ -1570,7 +1851,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                   referrerPolicy="no-referrer"
                                   className="w-full h-full object-cover"
                                 />
-                                <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-amber-300 px-1 rounded">
+                                <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-white px-1 rounded">
                                   @Element{idx + 1}
                                 </span>
                                 <span
@@ -1582,7 +1863,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                                       prev.filter((_, i) => i !== idx)
                                     );
                                   }}
-                                  className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-zinc-300 hover:text-rose-400 opacity-0 group-hover:opacity-100"
+                                  className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 text-white/80 hover:text-[#FCA5A5] opacity-0 group-hover:opacity-100"
                                 >
                                   <Trash2 className="w-2.5 h-2.5" />
                                 </span>
@@ -1593,7 +1874,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           <button
                             type="button"
                             onClick={() => refElementsInputRef.current?.click()}
-                            className="w-full py-2 px-3 rounded-lg border border-dashed border-zinc-700 hover:border-amber-400 bg-zinc-950/60 text-[11px] text-zinc-400 hover:text-amber-300 cursor-pointer"
+                            className="w-full py-2 px-3 rounded-lg border border-dashed border-[#D8D8DF] hover:border-[#C6202F] bg-[#F6F6F7] text-[11px] text-[#5A5A66] hover:text-[#891A23] cursor-pointer"
                           >
                             + Add product or character identity for @Element1 tagging
                           </button>
@@ -1603,21 +1884,31 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                     {/* Reference Audio Track for Wan 3.0 Prime */}
                     {model.supportsReferenceAudio && (
-                      <div className="space-y-1.5 pt-2.5 border-t border-zinc-800">
+                      <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                            <Music className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                            <Music className="w-3.5 h-3.5 text-emerald-700" />
                             Reference Audio Track (Optional)
                           </span>
-                          {referenceAudioUrl && (
+                          <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => setReferenceAudioUrl(null)}
-                              className="text-[11px] text-zinc-400 hover:text-rose-400 cursor-pointer"
+                              onClick={() => setDrivePickerTarget({ kind: 'ref_audio' })}
+                              className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#891A23] cursor-pointer"
                             >
-                              Clear
+                              <FolderSync className="w-3 h-3" />
+                              + Drive
                             </button>
-                          )}
+                            {referenceAudioUrl && (
+                              <button
+                                type="button"
+                                onClick={() => setReferenceAudioUrl(null)}
+                                className="text-[11px] text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <input
                           ref={refAudioInputRef}
@@ -1631,14 +1922,14 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           }}
                         />
                         {referenceAudioUrl ? (
-                          <div className="p-2 rounded-lg bg-zinc-950 border border-zinc-700">
+                          <div className="p-2 rounded-lg bg-[#F6F6F7] border border-[#D8D8DF]">
                             <audio src={referenceAudioUrl} controls className="w-full h-8" />
                           </div>
                         ) : (
                           <button
                             type="button"
                             onClick={() => refAudioInputRef.current?.click()}
-                            className="w-full py-2 px-3 rounded-lg border border-dashed border-zinc-700 hover:border-emerald-400 bg-zinc-950/60 text-[11px] text-zinc-400 hover:text-emerald-300 cursor-pointer"
+                            className="w-full py-2 px-3 rounded-lg border border-dashed border-[#D8D8DF] hover:border-emerald-600 bg-[#F6F6F7] text-[11px] text-[#5A5A66] hover:text-emerald-800 cursor-pointer"
                           >
                             + Attach voiceover or audio track (.mp3 / .wav)
                           </button>
@@ -1648,11 +1939,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
                     {/* Seedance 2.5 Task Mode */}
                     {model.supportsTaskMode && (
-                      <div className="space-y-1.5 pt-2.5 border-t border-zinc-800">
-                        <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+                      <div className="space-y-1.5 pt-2.5 border-t border-[#E2E2E6]">
+                        <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                           Task
                         </label>
-                        <div className="grid grid-cols-4 gap-1 p-1 bg-neutral-950 rounded-lg border border-white/[0.08]">
+                        <div className="grid grid-cols-4 gap-1 p-1 bg-white rounded-lg border border-[#E2E2E6]">
                           {REFERENCE_TASKS.map((t) => (
                             <button
                               key={t.id}
@@ -1661,8 +1952,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                               title={t.hint}
                               className={`py-1.5 rounded text-xs cursor-pointer ${
                                 referenceTask === t.id
-                                  ? 'bg-neutral-800 text-white font-semibold'
-                                  : 'text-neutral-400 hover:text-white'
+                                  ? 'bg-[#111114] text-white font-semibold'
+                                  : 'text-[#5A5A66] hover:text-[#111114] hover:bg-[#F6F6F7]'
                               }`}
                             >
                               {t.label}
@@ -1679,7 +1970,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             {/* Prompt & Motion Direction */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400">
+                <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66]">
                   {workflowMode === 'video_reframe'
                     ? 'Reframe Guidance (Optional)'
                     : 'Prompt & Motion Direction'}
@@ -1687,7 +1978,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleCopyPrompt()}
-                  className="inline-flex items-center gap-1 text-[11px] text-amber-300 hover:text-amber-200 cursor-pointer"
+                  className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#C6202F] cursor-pointer"
                 >
                   {copiedPrompt ? (
                     <>
@@ -1713,7 +2004,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     ? 'Optional guidance for outpainted edges...'
                     : 'Describe motion, camera move, timing, or tag @Image1 / @Element1 / @Video1...'
                 }
-                className="w-full bg-neutral-900 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-white/30 leading-relaxed"
+                className="w-full bg-white border border-[#D8D8DF] rounded-xl px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
               />
               <div className="flex flex-wrap gap-1">
                 {CAMERA_TAGS.map((tag) => (
@@ -1722,7 +2013,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     type="button"
                     disabled={busy}
                     onClick={() => handleAddTag(tag)}
-                    className="px-2 py-0.5 text-[10px] font-medium text-neutral-300 bg-neutral-900 border border-white/10 hover:border-white/30 rounded-md cursor-pointer"
+                    className="px-2 py-0.5 text-[10px] font-medium text-[#3A3A44] bg-white border border-[#D8D8DF] hover:border-[#C6202F] hover:text-[#891A23] rounded-md cursor-pointer"
                   >
                     + {tag}
                   </button>
@@ -1730,10 +2021,38 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               </div>
             </div>
 
+            {/* Negative Prompt */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66]">
+                  Negative Prompt
+                </label>
+                {shot.negativePrompt && negativePrompt !== shot.negativePrompt && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setNegativePrompt(shot.negativePrompt)}
+                    className="inline-flex items-center gap-1 text-[10px] text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" />
+                    Reset to shot default
+                  </button>
+                )}
+              </div>
+              <textarea
+                rows={2}
+                value={negativePrompt}
+                disabled={busy}
+                onChange={(e) => setNegativePrompt(e.target.value)}
+                placeholder="Artifacts to avoid (e.g., warping, extra limbs, text glitches, logo distortion)..."
+                className="w-full bg-white border border-[#D8D8DF] rounded-xl px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
+              />
+            </div>
+
             {/* Aspect Ratio & Duration */}
             <div className="space-y-3">
               <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+                <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                   Aspect Ratio
                 </label>
                 <div className="grid grid-cols-4 gap-1.5">
@@ -1749,8 +2068,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         onClick={() => setAspectRatio(ar)}
                         className={`flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] border cursor-pointer ${
                           active
-                            ? 'bg-neutral-800 text-white border-white/25 font-semibold'
-                            : 'bg-neutral-900/60 text-neutral-400 border-white/[0.06] hover:text-white'
+                            ? 'bg-[#111114] text-white border-[#111114] font-semibold'
+                            : 'bg-white text-[#5A5A66] border-[#E2E2E6] hover:text-[#111114] hover:border-[#C6202F]'
                         }`}
                       >
                         <Icon className="w-3 h-3" />
@@ -1764,11 +2083,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               {workflowMode !== 'video_reframe' && (
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-neutral-400">Duration</span>
-                    <span className="font-mono text-white tabular-nums">
+                    <span className="text-[#5A5A66]">Duration</span>
+                    <span className="font-mono font-semibold text-[#111114] tabular-nums">
                       {duration}s
                       {model.durationFormat === 'string_s' && (
-                        <span className="text-[10px] text-neutral-500 ml-1">
+                        <span className="text-[10px] text-[#6E6E7A] ml-1">
                           (&quot;{duration}s&quot;)
                         </span>
                       )}
@@ -1782,9 +2101,9 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     value={duration}
                     disabled={busy}
                     onChange={(e) => setDuration(Number(e.target.value))}
-                    className="w-full cursor-pointer"
+                    className="w-full accent-[#C6202F] cursor-pointer"
                   />
-                  <div className="flex justify-between items-center text-[10px] font-mono text-neutral-500">
+                  <div className="flex justify-between items-center text-[10px] font-mono text-[#6E6E7A]">
                     <span>{model.minDuration}s</span>
                     {model.durations && (
                       <div className="flex gap-1">
@@ -1796,8 +2115,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             onClick={() => setDuration(d)}
                             className={`px-1.5 py-0.5 rounded border cursor-pointer ${
                               duration === d
-                                ? 'border-white/30 bg-neutral-800 text-white'
-                                : 'border-white/[0.06] text-neutral-400 hover:text-white'
+                                ? 'border-[#111114] bg-[#111114] text-white font-semibold'
+                                : 'border-[#E2E2E6] bg-white text-[#5A5A66] hover:text-[#111114]'
                             }`}
                           >
                             {d}s
@@ -1814,15 +2133,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             {/* Quality Tier + Resolution Selector + Native Audio */}
             <div className="space-y-3">
               {supportsDraftTier && (
-                <div className="grid grid-cols-2 gap-1.5 p-1 bg-neutral-900 rounded-xl border border-white/[0.08]">
+                <div className="grid grid-cols-2 gap-1.5 p-1 bg-white rounded-xl border border-[#E2E2E6]">
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => setQualityTier('draft')}
                     className={`py-2 rounded-lg text-xs cursor-pointer ${
                       qualityTier === 'draft'
-                        ? 'bg-neutral-800 text-white font-semibold'
-                        : 'text-neutral-400 hover:text-white'
+                        ? 'bg-[#111114] text-white font-semibold'
+                        : 'text-[#5A5A66] hover:text-[#111114]'
                     }`}
                   >
                     Draft ({model.draftResolution})
@@ -1833,8 +2152,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     onClick={() => setQualityTier('final')}
                     className={`py-2 rounded-lg text-xs cursor-pointer ${
                       qualityTier === 'final'
-                        ? 'bg-neutral-800 text-white font-semibold'
-                        : 'text-neutral-400 hover:text-white'
+                        ? 'bg-[#111114] text-white font-semibold'
+                        : 'text-[#5A5A66] hover:text-[#111114]'
                     }`}
                   >
                     Full Quality ({effectiveResolution})
@@ -1845,11 +2164,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               {model.resolutionSelectable &&
                 (!supportsDraftTier || qualityTier === 'final') && (
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+                    <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
                       Resolution
                     </label>
                     <div
-                      className="grid gap-1 p-1 bg-neutral-900 rounded-xl border border-white/[0.08]"
+                      className="grid gap-1 p-1 bg-white rounded-xl border border-[#E2E2E6]"
                       style={{
                         gridTemplateColumns: `repeat(${availableResolutions.length}, minmax(0, 1fr))`,
                       }}
@@ -1862,8 +2181,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                           onClick={() => setResolution(res)}
                           className={`py-1.5 rounded-lg text-xs font-mono cursor-pointer ${
                             effectiveResolution === res
-                              ? 'bg-neutral-800 text-white font-semibold'
-                              : 'text-neutral-400 hover:text-white'
+                              ? 'bg-[#111114] text-white font-semibold'
+                              : 'text-[#5A5A66] hover:text-[#111114]'
                           }`}
                         >
                           {RESOLUTION_LABELS[res]}
@@ -1872,6 +2191,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     </div>
                   </div>
                 )}
+
+              <p className="text-[10px] text-[#6E6E7A]">
+                Defaults to lowest-cost Draft settings ({effectiveResolution}) — upscale winning takes later with Topaz.
+              </p>
 
               {(model.family === 'seedance' ||
                 model.family === 'flux-3' ||
@@ -1882,15 +2205,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   onClick={() => setNativeAudio((v) => !v)}
                   className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs border cursor-pointer ${
                     nativeAudio
-                      ? 'bg-neutral-900 border-emerald-500/40 text-white'
-                      : 'bg-neutral-900/50 border-white/[0.08] text-neutral-400'
+                      ? 'bg-emerald-50 border-emerald-400 text-[#111114] font-medium'
+                      : 'bg-white border-[#E2E2E6] text-[#5A5A66]'
                   }`}
                 >
                   <span className="flex items-center gap-2">
                     {nativeAudio ? (
-                      <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <Volume2 className="w-3.5 h-3.5 text-emerald-700" />
                     ) : (
-                      <VolumeX className="w-3.5 h-3.5 text-neutral-500" />
+                      <VolumeX className="w-3.5 h-3.5 text-[#6E6E7A]" />
                     )}
                     Native Sound Design
                   </span>
@@ -1900,11 +2223,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             </div>
 
             {/* Advanced Accordion */}
-            <div className="pt-2 border-t border-white/[0.08]">
+            <div className="pt-2 border-t border-[#E2E2E6]">
               <button
                 type="button"
                 onClick={() => setShowAdvanced((v) => !v)}
-                className="w-full flex items-center justify-between py-1.5 text-xs font-medium text-neutral-400 hover:text-white cursor-pointer"
+                className="w-full flex items-center justify-between py-1.5 text-xs font-medium text-[#5A5A66] hover:text-[#111114] cursor-pointer"
               >
                 <span className="flex items-center gap-1.5">
                   <Sliders className="w-3.5 h-3.5" />
@@ -1918,12 +2241,12 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               </button>
 
               {showAdvanced && (
-                <div className="mt-2 p-3.5 bg-neutral-900/60 border border-white/[0.08] rounded-xl space-y-3 text-xs">
+                <div className="mt-2 p-3.5 bg-white border border-[#E2E2E6] rounded-xl space-y-3 text-xs">
                   {model.supportsSafetyTolerance && (
                     <div className="space-y-1">
                       <div className="flex justify-between">
-                        <span className="text-neutral-300">Content Filter Strictness</span>
-                        <span className="font-mono text-white">{safetyTolerance}</span>
+                        <span className="text-[#3A3A44]">Content Filter Strictness</span>
+                        <span className="font-mono font-semibold text-[#111114]">{safetyTolerance}</span>
                       </div>
                       <input
                         type="range"
@@ -1932,7 +2255,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         step={1}
                         value={safetyTolerance}
                         onChange={(e) => setSafetyTolerance(Number(e.target.value))}
-                        className="w-full cursor-pointer"
+                        className="w-full accent-[#C6202F] cursor-pointer"
                       />
                     </div>
                   )}
@@ -1941,13 +2264,13 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     <button
                       type="button"
                       onClick={() => setEnableSafetyChecker((v) => !v)}
-                      className="w-full flex items-center justify-between py-1.5 px-2.5 rounded-lg bg-neutral-950 border border-white/10 text-xs cursor-pointer"
+                      className="w-full flex items-center justify-between py-1.5 px-2.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] text-xs cursor-pointer"
                     >
-                      <span className="flex items-center gap-1.5 text-neutral-300">
-                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="flex items-center gap-1.5 text-[#3A3A44]">
+                        <ShieldCheck className="w-3.5 h-3.5 text-[#C6202F]" />
                         Luma Safety Checker (default Off)
                       </span>
-                      <span className="font-mono text-[11px] text-white">
+                      <span className="font-mono text-[11px] font-semibold text-[#111114]">
                         {enableSafetyChecker ? 'On' : 'Off'}
                       </span>
                     </button>
@@ -1956,13 +2279,13 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   {model.supportsSeed && (
                     <div className="space-y-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-neutral-300">Generation Seed</span>
+                        <span className="text-[#3A3A44]">Generation Seed</span>
                         <button
                           type="button"
                           onClick={() =>
                             setSeed(Math.floor(Math.random() * 900000 + 100000))
                           }
-                          className="inline-flex items-center gap-1 text-[11px] text-neutral-400 hover:text-white cursor-pointer"
+                          className="inline-flex items-center gap-1 text-[11px] text-[#5A5A66] hover:text-[#111114] cursor-pointer"
                         >
                           <Dices className="w-3 h-3" />
                           Randomize
@@ -1974,7 +2297,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         onChange={(e) =>
                           setSeed(Math.max(0, parseInt(e.target.value, 10) || 0))
                         }
-                        className="w-full bg-neutral-950 border border-white/10 rounded-lg px-2.5 py-1 text-xs font-mono text-white"
+                        className="w-full bg-[#F6F6F7] border border-[#D8D8DF] rounded-lg px-2.5 py-1 text-xs font-mono text-[#111114]"
                       />
                     </div>
                   )}
@@ -1982,7 +2305,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   {!model.supportsSafetyTolerance &&
                     !model.supportsSeed &&
                     model.family !== 'luma' && (
-                      <p className="text-[11px] text-neutral-400">
+                      <p className="text-[11px] text-[#5A5A66]">
                         No extra engine parameters required for {model.label}.
                       </p>
                     )}
@@ -1992,10 +2315,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           </div>
 
           {/* Right Panel: Stage Preview + Scrubber + Topaz Upscale + Action Bar */}
-          <div className="flex-1 h-full flex flex-col justify-between p-4 sm:p-5 overflow-y-auto gap-4 bg-neutral-950">
+          <div className="flex-1 h-full flex flex-col justify-between p-4 sm:p-5 overflow-y-auto gap-4 bg-[#F6F6F7]">
             <div className="space-y-3">
               {/* Stage Player with Scrubber & Transport */}
-              <div className="bg-neutral-900/70 border border-white/[0.08] rounded-2xl overflow-hidden shadow-2xl">
+              <div className="bg-white border border-[#E2E2E6] rounded-2xl overflow-hidden shadow-sm">
                 <div className="aspect-video bg-black relative flex items-center justify-center">
                   {activeStageVideoUrl ? (
                     <video
@@ -2023,8 +2346,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       className="w-full h-full object-contain"
                     />
                   ) : (
-                    <div className="text-center text-neutral-500 text-xs space-y-1 p-6">
-                      <Play className="w-7 h-7 mx-auto text-neutral-600" />
+                    <div className="text-center text-[#6E6E7A] text-xs space-y-1 p-6">
+                      <Play className="w-7 h-7 mx-auto text-[#8A8A96]" />
                       <div>Ready to synthesize shot {shot.id}</div>
                     </div>
                   )}
@@ -2032,8 +2355,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   {activeStageVideoUrl && activeStageBadge && (
                     <span
                       className={`absolute top-3 left-3 px-2.5 py-0.5 rounded-md border text-[10px] font-mono font-semibold ${
-                        previewVersion === 'upscaled' && shot.upscaledVideoUrl
-                          ? 'bg-emerald-500/90 border-emerald-300 text-zinc-950'
+                        previewVersion === 'upscaled' && activeClipUpscaledUrl
+                          ? 'bg-[#15803D]/90 border-emerald-300 text-white'
                           : 'bg-black/75 border-white/20 text-white'
                       }`}
                     >
@@ -2041,15 +2364,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     </span>
                   )}
 
-                  {shot.videoUrl && shot.upscaledVideoUrl && (
+                  {activeClipOrigUrl && activeClipUpscaledUrl && (
                     <div className="absolute top-3 right-3 flex items-center gap-1 p-1 rounded-lg bg-black/80 border border-white/15 text-[11px]">
                       <button
                         type="button"
                         onClick={() => setPreviewVersion('original')}
                         className={`px-2 py-0.5 rounded cursor-pointer ${
                           previewVersion === 'original'
-                            ? 'bg-white text-zinc-950 font-semibold'
-                            : 'text-zinc-300 hover:text-white'
+                            ? 'bg-[#C6202F] text-white font-semibold'
+                            : 'text-white/75 hover:text-white'
                         }`}
                       >
                         Original
@@ -2059,18 +2382,18 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         onClick={() => setPreviewVersion('upscaled')}
                         className={`px-2 py-0.5 rounded cursor-pointer ${
                           previewVersion === 'upscaled'
-                            ? 'bg-emerald-400 text-zinc-950 font-semibold'
-                            : 'text-zinc-300 hover:text-white'
+                            ? 'bg-[#15803D] text-white font-semibold'
+                            : 'text-white/75 hover:text-white'
                         }`}
                       >
-                        {shot.upscaledResolution || '4K / Upscaled'}
+                        {activeClipUpscaledRes || '4K / Upscaled'}
                       </button>
                     </div>
                   )}
                 </div>
 
                 {/* Scrubber + Transport Controls */}
-                <div className="p-3 bg-neutral-900/80 border-t border-white/[0.08] space-y-2">
+                <div className="p-3 bg-white border-t border-[#E2E2E6] space-y-2">
                   <input
                     type="range"
                     min={0}
@@ -2083,7 +2406,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       setCurrentTime(t);
                       if (videoRef.current) videoRef.current.currentTime = t;
                     }}
-                    className="w-full cursor-pointer disabled:opacity-30"
+                    className="w-full accent-[#C6202F] cursor-pointer disabled:opacity-30"
                   />
                   <div className="flex items-center justify-between gap-2 text-xs">
                     <div className="flex items-center gap-1.5">
@@ -2091,7 +2414,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         type="button"
                         disabled={!activeStageVideoUrl}
                         onClick={togglePlay}
-                        className="w-7 h-7 rounded-lg bg-white text-neutral-950 flex items-center justify-center disabled:opacity-30 cursor-pointer"
+                        className="w-7 h-7 rounded-lg bg-[#C6202F] hover:bg-[#AD1A27] text-white flex items-center justify-center disabled:opacity-30 cursor-pointer"
                       >
                         {isPlaying ? (
                           <Pause className="w-3.5 h-3.5 fill-current" />
@@ -2103,7 +2426,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         type="button"
                         disabled={!activeStageVideoUrl}
                         onClick={() => stepFrame(-1)}
-                        className="p-1.5 rounded-lg text-neutral-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                        className="p-1.5 rounded-lg text-[#5A5A66] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
                         title="Step back 1 frame"
                       >
                         <SkipBack className="w-3.5 h-3.5" />
@@ -2112,7 +2435,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                         type="button"
                         disabled={!activeStageVideoUrl}
                         onClick={() => stepFrame(1)}
-                        className="p-1.5 rounded-lg text-neutral-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                        className="p-1.5 rounded-lg text-[#5A5A66] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
                         title="Step forward 1 frame"
                       >
                         <SkipForward className="w-3.5 h-3.5" />
@@ -2120,10 +2443,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setIsLooping((v) => !v)}
-                        className={`p-1.5 rounded-lg cursor-pointer ${
+                        className={`p-1.5 rounded-lg border cursor-pointer ${
                           isLooping
-                            ? 'text-white bg-white/10'
-                            : 'text-neutral-500 hover:text-white'
+                            ? 'text-[#891A23] bg-[#FDF2F3] border-[#EABAC0]'
+                            : 'text-[#6E6E7A] border-transparent hover:text-[#111114]'
                         }`}
                         title="Loop playback"
                       >
@@ -2132,7 +2455,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <div className="flex items-center bg-neutral-950/60 rounded-md p-0.5 border border-white/[0.08] text-[10px] font-mono">
+                      <div className="flex items-center bg-[#F6F6F7] rounded-md p-0.5 border border-[#E2E2E6] text-[10px] font-mono">
                         {[0.5, 1, 1.5].map((rate) => (
                           <button
                             key={rate}
@@ -2143,8 +2466,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             }}
                             className={`px-1.5 py-0.5 rounded cursor-pointer ${
                               playbackRate === rate
-                                ? 'bg-neutral-800 text-white font-semibold'
-                                : 'text-neutral-400 hover:text-white'
+                                ? 'bg-[#111114] text-white font-semibold'
+                                : 'text-[#5A5A66] hover:text-[#111114]'
                             }`}
                           >
                             {rate}x
@@ -2154,7 +2477,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setIsMuted((v) => !v)}
-                        className="p-1.5 rounded-lg text-neutral-400 hover:text-white cursor-pointer"
+                        className="p-1.5 rounded-lg text-[#5A5A66] hover:text-[#111114] cursor-pointer"
                       >
                         {isMuted ? (
                           <VolumeX className="w-3.5 h-3.5" />
@@ -2168,20 +2491,80 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               </div>
 
               {errorMsg && (
-                <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
                   {errorMsg}
                 </div>
               )}
 
+              {/* Clip Gallery (Select any generated take to preview & repopulate all settings) */}
+              {clipGallery.length > 0 && (
+                <div className="p-3 rounded-xl bg-white border border-[#E2E2E6] space-y-2.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-[#24242B] flex items-center gap-1.5">
+                      <Film className="w-3.5 h-3.5 text-[#C6202F]" />
+                      Clip Gallery ({clipGallery.length})
+                    </span>
+                    <span className="text-[11px] text-[#5A5A66]">
+                      Select a take to load its model, prompt, negative prompt &amp; settings
+                    </span>
+                  </div>
+                  <div className="flex gap-2.5 overflow-x-auto pb-1">
+                    {clipGallery.map((clip, idx) => {
+                      const isSelected = activeClip?.id === clip.id;
+                      const takeNum = clipGallery.length - idx;
+                      return (
+                        <button
+                          key={clip.id}
+                          type="button"
+                          onClick={() => applyClipSettingsToPanel(clip, shot)}
+                          className={`w-44 shrink-0 rounded-xl border overflow-hidden text-left transition-all cursor-pointer ${
+                            isSelected
+                              ? 'border-[#C6202F] bg-[#FDF4F5] ring-1 ring-[#C6202F]/35'
+                              : 'border-[#E2E2E6] bg-[#F6F6F7] hover:border-[#891A23]'
+                          }`}
+                        >
+                          <div className="aspect-video bg-black relative">
+                            <video
+                              src={clip.upscaledVideoUrl || clip.videoUrl}
+                              muted
+                              playsInline
+                              preload="metadata"
+                              className="w-full h-full object-cover pointer-events-none"
+                            />
+                            <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 border border-white/15 text-[10px] font-mono text-white">
+                              Take #{takeNum}
+                            </span>
+                            {clip.upscaledVideoUrl && (
+                              <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-[#15803D]/90 text-white text-[9px] font-mono font-bold">
+                                {clip.upscaledResolution || 'Upscaled'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-2 space-y-0.5">
+                            <div className="text-[11px] font-semibold text-[#111114] truncate">
+                              {STUDIO_MODELS[clip.modelId as StudioModelId]?.label ||
+                                clip.modelId}
+                            </div>
+                            <div className="text-[10px] font-mono text-[#5A5A66] truncate">
+                              {clip.resolution} · {clip.qualityTier} · {clip.duration}s
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Draft Enhance + Universal Topaz Upscaling Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-neutral-900/70 border border-white/[0.08] text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-white border border-[#E2E2E6] text-xs">
                 <div className="flex flex-wrap items-center gap-2">
-                  {shot.draftCacheUrl && (
+                  {(activeClip?.draftCacheUrl || shot.draftCacheUrl) && (
                     <button
                       type="button"
                       disabled={busy}
                       onClick={() => void handleEnhanceDraft()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 font-semibold text-neutral-950 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 rounded-lg cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 font-semibold text-white bg-[#15803D] hover:bg-[#166534] disabled:opacity-50 rounded-lg cursor-pointer"
                     >
                       {isEnhancing ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -2196,25 +2579,25 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     type="button"
                     disabled={busy}
                     onClick={() => setUpscaleModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 font-semibold text-zinc-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 rounded-lg cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 font-semibold text-white bg-[#891A23] hover:bg-[#6E141C] disabled:opacity-40 rounded-lg cursor-pointer"
                   >
                     <ArrowUpRight className="w-3.5 h-3.5" />
-                    {shot.videoUrl ? 'Upscale with Topaz' : 'Upscale Existing Video'}
+                    {activeClipOrigUrl ? 'Upscale with Topaz' : 'Upscale Existing Video'}
                   </button>
                 </div>
 
-                {shot.upscaledVideoUrl && (
+                {activeClipUpscaledUrl && (
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-mono text-[11px] font-semibold">
-                      {shot.upscaledResolution || '4K / Upscaled'}
+                    <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-800 font-mono text-[11px] font-semibold">
+                      {activeClipUpscaledRes || '4K / Upscaled'}
                       {shot.upscaleDetails?.subModel
                         ? ` · ${shot.upscaleDetails.subModel}`
                         : ''}
                     </span>
                     <a
-                      href={shot.upscaledVideoUrl}
+                      href={activeClipUpscaledUrl}
                       download={`${project.id}-${shot.id}-upscaled.mp4`}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 font-medium text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 rounded-lg"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 font-medium text-emerald-900 bg-emerald-50 border border-emerald-300 hover:bg-emerald-100 rounded-lg"
                     >
                       <Download className="w-3.5 h-3.5" />
                       Download Upscaled
@@ -2225,7 +2608,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             </div>
 
             {/* Action Bar */}
-            <div className="bg-neutral-900/80 border border-white/[0.08] rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-white border border-[#E2E2E6] rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex-1 min-w-[220px]">
                 <button
                   type="button"
@@ -2233,7 +2616,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     busy || (!prompt.trim() && workflowMode !== 'video_reframe')
                   }
                   onClick={() => void handleGenerate()}
-                  className="w-full py-2.5 px-5 rounded-xl font-medium text-xs text-white bg-[#0071e3] hover:bg-[#0077ed] disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-2.5 px-5 brand-corner-sm font-medium text-xs text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {isGenerating ? (
                     <>
@@ -2259,7 +2642,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   type="button"
                   disabled={!shot.videoUrl || busy}
                   onClick={handleExtendFromCurrent}
-                  className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-200 border border-white/[0.08] text-xs font-medium disabled:opacity-30 cursor-pointer"
+                  className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-[#EFEFF2] hover:bg-[#E2E2E6] text-[#111114] border border-[#D8D8DF] text-xs font-medium disabled:opacity-30 cursor-pointer"
                   title="Send current clip into V2V / Reference mode"
                 >
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -2270,7 +2653,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   <a
                     href={activeStageVideoUrl}
                     download={`${project.id}-${shot.id}${previewVersion === 'upscaled' && shot.upscaledVideoUrl ? '-upscaled' : ''}.mp4`}
-                    className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-200 border border-white/[0.08] text-xs font-medium"
+                    className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-[#EFEFF2] hover:bg-[#E2E2E6] text-[#111114] border border-[#D8D8DF] text-xs font-medium"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Export MP4</span>
@@ -2279,7 +2662,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   <a
                     href={startFrameUrl}
                     download={`${project.id}-${shot.id}-start-frame.png`}
-                    className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-200 border border-white/[0.08] text-xs font-medium"
+                    className="flex items-center gap-1.5 py-2.5 px-3.5 rounded-xl bg-[#EFEFF2] hover:bg-[#E2E2E6] text-[#111114] border border-[#D8D8DF] text-xs font-medium"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Start Frame</span>
@@ -2299,6 +2682,63 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
         onProjectUpdated={(updated) => {
           onProjectUpdated(updated);
           setPreviewVersion('upscaled');
+        }}
+      />
+
+      <DriveAssetPickerModal
+        isOpen={Boolean(drivePickerTarget)}
+        projectId={project.id}
+        initialFolderUrls={
+          project.googleDriveFolderUrls?.length
+            ? project.googleDriveFolderUrls
+            : project.googleDriveFolderUrl
+              ? [project.googleDriveFolderUrl]
+              : []
+        }
+        mediaFilter={
+          (drivePickerTarget?.kind === 'source_video' ||
+          drivePickerTarget?.kind === 'ref_video'
+            ? 'video'
+            : drivePickerTarget?.kind === 'ref_audio'
+              ? 'audio'
+              : 'image') as DriveMediaFilter
+        }
+        multiple={
+          drivePickerTarget?.kind === 'ref_image' ||
+          drivePickerTarget?.kind === 'element' ||
+          drivePickerTarget?.kind === 'ref_video'
+        }
+        prefix={
+          drivePickerTarget?.kind === 'source_video'
+            ? 'v2v-src'
+            : drivePickerTarget?.kind === 'ref_video'
+              ? 'ref-vid'
+              : drivePickerTarget?.kind === 'ref_audio'
+                ? 'ref-audio'
+                : 'studio'
+        }
+        uploadToFal={
+          drivePickerTarget?.kind === 'source_video' ||
+          drivePickerTarget?.kind === 'ref_video' ||
+          drivePickerTarget?.kind === 'ref_audio'
+        }
+        title={
+          drivePickerTarget?.kind === 'source_video'
+            ? 'Pick Source Video from Google Drive'
+            : drivePickerTarget?.kind === 'ref_video'
+              ? 'Pick Reference Videos from Google Drive'
+              : drivePickerTarget?.kind === 'ref_audio'
+                ? 'Pick Reference Audio from Google Drive'
+                : 'Pick Image Asset from Google Drive'
+        }
+        onClose={() => setDrivePickerTarget(null)}
+        onImported={handleDriveAssetsImported}
+        onFoldersChange={(urls) => {
+          onProjectUpdated({
+            ...project,
+            googleDriveFolderUrls: urls,
+            googleDriveFolderUrl: urls[0] || undefined,
+          });
         }}
       />
     </div>

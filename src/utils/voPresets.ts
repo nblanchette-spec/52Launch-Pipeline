@@ -64,7 +64,7 @@ export const DEFAULT_VO_SETTINGS: VoStudioSettings = {
   pitch: 1.0,
   language: 'en-US',
   pauseAfter: 0.35,
-  ttsModel: 'gemini-3.8-flash-tts',
+  ttsModel: 'gemini-3.8-flash-lite-tts',
   enhanceWithDSP: true,
   singleVoiceMode: true,
 };
