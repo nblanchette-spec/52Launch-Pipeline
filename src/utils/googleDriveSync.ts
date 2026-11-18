@@ -1,12 +1,23 @@
+import { getApp, getApps, initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  User,
+} from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
 
 export const DRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
+
+export function isSandboxDriveToken(token?: string | null): boolean {
+  return token === 'sandbox-token-52launch';
+}
 
 export interface DriveUser {
   email: string | null;
@@ -27,48 +38,31 @@ declare global {
         Response: any;
         Document: any;
       };
-      accounts?: {
-        oauth2?: {
-          initTokenClient: (config: {
-            client_id: string;
-            scope: string;
-            callback: (response: { access_token?: string; error?: string; error_description?: string }) => void;
-          }) => {
-            requestAccessToken: (options?: { prompt?: string }) => void;
-          };
-        };
-      };
     };
   }
 }
 
+const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+
+const provider = new GoogleAuthProvider();
+for (const scope of DRIVE_SCOPES) {
+  provider.addScope(scope);
+}
+
 // In-memory token caching (never localStorage/sessionStorage)
+let isSigningIn = false;
 let cachedAccessToken: string | null = null;
 let cachedUser: DriveUser | null = null;
 let authSuccessCallback: ((user: DriveUser, token: string) => void) | null = null;
 let authFailureCallback: (() => void) | null = null;
 
-function loadGsiScript(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (window.google?.accounts?.oauth2) {
-      resolve();
-      return;
-    }
-    const existing = document.getElementById('gsi-client-script');
-    if (existing) {
-      existing.addEventListener('load', () => resolve());
-      existing.addEventListener('error', (e) => reject(e));
-      return;
-    }
-    const script = document.createElement('script');
-    script.id = 'gsi-client-script';
-    script.src = 'https://accounts.google.com/gsi/client';
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve();
-    script.onerror = (err) => reject(err);
-    document.head.appendChild(script);
-  });
+function mapFirebaseUser(user: User): DriveUser {
+  return {
+    email: user.email || 'Google Drive Connected',
+    displayName: user.displayName || 'Google User',
+    photoURL: user.photoURL,
+  };
 }
 
 export function initDriveAuth(
@@ -78,15 +72,29 @@ export function initDriveAuth(
   authSuccessCallback = onAuthSuccess || null;
   authFailureCallback = onAuthFailure || null;
 
-  if (cachedAccessToken && cachedUser) {
-    if (onAuthSuccess) onAuthSuccess(cachedUser, cachedAccessToken);
-  } else {
-    if (onAuthFailure) onAuthFailure();
-  }
+  return onAuthStateChanged(auth, (user: User | null) => {
+    if (isSandboxDriveToken(cachedAccessToken) && cachedUser) {
+      if (onAuthSuccess && cachedAccessToken) {
+        onAuthSuccess(cachedUser, cachedAccessToken);
+      }
+      return;
+    }
 
-  return () => {
-    // cleanup
-  };
+    if (user) {
+      const mapped = mapFirebaseUser(user);
+      cachedUser = mapped;
+      if (cachedAccessToken) {
+        if (onAuthSuccess) onAuthSuccess(mapped, cachedAccessToken);
+      } else if (!isSigningIn) {
+        cachedAccessToken = null;
+        if (onAuthFailure) onAuthFailure();
+      }
+    } else {
+      cachedAccessToken = null;
+      cachedUser = null;
+      if (onAuthFailure) onAuthFailure();
+    }
+  });
 }
 
 export async function getGoogleDriveAccessToken(): Promise<string | null> {
@@ -106,76 +114,32 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   user: DriveUser;
   accessToken: string;
 }> {
-  await loadGsiScript();
+  isSigningIn = true;
+  try {
+    provider.setCustomParameters({
+      prompt: forceConsent ? 'consent' : 'select_account',
+    });
 
-  return new Promise((resolve, reject) => {
-    try {
-      const clientId = (firebaseConfig as any).oAuthClientId;
-      if (!clientId) {
-        throw new Error('Missing oAuthClientId in firebase-applet-config.json');
-      }
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const accessToken = credential?.accessToken;
 
-      const tokenClient = window.google?.accounts?.oauth2?.initTokenClient({
-        client_id: clientId,
-        scope: DRIVE_SCOPES.join(' '),
-        callback: async (resp: any) => {
-          if (resp.error) {
-            reject(
-              new Error(
-                resp.error_description || resp.error || 'Google OAuth authentication failed'
-              )
-            );
-            return;
-          }
-          const accessToken = resp.access_token;
-          if (!accessToken) {
-            reject(new Error('No access token returned from Google Drive.'));
-            return;
-          }
-
-          let userInfo: DriveUser = {
-            email: 'user@gmail.com',
-            displayName: 'Google User',
-            photoURL: undefined,
-          };
-          try {
-            const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-              headers: { Authorization: `Bearer ${accessToken}` },
-            });
-            if (userRes.ok) {
-              const uData = await userRes.json();
-              userInfo = {
-                email: uData.email || 'user@gmail.com',
-                displayName: uData.name || 'Google User',
-                photoURL: uData.picture,
-              };
-            }
-          } catch {
-            // ignore
-          }
-
-          cachedAccessToken = accessToken;
-          cachedUser = userInfo;
-          if (authSuccessCallback) {
-            authSuccessCallback(userInfo, accessToken);
-          }
-          resolve({ user: userInfo, accessToken });
-        },
-      });
-
-      if (!tokenClient) {
-        throw new Error('Google Identity Services failed to initialize.');
-      }
-
-      if (forceConsent) {
-        tokenClient.requestAccessToken({ prompt: 'consent' });
-      } else {
-        tokenClient.requestAccessToken({ prompt: '' });
-      }
-    } catch (err) {
-      reject(err);
+    if (!accessToken) {
+      throw new Error('Failed to get Google Drive access token from sign-in.');
     }
-  });
+
+    const userInfo = mapFirebaseUser(result.user);
+    cachedAccessToken = accessToken;
+    cachedUser = userInfo;
+
+    if (authSuccessCallback) {
+      authSuccessCallback(userInfo, accessToken);
+    }
+
+    return { user: userInfo, accessToken };
+  } finally {
+    isSigningIn = false;
+  }
 }
 
 export async function signInWithSandboxMode(): Promise<{
@@ -198,6 +162,11 @@ export async function signInWithSandboxMode(): Promise<{
 export async function logoutGoogleDrive(): Promise<void> {
   cachedAccessToken = null;
   cachedUser = null;
+  try {
+    await signOut(auth);
+  } catch {
+    // ignore signOut errors
+  }
   if (authFailureCallback) {
     authFailureCallback();
   }

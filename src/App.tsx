@@ -22,6 +22,7 @@ import { PrintableStoryboardView } from './components/pipeline/PrintableStoryboa
 import { MasterPdfExportModal } from './components/pipeline/MasterPdfExportModal';
 import {
   getGoogleDriveAccessToken,
+  isSandboxDriveToken,
   syncProjectToDriveServer,
 } from './utils/googleDriveSync';
 
@@ -87,7 +88,7 @@ export default function App() {
     driveSyncTimerRef.current = setTimeout(() => {
       void (async () => {
         const token = await getGoogleDriveAccessToken();
-        if (!token) return;
+        if (!token || isSandboxDriveToken(token)) return;
         try {
           const res = await syncProjectToDriveServer(
             proj.id,

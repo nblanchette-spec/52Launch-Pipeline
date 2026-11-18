@@ -1,4 +1,4 @@
-import { DriveFileItem } from './googleDriveSync';
+import { DriveFileItem, isSandboxDriveToken } from './googleDriveSync';
 
 declare global {
   interface Window {
@@ -95,6 +95,27 @@ function getPickerOrigin(): string {
     : window.location.origin;
 }
 
+function resolveMimeTypesForFilter(
+  mediaFilter?: OpenGooglePickerOptions['mediaFilter']
+): string | null {
+  if (mediaFilter === 'image') {
+    return 'image/png,image/jpeg,image/webp,image/gif,application/vnd.google-apps.drawing';
+  }
+  if (mediaFilter === 'video') {
+    return 'video/mp4,video/quicktime,video/webm';
+  }
+  if (mediaFilter === 'audio') {
+    return 'audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/aac';
+  }
+  if (mediaFilter === 'image_video') {
+    return 'image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm';
+  }
+  if (mediaFilter === 'pdf_and_docs') {
+    return 'application/pdf,application/vnd.google-apps.document,application/vnd.google-apps.presentation,application/vnd.google-apps.spreadsheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/png,image/jpeg,image/webp';
+  }
+  return null;
+}
+
 export interface OpenGooglePickerOptions {
   accessToken: string;
   mode: 'files' | 'folders';
@@ -106,7 +127,7 @@ export interface OpenGooglePickerOptions {
 export async function openGooglePicker(
   options: OpenGooglePickerOptions
 ): Promise<DriveFileItem[] | null> {
-  if (!options.accessToken) {
+  if (!options.accessToken || isSandboxDriveToken(options.accessToken)) {
     throw new Error('Sign in with Google Drive before opening Google Picker.');
   }
 
@@ -119,8 +140,10 @@ export async function openGooglePicker(
 
   return new Promise<DriveFileItem[] | null>((resolve) => {
     let settled = false;
+    const mimeFilter =
+      options.mode === 'files' ? resolveMimeTypesForFilter(options.mediaFilter) : null;
 
-    const myDriveView =
+    const myDriveView: GooglePickerDocsView =
       options.mode === 'folders'
         ? new pickerNs.DocsView(pickerNs.ViewId.FOLDERS)
             .setIncludeFolders(true)
@@ -129,29 +152,13 @@ export async function openGooglePicker(
             .setIncludeFolders(true)
             .setSelectFolderEnabled(false);
 
-    if (options.mode === 'files') {
-      if (options.mediaFilter === 'image') {
-        myDriveView.setMimeTypes(
-          'image/png,image/jpeg,image/webp,image/gif,application/vnd.google-apps.drawing'
-        );
-      } else if (options.mediaFilter === 'video') {
-        myDriveView.setMimeTypes('video/mp4,video/quicktime,video/webm');
-      } else if (options.mediaFilter === 'audio') {
-        myDriveView.setMimeTypes('audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/aac');
-      } else if (options.mediaFilter === 'image_video') {
-        myDriveView.setMimeTypes(
-          'image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm'
-        );
-      } else if (options.mediaFilter === 'pdf_and_docs') {
-        myDriveView.setMimeTypes(
-          'application/pdf,application/vnd.google-apps.document,application/vnd.google-apps.presentation,application/vnd.google-apps.spreadsheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/png,image/jpeg,image/webp'
-        );
-      }
+    if (mimeFilter) {
+      myDriveView.setMimeTypes(mimeFilter);
     }
 
     myDriveView.setEnableDrives(true);
 
-    const sharedDrivesView =
+    const sharedDrivesView: GooglePickerDocsView =
       options.mode === 'folders'
         ? new pickerNs.DocsView(pickerNs.ViewId.FOLDERS)
             .setIncludeFolders(true)
@@ -162,7 +169,11 @@ export async function openGooglePicker(
             .setSelectFolderEnabled(false)
             .setEnableDrives(true);
 
-    const builder = new pickerNs.PickerBuilder()
+    if (mimeFilter) {
+      sharedDrivesView.setMimeTypes(mimeFilter);
+    }
+
+    const builder: GooglePickerBuilder = new pickerNs.PickerBuilder()
       .addView(myDriveView)
       .addView(sharedDrivesView)
       .setOAuthToken(options.accessToken)

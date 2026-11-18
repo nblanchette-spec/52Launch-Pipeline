@@ -42,6 +42,7 @@ import {
   listSharedDrives,
   logoutGoogleDrive,
   signInWithGoogleDrive,
+  isSandboxDriveToken,
 } from '../../utils/googleDriveSync';
 import { openGooglePicker } from '../../utils/googlePicker';
 
@@ -235,7 +236,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen || !driveToken) return;
+    if (!isOpen || !driveToken || isSandboxDriveToken(driveToken)) return;
     if (activeTab === 'direct_link') return;
     void loadExplorer(driveToken, activeTab, currentFolder.id, activeSearchQuery);
   }, [isOpen, driveToken, activeTab, currentFolder.id, selectedSharedDrive?.id, activeSearchQuery]);
@@ -401,7 +402,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
     if (selectedItems.length === 0) return;
     setErrorMsg(null);
     let token = driveToken;
-    if (!token) {
+    if (!token || isSandboxDriveToken(token)) {
       try {
         const res = await signInWithGoogleDrive(true);
         token = res.accessToken;
@@ -454,7 +455,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
     setIsOpeningPicker(true);
     try {
       let token = driveToken;
-      if (!token) {
+      if (!token || isSandboxDriveToken(token)) {
         const res = await signInWithGoogleDrive(false);
         token = res.accessToken;
         setDriveToken(token);
@@ -574,7 +575,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
               <span>{isOpeningPicker ? 'Opening Picker...' : 'Google Picker'}</span>
             </button>
 
-            {!driveToken ? (
+            {!driveToken || isSandboxDriveToken(driveToken) ? (
               <button
                 type="button"
                 disabled={isConnecting}
@@ -748,7 +749,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
 
             {/* Folder Actions */}
             <div className="flex items-center gap-2 shrink-0">
-              {driveToken && (
+              {driveToken && !isSandboxDriveToken(driveToken) && (
                 <>
                   <button
                     type="button"
@@ -854,7 +855,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
             </div>
           )}
 
-          {!driveToken ? (
+          {!driveToken || isSandboxDriveToken(driveToken) ? (
             <div className="py-16 text-center space-y-3">
               <FolderSync className="w-10 h-10 text-[#C6202F] mx-auto" />
               <div className="text-base font-bold text-[#111114]">

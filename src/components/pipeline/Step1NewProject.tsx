@@ -43,6 +43,7 @@ import {
   createDriveFolderOnDrive,
   DriveFileItem,
   ImportedDriveAsset,
+  isSandboxDriveToken,
 } from '../../utils/googleDriveSync';
 import { openGooglePicker } from '../../utils/googlePicker';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
@@ -541,7 +542,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   };
 
   const ensureDriveToken = async (): Promise<string> => {
-    if (driveToken) return driveToken;
+    if (driveToken && !isSandboxDriveToken(driveToken)) return driveToken;
     const authRes = await signInWithGoogleDrive(false);
     setDriveToken(authRes.accessToken);
     setDriveUserEmail(authRes.user.email || null);
@@ -731,7 +732,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
     try {
       let token = driveToken;
-      if (!token) {
+      if (!token || isSandboxDriveToken(token)) {
         const authRes = await signInWithGoogleDrive(true);
         token = authRes.accessToken;
         setDriveToken(token);
@@ -884,7 +885,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
   const handleCreateDedicatedDriveFolder = async () => {
     let token = driveToken;
-    if (!token) {
+    if (!token || isSandboxDriveToken(token)) {
       try {
         const res = await signInWithGoogleDrive(false);
         token = res.accessToken;
@@ -931,7 +932,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
     setDriveErrorMsg(null);
     let token = driveToken;
-    if (!token) {
+    if (!token || isSandboxDriveToken(token)) {
       try {
         const authRes = await signInWithGoogleDrive();
         token = authRes.accessToken;
