@@ -540,7 +540,7 @@ export async function syncProjectToDriveServer(
     'Content-Type': 'application/json',
   };
   if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+    headers['X-Google-Drive-Token'] = token;
   }
 
   const resp = await fetch('/api/pipeline/drive-sync', {
@@ -553,6 +553,9 @@ export async function syncProjectToDriveServer(
       destinationFolderUrl,
     }),
   });
+  if (resp.status === 401) {
+    cachedAccessToken = null;
+  }
   const data = await parseJsonResponse<{
     syncedAt?: string;
     backupFolderUrl?: string;
@@ -600,7 +603,7 @@ export async function uploadPdfToDriveServer(params: {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      'X-Google-Drive-Token': token,
     },
     body: JSON.stringify({
       projectId: params.projectId,
@@ -610,6 +613,9 @@ export async function uploadPdfToDriveServer(params: {
       destinationFolderUrl: params.destinationFolderUrl,
     }),
   });
+  if (resp.status === 401) {
+    cachedAccessToken = null;
+  }
 
   return parseJsonResponse<{
     success: boolean;
@@ -698,7 +704,7 @@ export async function parseGoogleDriveFolder(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
+      'X-Google-Drive-Token': accessToken,
     },
     body: JSON.stringify({
       projectId,
@@ -740,7 +746,7 @@ export async function importDriveFilesToProject(params: {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`,
+      'X-Google-Drive-Token': params.accessToken,
     },
     body: JSON.stringify({
       projectId: params.projectId,

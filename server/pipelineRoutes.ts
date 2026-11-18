@@ -8,6 +8,7 @@ import {
   getProject,
   getProjectAssetsDir,
   importProjectBackupBundle,
+  isSupportedAssetFilename,
   listProjects,
   readAssetAsInlineData,
   saveBinaryAssetFromUrl,
@@ -75,6 +76,14 @@ import {
   type StudioWorkflowMode,
   type TopazUpscaleMode,
 } from '../src/utils/videoStudioCatalog.ts';
+
+function getGoogleDriveTokenFromRequest(req: {
+  headers: Record<string, string | string[] | undefined>;
+}): string {
+  const raw = req.headers['x-google-drive-token'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' ? value.trim() : '';
+}
 
 async function falSubscribeWithNegativeFallback(
   endpointId: string,
@@ -203,13 +212,12 @@ export function createPipelineRouter(): Router {
           destinationFolderUrl?: string;
         };
 
-      const authHeader = req.headers.authorization;
-      const token =
-        authHeader && authHeader.startsWith('Bearer ')
-          ? authHeader.slice('Bearer '.length).trim()
-          : '';
+      const token = getGoogleDriveTokenFromRequest(req);
       if (!token) {
-        return res.status(401).json({ error: 'Sign in with Google Drive first.' });
+        return res.status(401).json({
+          error:
+            'Google Drive is not connected or your Drive session expired. Please reconnect Google Drive and try again.',
+        });
       }
 
       const project = await getProject(projectId);
@@ -539,20 +547,25 @@ export function createPipelineRouter(): Router {
       const saved = await saveDataUrlAsset(
         req.params.id,
         dataUrl,
-        prefix === 'frame' ? 'frame' : prefix === 'logo' ? 'logo' : 'product'
+        typeof prefix === 'string' && prefix.trim() ? prefix : 'product'
       );
       res.json(saved);
     } catch (err) {
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'Could not upload image.',
-      });
+      const msg = err instanceof Error ? err.message : 'Could not upload image.';
+      const isClientError =
+        msg.includes('Unsupported') || msg.includes('Invalid file upload format');
+      res.status(isClientError ? 400 : 500).json({ error: msg });
     }
   });
 
   // Serve project asset image
   router.get('/projects/:id/assets/:filename', (req, res) => {
     const safeFilename = path.basename(req.params.filename);
+    if (safeFilename !== req.params.filename || !isSupportedAssetFilename(safeFilename)) {
+      return res.status(400).json({ error: 'Unsupported asset filename.' });
+    }
     const fullPath = path.join(getProjectAssetsDir(req.params.id), safeFilename);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.sendFile(fullPath, (err) => {
       if (err && !res.headersSent) {
         res.status(404).json({ error: 'Asset not found.' });
@@ -1430,7 +1443,7 @@ BRAND BIBLE:
         string,
         { videoPrompt: string; negativePrompt: string }
       >();
-      let lastModelUsed = 'gemini-2.5-flash';
+      let lastModelUsed = getLlmStatus().geminiTextModel;
 
       const buildSingleShotSpec = async (shot: PipelineShot) => {
         const parts: LlmInlinePart[] = [];
@@ -3174,6 +3187,14 @@ ${shotsText}`;
   // Google Drive Sync / Auto-Save Route (Uploads JSON, Shotlist PDF, and Storyboard Frames to Drive)
   router.post('/pipeline/drive-sync', async (req, res) => {
     try {
+      const token = getGoogleDriveTokenFromRequest(req);
+      if (!token) {
+        return res.status(401).json({
+          error:
+            'Google Drive is not connected or your Drive session expired. Please reconnect Google Drive to save backups to Drive.',
+        });
+      }
+
       const {
         projectId,
         googleDriveFolderUrls,
@@ -3200,18 +3221,6 @@ ${shotsText}`;
       project.googleDriveFolderUrls = urls;
       if (urls.length > 0) {
         project.googleDriveFolderUrl = urls[0];
-      }
-
-      const authHeader = req.headers.authorization;
-      const token =
-        authHeader && authHeader.startsWith('Bearer ')
-          ? authHeader.slice('Bearer '.length).trim()
-          : '';
-
-      if (!token) {
-        return res.status(401).json({
-          error: 'Google Drive sign-in is required to save backups to Drive.',
-        });
       }
 
       const syncResult = await syncProjectAssetsToDrive(
@@ -3241,7 +3250,7 @@ ${shotsText}`;
       });
     } catch (err) {
       if (err instanceof DriveAuthError) {
-        return res.status(401).json({ error: err.message });
+        return res.status(err.status).json({ error: err.message });
       }
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Drive sync failed.',
@@ -3255,15 +3264,11 @@ ${shotsText}`;
       const { projectId, googleDriveFolderUrls, googleDriveFolderUrl, filesToAnalyze, lockedFiles } =
         req.body;
 
-      const authHeader = req.headers.authorization;
-      const token =
-        authHeader && authHeader.startsWith('Bearer ')
-          ? authHeader.slice('Bearer '.length).trim()
-          : '';
-
+      const token = getGoogleDriveTokenFromRequest(req);
       if (!token) {
         return res.status(401).json({
-          error: 'Please sign in with Google first so the studio can read your Drive files.',
+          error:
+            'Google Drive is not connected or your Drive session expired. Please reconnect Google Drive so the studio can read your files.',
         });
       }
 
@@ -4135,15 +4140,11 @@ Return JSON with:
         uploadToFal?: boolean;
       };
 
-      const authHeader = req.headers.authorization;
-      const token =
-        authHeader && authHeader.startsWith('Bearer ')
-          ? authHeader.slice(7).trim()
-          : '';
-
+      const token = getGoogleDriveTokenFromRequest(req);
       if (!token) {
         return res.status(401).json({
-          error: 'Please sign in with Google first to import files from Google Drive.',
+          error:
+            'Google Drive is not connected or your Drive session expired. Please reconnect Google Drive to import files.',
         });
       }
 

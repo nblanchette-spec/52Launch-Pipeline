@@ -1374,6 +1374,24 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               </div>
             </div>
 
+            {!driveToken &&
+              (Boolean(destinationFolderId || destinationFolderUrl || backupFolderUrl) ||
+                googleDriveFolderUrls.some((u) => u.trim())) && (
+                <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    Google Drive is disconnected for this browser tab (Drive tokens clear on page reload or when expired). Reconnect to sync files or auto-save PDFs.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isConnectingDrive}
+                    onClick={() => void handleConnectDrive()}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-amber-950 bg-white border border-amber-300 hover:bg-amber-100 rounded-md cursor-pointer shrink-0"
+                  >
+                    {isConnectingDrive ? 'Connecting...' : 'Reconnect Google Drive'}
+                  </button>
+                </div>
+              )}
+
             {/* Deliverables Checklist */}
             <div className="pt-3 border-t border-[#EAEAEF]">
               <div className="text-[11px] font-semibold text-[#3A3A44] uppercase tracking-wider mb-2">

@@ -1,12 +1,10 @@
+import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { NextFunction, Request, Response } from 'express';
 import { createPipelineRouter } from './server/pipelineRoutes.ts';
-
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -4,8 +4,13 @@ import { fal } from '@fal-ai/client';
 
 export type LlmRoutingMode = 'auto' | 'fal_gemini' | 'google_direct';
 
-const DEFAULT_GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash';
-const DEFAULT_FAL_GEMINI_MODEL = process.env.FAL_GEMINI_MODEL || 'google/gemini-2.5-flash';
+function getDefaultGeminiTextModel(): string {
+  return process.env.GEMINI_TEXT_MODEL?.trim() || 'gemini-3.5-flash-lite';
+}
+
+function getDefaultFalGeminiModel(): string {
+  return process.env.FAL_GEMINI_MODEL?.trim() || 'google/gemini-3.5-flash-lite';
+}
 
 let runtimeLlmMode: LlmRoutingMode =
   process.env.PREFER_FAL_GEMINI === 'true' ? 'fal_gemini' : 'auto';
@@ -27,7 +32,6 @@ export interface LlmJsonCallOptions {
   parts?: LlmInlinePart[];
   thinkingLow?: boolean;
   preferFal?: boolean;
-  temperature?: number;
 }
 
 export interface LlmJsonResult<T> {
@@ -62,8 +66,8 @@ export function getLlmStatus() {
     mode: runtimeLlmMode,
     geminiConfigured: hasValidGeminiKey(),
     falConfigured: hasValidFalKey(),
-    geminiTextModel: DEFAULT_GEMINI_TEXT_MODEL,
-    falGeminiModel: DEFAULT_FAL_GEMINI_MODEL,
+    geminiTextModel: getDefaultGeminiTextModel(),
+    falGeminiModel: getDefaultFalGeminiModel(),
   };
 }
 
@@ -344,18 +348,16 @@ async function callViaGoogleGemini<T>(
   if (opts.thinkingLow) {
     config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
   }
-  if (typeof opts.temperature === 'number') {
-    config.temperature = opts.temperature;
-  }
 
   const contentsPayload =
     geminiParts.length === 1 && geminiParts[0].text
       ? geminiParts[0].text
       : { parts: geminiParts };
 
+  const geminiModel = getDefaultGeminiTextModel();
   const response = await withGeminiRetry(() =>
     ai.models.generateContent({
-      model: DEFAULT_GEMINI_TEXT_MODEL,
+      model: geminiModel,
       contents: contentsPayload,
       config,
     })
@@ -365,7 +367,7 @@ async function callViaGoogleGemini<T>(
   return {
     data: parsed,
     providerUsed: 'google-gemini',
-    modelUsed: DEFAULT_GEMINI_TEXT_MODEL,
+    modelUsed: geminiModel,
   };
 }
 
@@ -450,28 +452,23 @@ async function callViaFalGemini<T>(
     opts.systemPrompt ||
     'You are an expert commercial production AI assistant for 52Launch Studio. Always reply with strictly valid JSON only.';
 
+  const falModel = getDefaultFalGeminiModel();
   const result =
     imageUrls.length > 0
       ? await fal.subscribe('openrouter/router/vision', {
           input: {
-            model: DEFAULT_FAL_GEMINI_MODEL,
+            model: falModel,
             prompt: assembledPrompt,
             system_prompt: systemPrompt,
             image_urls: imageUrls,
-            ...(typeof opts.temperature === 'number'
-              ? { temperature: opts.temperature }
-              : {}),
           },
           logs: false,
         })
       : await fal.subscribe('openrouter/router', {
           input: {
-            model: DEFAULT_FAL_GEMINI_MODEL,
+            model: falModel,
             prompt: assembledPrompt,
             system_prompt: systemPrompt,
-            ...(typeof opts.temperature === 'number'
-              ? { temperature: opts.temperature }
-              : {}),
           },
           logs: false,
         });
@@ -481,7 +478,7 @@ async function callViaFalGemini<T>(
   return {
     data: parsed,
     providerUsed: 'fal-gemini',
-    modelUsed: `fal:${DEFAULT_FAL_GEMINI_MODEL}`,
+    modelUsed: `fal:${falModel}`,
   };
 }
 

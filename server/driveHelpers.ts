@@ -1029,36 +1029,69 @@ async function ensureBackupFolder(
   accessToken: string,
   preferredFolderUrl?: string
 ): Promise<{ folderId: string; folderUrl: string }> {
-  // 0. Prioritize explicitly selected destination folder if set by user
-  if (project.googleDriveDestinationFolderId) {
-    try {
-      const check = await driveFetch(
-        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(project.googleDriveDestinationFolderId)}?fields=id,trashed,webViewLink&supportsAllDrives=true`,
-        accessToken
-      );
-      if (check.ok) {
-        const data = await check.json();
-        if (!data.trashed) {
-          return {
-            folderId: data.id,
-            folderUrl: data.webViewLink || `https://drive.google.com/drive/folders/${data.id}`,
-          };
-        }
-      }
-    } catch {
-      // Fall through if permission denied or deleted
-    }
-  }
+  const isProd = process.env.NODE_ENV === 'production';
 
-  // 1. Reuse already-provisioned backup folder if it still exists
-  if (project.googleDriveBackupFolderId) {
+  // 0. Prioritize explicitly selected destination folder if set by user — never silently fall back
+  const explicitDestId =
+    project.googleDriveDestinationFolderId ||
+    (project.googleDriveDestinationFolderUrl
+      ? extractFolderIdFromUrl(project.googleDriveDestinationFolderUrl)
+      : null);
+
+  if (explicitDestId) {
     const check = await driveFetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(project.googleDriveBackupFolderId)}?fields=id,trashed,webViewLink&supportsAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(explicitDestId)}?fields=id,name,trashed,webViewLink,capabilities(canAddChildren)&supportsAllDrives=true`,
       accessToken
     );
-    if (check.ok) {
+    if (!check.ok) {
+      const errInfo = await parseGoogleApiError(check);
+      throw new Error(
+        `Selected Google Drive destination folder could not be accessed: ${errInfo.message}`
+      );
+    }
+    const data = await check.json();
+    if (data.trashed) {
+      throw new Error(
+        'Selected Google Drive destination folder is in Trash. Please select an active Save Destination folder.'
+      );
+    }
+    if (data.capabilities && data.capabilities.canAddChildren === false) {
+      throw new Error(
+        'You do not have write permission on the selected Google Drive destination folder. Choose a Shared Drive or folder where you have Editor/Contributor access.'
+      );
+    }
+    return {
+      folderId: data.id,
+      folderUrl: data.webViewLink || `https://drive.google.com/drive/folders/${data.id}`,
+    };
+  }
+
+  // 1. Reuse already-provisioned backup folder if it still exists and is writable
+  if (project.googleDriveBackupFolderId) {
+    const check = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(project.googleDriveBackupFolderId)}?fields=id,trashed,webViewLink,capabilities(canAddChildren)&supportsAllDrives=true`,
+      accessToken
+    );
+    if (!check.ok) {
+      const errInfo = await parseGoogleApiError(check);
+      if (isProd) {
+        throw new Error(
+          `Configured Google Drive backup folder could not be accessed: ${errInfo.message}`
+        );
+      }
+    } else {
       const data = await check.json();
-      if (!data.trashed) {
+      if (data.trashed) {
+        if (isProd) {
+          throw new Error(
+            'Configured Google Drive backup folder is in Trash. Please select a new Save Destination folder.'
+          );
+        }
+      } else if (data.capabilities && data.capabilities.canAddChildren === false) {
+        throw new Error(
+          'You do not have write permission on the Google Drive backup folder.'
+        );
+      } else {
         return {
           folderId: data.id,
           folderUrl: data.webViewLink || `https://drive.google.com/drive/folders/${data.id}`,
@@ -1067,7 +1100,7 @@ async function ensureBackupFolder(
     }
   }
 
-  // 2. Try creating/reusing an auto-save subfolder inside the user's linked Drive folder
+  // 2. Try creating/reusing an auto-save subfolder inside the linked Drive folder
   const linkedFolderId = extractFolderIdFromUrl(
     preferredFolderUrl || project.googleDriveFolderUrls?.[0] || project.googleDriveFolderUrl
   );
@@ -1082,20 +1115,39 @@ async function ensureBackupFolder(
       if (existingSub) {
         return {
           folderId: existingSub.id,
-          folderUrl: existingSub.webViewLink || `https://drive.google.com/drive/folders/${existingSub.id}`,
+          folderUrl:
+            existingSub.webViewLink ||
+            `https://drive.google.com/drive/folders/${existingSub.id}`,
         };
       }
-      const createdSub = await createDriveFolder(accessToken, '52Launch Auto-Save', linkedFolderId);
+      const createdSub = await createDriveFolder(
+        accessToken,
+        '52Launch Auto-Save',
+        linkedFolderId
+      );
       return {
         folderId: createdSub.id,
-        folderUrl: createdSub.webViewLink || `https://drive.google.com/drive/folders/${createdSub.id}`,
+        folderUrl:
+          createdSub.webViewLink ||
+          `https://drive.google.com/drive/folders/${createdSub.id}`,
       };
-    } catch {
-      // Fall through cleanly to dedicated folder in My Drive
+    } catch (err) {
+      if (isProd || (preferredFolderUrl && preferredFolderUrl === project.googleDriveDestinationFolderUrl)) {
+        const msg = err instanceof Error ? err.message : 'Folder could not be accessed or written to.';
+        throw new Error(`Could not write to the selected Google Drive folder: ${msg}`);
+      }
+      // In non-production dev only, allow falling back when a source folder is read-only
     }
   }
 
-  // 3. Create/reuse dedicated app-owned folder in My Drive
+  // 3. In production, never silently fall back to someone's personal My Drive
+  if (isProd) {
+    throw new Error(
+      'No Google Drive Save Destination folder is selected. Choose a Shared Drive or project folder in Step 1 before syncing or saving PDFs.'
+    );
+  }
+
+  // Development/sandbox fallback: create/reuse dedicated app-owned folder in My Drive
   const folderName = `52Launch Studio — ${project.client} (${project.product.name})`;
   const existingRoot = await findDriveItemByName(
     accessToken,
@@ -1106,13 +1158,17 @@ async function ensureBackupFolder(
   if (existingRoot) {
     return {
       folderId: existingRoot.id,
-      folderUrl: existingRoot.webViewLink || `https://drive.google.com/drive/folders/${existingRoot.id}`,
+      folderUrl:
+        existingRoot.webViewLink ||
+        `https://drive.google.com/drive/folders/${existingRoot.id}`,
     };
   }
   const createdRoot = await createDriveFolder(accessToken, folderName);
   return {
     folderId: createdRoot.id,
-    folderUrl: createdRoot.webViewLink || `https://drive.google.com/drive/folders/${createdRoot.id}`,
+    folderUrl:
+      createdRoot.webViewLink ||
+      `https://drive.google.com/drive/folders/${createdRoot.id}`,
   };
 }
 

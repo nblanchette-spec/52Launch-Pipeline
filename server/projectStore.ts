@@ -7,9 +7,82 @@ import type {
   ProjectThumbnailItem,
 } from '../src/types/pipeline.ts';
 
-const DATA_ROOT = path.resolve(
-  process.env.DATA_DIR || path.join(process.cwd(), 'data')
-);
+function getDataRoot(): string {
+  return path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
+}
+
+const MIME_TO_ASSET_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+  'video/webm': 'webm',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/mp4': 'm4a',
+  'audio/m4a': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'application/pdf': 'pdf',
+};
+
+const EXT_TO_ASSET_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.ogg': 'audio/ogg',
+  '.aac': 'audio/aac',
+  '.pdf': 'application/pdf',
+};
+
+export function isSupportedAssetFilename(filename: string): boolean {
+  if (!filename || filename.startsWith('.') || filename.includes('/') || filename.includes('\\')) {
+    return false;
+  }
+  const ext = path.extname(filename).toLowerCase();
+  return Boolean(EXT_TO_ASSET_MIME[ext]);
+}
+
+function sanitizeAssetPrefix(raw: string | undefined, fallback = 'asset'): string {
+  const cleaned = String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return cleaned || fallback;
+}
+
+function normalizeSupportedExt(rawExt: string | undefined): string {
+  const cleaned = String(rawExt || '')
+    .toLowerCase()
+    .replace(/^\./, '');
+  if (!cleaned || !EXT_TO_ASSET_MIME[`.${cleaned}`]) {
+    throw new Error(
+      `Unsupported asset file extension ".${cleaned || 'unknown'}". Allowed: image, audio, video, and PDF files.`
+    );
+  }
+  return cleaned === 'jpeg' ? 'jpg' : cleaned;
+}
+
+function getMimeFromFilename(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  return EXT_TO_ASSET_MIME[ext] || 'application/octet-stream';
+}
 
 async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
@@ -20,7 +93,7 @@ function sanitizeId(raw: string): string {
 }
 
 export function getProjectDir(projectId: string): string {
-  return path.join(DATA_ROOT, sanitizeId(projectId));
+  return path.join(getDataRoot(), sanitizeId(projectId));
 }
 
 export function getProjectAssetsDir(projectId: string): string {
@@ -39,20 +112,17 @@ export async function saveDataUrlAsset(
   if (!match) {
     throw new Error('Invalid file upload format.');
   }
-  const mime = match[1].toLowerCase();
+  const mime = match[1].toLowerCase().trim();
   const base64Data = match[2];
-  let ext = 'png';
-  if (mime.includes('jpeg') || mime.includes('jpg')) ext = 'jpg';
-  else if (mime.includes('webp')) ext = 'webp';
-  else if (mime.includes('gif')) ext = 'gif';
-  else if (mime.includes('mp4')) ext = 'mp4';
-  else if (mime.includes('quicktime') || mime.includes('mov')) ext = 'mov';
-  else if (mime.includes('webm')) ext = 'webm';
-  else if (mime.includes('mpeg') || mime.includes('mp3')) ext = 'mp3';
-  else if (mime.includes('wav')) ext = 'wav';
-  else if (mime.includes('pdf')) ext = 'pdf';
+  const ext = MIME_TO_ASSET_EXT[mime];
+  if (!ext) {
+    throw new Error(
+      `Unsupported file type "${mime}". Allowed formats: PNG, JPG, WEBP, GIF, MP4, MOV, WEBM, MP3, WAV, M4A, OGG, AAC, and PDF.`
+    );
+  }
 
-  const filename = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+  const safePrefix = sanitizeAssetPrefix(prefix, 'asset');
+  const filename = `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
   const filePath = path.join(assetsDir, filename);
   await fs.writeFile(filePath, Buffer.from(base64Data, 'base64'));
 
@@ -71,12 +141,15 @@ export async function saveBinaryAssetFromUrl(
   const assetsDir = getProjectAssetsDir(projectId);
   await ensureDir(assetsDir);
 
+  const safeExt = normalizeSupportedExt(ext);
+  const safePrefix = sanitizeAssetPrefix(prefix, 'video');
+
   const response = await fetch(remoteUrl);
   if (!response.ok) {
     throw new Error(`Could not download generated media (${response.status}).`);
   }
   const arrayBuffer = await response.arrayBuffer();
-  const filename = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+  const filename = `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${safeExt}`;
   const filePath = path.join(assetsDir, filename);
   await fs.writeFile(filePath, Buffer.from(arrayBuffer));
 
@@ -95,7 +168,9 @@ export async function saveBufferAsset(
   const assetsDir = getProjectAssetsDir(projectId);
   await ensureDir(assetsDir);
 
-  const filename = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+  const safeExt = normalizeSupportedExt(ext);
+  const safePrefix = sanitizeAssetPrefix(prefix, 'vo');
+  const filename = `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${safeExt}`;
   const filePath = path.join(assetsDir, filename);
   await fs.writeFile(filePath, buffer);
 
@@ -122,6 +197,7 @@ export async function readAssetAsInlineData(
   let filePath: string | null = null;
   if (assetUrlOrDataUrl.startsWith(apiPrefix)) {
     const filename = path.basename(assetUrlOrDataUrl);
+    if (!isSupportedAssetFilename(filename)) return null;
     filePath = path.join(getProjectAssetsDir(projectId), filename);
   } else if (assetUrlOrDataUrl.startsWith('/src/assets/')) {
     const allowedAssetsDir = path.resolve(process.cwd(), 'src', 'assets');
@@ -136,25 +212,8 @@ export async function readAssetAsInlineData(
 
   try {
     const buffer = await fs.readFile(filePath);
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeType =
-      ext === '.jpg' || ext === '.jpeg'
-        ? 'image/jpeg'
-        : ext === '.webp'
-          ? 'image/webp'
-          : ext === '.mp4'
-            ? 'video/mp4'
-            : ext === '.mov'
-              ? 'video/quicktime'
-              : ext === '.webm'
-                ? 'video/webm'
-                : ext === '.mp3'
-                  ? 'audio/mpeg'
-                  : ext === '.wav'
-                    ? 'audio/wav'
-                    : ext === '.pdf'
-                      ? 'application/pdf'
-                      : 'image/png';
+    const mimeType = getMimeFromFilename(filePath);
+    if (mimeType === 'application/octet-stream') return null;
     return {
       data: buffer.toString('base64'),
       mimeType,
@@ -165,8 +224,9 @@ export async function readAssetAsInlineData(
 }
 
 export async function seedInitialProjectIfEmpty(): Promise<void> {
-  await ensureDir(DATA_ROOT);
-  const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
+  const dataRoot = getDataRoot();
+  await ensureDir(dataRoot);
+  const entries = await fs.readdir(dataRoot, { withFileTypes: true });
   const hasProjectFolders = entries.some((e) => e.isDirectory());
   if (hasProjectFolders) return;
 
@@ -547,12 +607,13 @@ export function buildProjectSummary(proj: PipelineProject): ProjectSummary {
 
 export async function listProjects(): Promise<ProjectSummary[]> {
   await seedInitialProjectIfEmpty();
-  const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
+  const dataRoot = getDataRoot();
+  const entries = await fs.readdir(dataRoot, { withFileTypes: true });
   const summaries: ProjectSummary[] = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const jsonPath = path.join(DATA_ROOT, entry.name, 'project.json');
+    const jsonPath = path.join(dataRoot, entry.name, 'project.json');
     try {
       const raw = await fs.readFile(jsonPath, 'utf-8');
       const proj = JSON.parse(raw) as PipelineProject;
@@ -587,11 +648,21 @@ export async function saveProject(project: PipelineProject): Promise<PipelinePro
     updatedAt: new Date().toISOString(),
   };
 
-  await fs.writeFile(
-    path.join(dir, 'project.json'),
-    JSON.stringify(updated, null, 2),
-    'utf-8'
+  const targetPath = path.join(dir, 'project.json');
+  const tmpPath = path.join(
+    dir,
+    `project.json.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   );
+  const payload = JSON.stringify(updated, null, 2);
+
+  try {
+    await fs.writeFile(tmpPath, payload, 'utf-8');
+    await fs.rename(tmpPath, targetPath);
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw err;
+  }
+
   return updated;
 }
 
@@ -617,22 +688,10 @@ export async function exportProjectBackupBundle(projectId: string): Promise<{
   try {
     const files = await fs.readdir(assetsDir);
     for (const file of files) {
+      if (!isSupportedAssetFilename(file)) continue;
       const buf = await fs.readFile(path.join(assetsDir, file));
-      const ext = path.extname(file).toLowerCase();
-      const mime =
-        ext === '.jpg' || ext === '.jpeg'
-          ? 'image/jpeg'
-          : ext === '.webp'
-            ? 'image/webp'
-            : ext === '.mp4'
-              ? 'video/mp4'
-              : ext === '.mp3'
-                ? 'audio/mpeg'
-                : ext === '.wav'
-                  ? 'audio/wav'
-                  : ext === '.pdf'
-                    ? 'application/pdf'
-                    : 'image/png';
+      const mime = getMimeFromFilename(file);
+      if (mime === 'application/octet-stream') continue;
       embeddedAssets[file] = `data:${mime};base64,${buf.toString('base64')}`;
     }
   } catch {
@@ -659,16 +718,36 @@ export async function importProjectBackupBundle(bundle: {
 
   const targetId = sanitizeId(incoming.id || `${incoming.product.name}-${Date.now()}`);
   const assetsDir = getProjectAssetsDir(targetId);
-  await ensureDir(assetsDir);
 
+  const validatedAssets: Array<{ safeName: string; buffer: Buffer }> = [];
   if (bundle.embeddedAssets && typeof bundle.embeddedAssets === 'object') {
     for (const [filename, dataUrl] of Object.entries(bundle.embeddedAssets)) {
-      const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
-      if (match) {
-        const safeName = path.basename(filename);
-        await fs.writeFile(path.join(assetsDir, safeName), Buffer.from(match[2], 'base64'));
+      const safeName = path.basename(filename);
+      if (safeName !== filename || !isSupportedAssetFilename(safeName)) {
+        throw new Error(
+          `Backup contains unsupported asset filename "${filename}". Allowed types: image, audio, video, and PDF.`
+        );
       }
+      const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) {
+        throw new Error(`Backup asset "${safeName}" has an invalid data encoding.`);
+      }
+      const mime = match[1].toLowerCase().trim();
+      if (!MIME_TO_ASSET_EXT[mime]) {
+        throw new Error(
+          `Backup asset "${safeName}" has unsupported MIME type "${mime}".`
+        );
+      }
+      validatedAssets.push({
+        safeName,
+        buffer: Buffer.from(match[2], 'base64'),
+      });
     }
+  }
+
+  await ensureDir(assetsDir);
+  for (const item of validatedAssets) {
+    await fs.writeFile(path.join(assetsDir, item.safeName), item.buffer);
   }
 
   // Rewrite any asset URLs to match the imported project's ID
