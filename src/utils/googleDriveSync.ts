@@ -178,6 +178,23 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   });
 }
 
+export async function signInWithSandboxMode(): Promise<{
+  user: DriveUser;
+  accessToken: string;
+}> {
+  const userInfo: DriveUser = {
+    email: 'nblanchette@52launch.com',
+    displayName: '52Launch Director (Sandbox)',
+    photoURL: undefined,
+  };
+  cachedAccessToken = 'sandbox-token-52launch';
+  cachedUser = userInfo;
+  if (authSuccessCallback) {
+    authSuccessCallback(userInfo, cachedAccessToken);
+  }
+  return { user: userInfo, accessToken: cachedAccessToken };
+}
+
 export async function logoutGoogleDrive(): Promise<void> {
   cachedAccessToken = null;
   cachedUser = null;
