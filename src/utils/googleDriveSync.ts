@@ -84,6 +84,10 @@ export function clearGoogleDriveToken(): void {
   cachedUser = null;
 }
 
+export function setCachedGoogleDriveAccessToken(token: string | null): void {
+  cachedAccessToken = token;
+}
+
 export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   user: DriveUser;
   accessToken: string;
@@ -592,12 +596,20 @@ export async function uploadPdfToDriveServer(params: {
     throw new Error('Sign in with Google Drive first to auto-save PDFs.');
   }
 
-  const pdfBase64 = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Could not encode PDF for Drive upload.'));
-    reader.readAsDataURL(params.pdfBlob);
-  });
+  let pdfBase64: string;
+  if (typeof params.pdfBlob.arrayBuffer === 'function') {
+    const arrayBuffer = await params.pdfBlob.arrayBuffer();
+    pdfBase64 = `data:application/pdf;base64,${Buffer.from(arrayBuffer).toString('base64')}`;
+  } else if (typeof FileReader !== 'undefined') {
+    pdfBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Could not encode PDF for Drive upload.'));
+      reader.readAsDataURL(params.pdfBlob);
+    });
+  } else {
+    throw new Error('Could not encode PDF for Drive upload.');
+  }
 
   const resp = await fetch('/api/pipeline/drive-upload-pdf', {
     method: 'POST',

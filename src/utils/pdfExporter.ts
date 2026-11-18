@@ -32,15 +32,98 @@ function getAllBrandGraphics(project: PipelineProject): Array<{ url: string; cap
   return list;
 }
 
-async function maybeAutoSavePdfToDrive(
+export interface DriveSaveResult {
+  attempted: boolean;
+  success: boolean;
+  backupFolderId?: string;
+  backupFolderUrl?: string;
+  filename?: string;
+  error?: string;
+}
+
+export interface MasterPdfDriveStatus {
+  status: 'saved' | 'failed' | 'skipped';
+  message: string;
+  folderUrl?: string;
+  error?: string;
+}
+
+export interface MasterPdfExportResult {
+  downloadedFiles: string[];
+  driveStatus: MasterPdfDriveStatus;
+}
+
+export function summarizeDriveStatus(results: DriveSaveResult[]): MasterPdfDriveStatus {
+  if (results.length === 0) {
+    return { status: 'skipped', message: '' };
+  }
+
+  const attempted = results.filter((r) => r.attempted);
+  if (attempted.length === 0) {
+    return { status: 'skipped', message: '' };
+  }
+
+  const failure = attempted.find((r) => !r.success);
+  if (failure) {
+    const errorDetails = failure.error?.trim() || 'Upload failed.';
+    return {
+      status: 'failed',
+      message: `PDF downloaded locally, but couldn’t save to Drive: ${errorDetails}`,
+      error: errorDetails,
+    };
+  }
+
+  const firstWithUrl = attempted.find((r) => r.backupFolderUrl);
+  return {
+    status: 'saved',
+    message: 'Saved to Drive',
+    folderUrl: firstWithUrl?.backupFolderUrl,
+  };
+}
+
+export async function maybeAutoSavePdfToDrive(
   project: PipelineProject,
   filename: string,
   pdfBlob: Blob
-): Promise<void> {
+): Promise<DriveSaveResult> {
+  const hasDriveConfig = Boolean(
+    project.googleDriveDestinationFolderId ||
+    project.googleDriveDestinationFolderUrl ||
+    project.googleDriveBackupFolderId ||
+    (Array.isArray(project.googleDriveFolderUrls) &&
+      project.googleDriveFolderUrls.some((u) => u.trim()))
+  );
+
+  let token: string | null = null;
   try {
-    const token = await getGoogleDriveAccessToken();
-    if (!token) return;
-    await uploadPdfToDriveServer({
+    token = await getGoogleDriveAccessToken();
+  } catch (err) {
+    const msg =
+      err instanceof Error ? err.message : 'Could not check Google Drive authentication.';
+    return {
+      attempted: true,
+      success: false,
+      error: msg,
+    };
+  }
+
+  if (!token) {
+    if (hasDriveConfig) {
+      return {
+        attempted: true,
+        success: false,
+        error:
+          'Google Drive is not connected or your Drive session expired. Please reconnect Google Drive and try again.',
+      };
+    }
+    return {
+      attempted: false,
+      success: false,
+    };
+  }
+
+  try {
+    const uploaded = await uploadPdfToDriveServer({
       projectId: project.id,
       filename,
       pdfBlob,
@@ -50,8 +133,23 @@ async function maybeAutoSavePdfToDrive(
         project.googleDriveDestinationFolderUrl || project.googleDriveBackupFolderUrl,
       accessToken: token,
     });
+
+    return {
+      attempted: true,
+      success: true,
+      backupFolderId: uploaded.backupFolderId,
+      backupFolderUrl: uploaded.backupFolderUrl,
+      filename: uploaded.filename,
+    };
   } catch (err) {
-    console.warn(`[pdfExporter] Auto-save PDF "${filename}" to Drive skipped:`, err);
+    const errorMsg =
+      err instanceof Error ? err.message : 'Could not save PDF to Google Drive.';
+    console.warn(`[pdfExporter] Auto-save PDF "${filename}" to Drive failed:`, errorMsg);
+    return {
+      attempted: true,
+      success: false,
+      error: errorMsg,
+    };
   }
 }
 
@@ -82,7 +180,7 @@ export const MASTER_PDF_SECTIONS: MasterPdfSectionMeta[] = [
     getStatus: (p) => ({
       ready: Boolean(p.brandBible?.hasGenerated),
       detail: p.brandBible?.hasGenerated
-        ? `${p.brandBible.characters.length} character(s) · ${p.brandBible.claimsAllowed.length} claims`
+        ? `${p.brandBible.characters?.length ?? 0} character(s) · ${p.brandBible.claimsAllowed?.length ?? 0} claims`
         : 'Not generated yet',
     }),
   },
@@ -95,7 +193,7 @@ export const MASTER_PDF_SECTIONS: MasterPdfSectionMeta[] = [
     getStatus: (p) => ({
       ready: Boolean(p.creativeBrief?.hasGenerated),
       detail: p.creativeBrief?.hasGenerated
-        ? `${p.creativeBrief.concepts.length} concept(s) · ${p.creativeBrief.deliverables.length} deliverables`
+        ? `${p.creativeBrief.concepts?.length ?? 0} concept(s) · ${p.creativeBrief.deliverables?.length ?? 0} deliverables`
         : 'Not generated yet',
     }),
   },
@@ -265,6 +363,7 @@ function slugifyFilePart(input: string): string {
 }
 
 function triggerBlobDownload(blob: Blob, filename: string): void {
+  if (typeof document === 'undefined') return;
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -4705,8 +4804,10 @@ export async function downloadCallSheetPdf(
 export async function downloadMasterSlideshowPdf(
   project: PipelineProject,
   sections: MasterPdfSectionId[]
-): Promise<void> {
-  if (sections.length === 0) return;
+): Promise<DriveSaveResult> {
+  if (sections.length === 0) {
+    return { attempted: false, success: false };
+  }
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
   const deck = new SlideDeckWriter(project);
 
@@ -4755,22 +4856,33 @@ export async function downloadMasterSlideshowPdf(
   const filename = `${slug}-presentation-slideshow-16x9.pdf`;
   const blob = deck.toBlob();
   triggerBlobDownload(blob, filename);
-  void maybeAutoSavePdfToDrive(project, filename, blob);
+  return await maybeAutoSavePdfToDrive(project, filename, blob);
 }
 
 export async function downloadMasterPdf(
   project: PipelineProject,
   sections: MasterPdfSectionId[],
   mode: 'combined' | 'individual' | 'slideshow'
-): Promise<void> {
-  if (sections.length === 0) return;
+): Promise<MasterPdfExportResult> {
+  if (sections.length === 0) {
+    return {
+      downloadedFiles: [],
+      driveStatus: { status: 'skipped', message: '' },
+    };
+  }
+
+  const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
+
   if (mode === 'slideshow') {
-    await downloadMasterSlideshowPdf(project, sections);
-    return;
+    const filename = `${slug}-presentation-slideshow-16x9.pdf`;
+    const driveSave = await downloadMasterSlideshowPdf(project, sections);
+    return {
+      downloadedFiles: [filename],
+      driveStatus: summarizeDriveStatus([driveSave]),
+    };
   }
 
   const brand = await load52LaunchBrandAssets();
-  const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
 
   const writeSectionById = async (
     writer: PdfWriter,
@@ -4854,9 +4966,15 @@ export async function downloadMasterPdf(
     const filename = `${slug}-master-production-book.pdf`;
     const blob = writer.toBlob();
     triggerBlobDownload(blob, filename);
-    await maybeAutoSavePdfToDrive(project, filename, blob);
-    return;
+    const driveSave = await maybeAutoSavePdfToDrive(project, filename, blob);
+    return {
+      downloadedFiles: [filename],
+      driveStatus: summarizeDriveStatus([driveSave]),
+    };
   }
+
+  const driveResults: DriveSaveResult[] = [];
+  const downloadedFiles: string[] = [];
 
   for (let i = 0; i < sections.length; i++) {
     const sectionId = sections[i];
@@ -4874,9 +4992,16 @@ export async function downloadMasterPdf(
     const filename = `${slug}-${meta?.filenameSuffix || sectionId}.pdf`;
     const blob = writer.toBlob();
     triggerBlobDownload(blob, filename);
-    void maybeAutoSavePdfToDrive(project, filename, blob);
+    const driveSave = await maybeAutoSavePdfToDrive(project, filename, blob);
+    driveResults.push(driveSave);
+    downloadedFiles.push(filename);
     if (i < sections.length - 1) {
       await new Promise((resolve) => setTimeout(resolve, 260));
     }
   }
+
+  return {
+    downloadedFiles,
+    driveStatus: summarizeDriveStatus(driveResults),
+  };
 }

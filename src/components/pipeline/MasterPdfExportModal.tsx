@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   X,
   Download,
@@ -10,11 +10,13 @@ import {
   CheckCircle2,
   AlertTriangle,
   Presentation,
+  ExternalLink,
 } from 'lucide-react';
 import { PipelineProject } from '../../types/pipeline';
 import {
   downloadMasterPdf,
   MASTER_PDF_SECTIONS,
+  MasterPdfDriveStatus,
   MasterPdfSectionId,
 } from '../../utils/pdfExporter';
 
@@ -37,6 +39,15 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
   >(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [driveStatus, setDriveStatus] = useState<MasterPdfDriveStatus | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      setDriveStatus(null);
+    }
+  }, [isOpen]);
 
   const statuses = useMemo(() => {
     if (!project) return [];
@@ -51,6 +62,7 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
   const toggleSection = (id: MasterPdfSectionId) => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDriveStatus(null);
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
@@ -59,12 +71,14 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
   const selectAll = () => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDriveStatus(null);
     setSelected(MASTER_PDF_SECTIONS.map((s) => s.id));
   };
 
   const selectReadyOnly = () => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDriveStatus(null);
     const readyIds = statuses.filter((s) => s.status.ready).map((s) => s.id);
     setSelected(readyIds.length > 0 ? readyIds : MASTER_PDF_SECTIONS.map((s) => s.id));
   };
@@ -72,6 +86,7 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
   const clearAll = () => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDriveStatus(null);
     setSelected([]);
   };
 
@@ -82,12 +97,13 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
     }
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDriveStatus(null);
     setExportingMode(mode);
     try {
       const orderedSelection = MASTER_PDF_SECTIONS.map((s) => s.id).filter((id) =>
         selected.includes(id)
       );
-      await downloadMasterPdf(project, orderedSelection, mode);
+      const result = await downloadMasterPdf(project, orderedSelection, mode);
       setSuccessMsg(
         mode === 'slideshow'
           ? `Downloaded 16:9 Landscape Slideshow PDF (${orderedSelection.length} sections).`
@@ -97,8 +113,15 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
                 orderedSelection.length === 1 ? '' : 's'
               }.`
       );
+
+      if (result.driveStatus.status === 'saved' || result.driveStatus.status === 'failed') {
+        setDriveStatus(result.driveStatus);
+      } else {
+        setDriveStatus(null);
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'PDF export failed.');
+      setDriveStatus(null);
     } finally {
       setExportingMode(null);
     }
@@ -234,6 +257,35 @@ export const MasterPdfExportModal: React.FC<MasterPdfExportModalProps> = ({
             <div className="p-3 rounded-md bg-emerald-50 border border-emerald-300 text-xs text-emerald-900 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-700" />
               <span>{successMsg}</span>
+            </div>
+          )}
+
+          {driveStatus && driveStatus.status === 'saved' && (
+            <div className="p-3 rounded-md bg-emerald-50 border border-emerald-300 text-xs text-emerald-900 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-700" />
+                <span className="font-semibold text-emerald-950">Saved to Drive</span>
+              </div>
+              {driveStatus.folderUrl && (
+                <a
+                  href={driveStatus.folderUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 hover:underline shrink-0"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open on Drive
+                </a>
+              )}
+            </div>
+          )}
+
+          {driveStatus && driveStatus.status === 'failed' && (
+            <div className="p-3 rounded-md bg-amber-50 border border-amber-300 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-start gap-2 min-w-0 flex-1">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+                <span className="leading-relaxed font-medium">{driveStatus.message}</span>
+              </div>
             </div>
           )}
         </div>
