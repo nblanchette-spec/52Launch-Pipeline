@@ -7,6 +7,53 @@ import {
   ShootScheduleBlock,
   ShotClipHistoryItem,
 } from '../types/pipeline';
+import {
+  getGoogleDriveAccessToken,
+  uploadPdfToDriveServer,
+} from './googleDriveSync';
+
+function getAllBrandGraphics(project: PipelineProject): Array<{ url: string; caption: string }> {
+  const b = project.brandBible;
+  const list: Array<{ url: string; caption: string }> = [];
+  const seen = new Set<string>();
+  if (b?.brandLogoUrl) {
+    seen.add(b.brandLogoUrl);
+    list.push({
+      url: b.brandLogoUrl,
+      caption: b.brandLogoCaption || 'Primary Brand Logo',
+    });
+  }
+  for (const g of b?.brandGraphics || []) {
+    if (g.url && !seen.has(g.url)) {
+      seen.add(g.url);
+      list.push({ url: g.url, caption: g.caption || 'Brand Graphic' });
+    }
+  }
+  return list;
+}
+
+async function maybeAutoSavePdfToDrive(
+  project: PipelineProject,
+  filename: string,
+  pdfBlob: Blob
+): Promise<void> {
+  try {
+    const token = await getGoogleDriveAccessToken();
+    if (!token) return;
+    await uploadPdfToDriveServer({
+      projectId: project.id,
+      filename,
+      pdfBlob,
+      destinationFolderId:
+        project.googleDriveDestinationFolderId || project.googleDriveBackupFolderId,
+      destinationFolderUrl:
+        project.googleDriveDestinationFolderUrl || project.googleDriveBackupFolderUrl,
+      accessToken: token,
+    });
+  } catch (err) {
+    console.warn(`[pdfExporter] Auto-save PDF "${filename}" to Drive skipped:`, err);
+  }
+}
 
 export type MasterPdfSectionId =
   | 'brandBible'
@@ -1325,13 +1372,14 @@ async function writeBrandBibleSection(
     return;
   }
 
-  // Preload brand logo + up to 4 product reference photos in parallel
-  const [logoImg, ...productImgs] = await Promise.all([
-    loadImageForPdf(b.brandLogoUrl),
-    ...project.product.photos.slice(0, 4).map((p) => loadImageForPdf(p.url)),
+  // Preload brand logos/graphics (up to 4) + up to 4 product reference photos in parallel
+  const brandGraphicsList = getAllBrandGraphics(project).slice(0, 4);
+  const [logoImgs, productImgs] = await Promise.all([
+    Promise.all(brandGraphicsList.map((g) => loadImageForPdf(g.url))),
+    Promise.all(project.product.photos.slice(0, 4).map((p) => loadImageForPdf(p.url))),
   ]);
 
-  if (logoImg || project.product.photos.length > 0) {
+  if (brandGraphicsList.length > 0 || project.product.photos.length > 0) {
     const panelH = 44;
     writer.ensureSpace(panelH + 4);
     const startY = writer.y;
@@ -1341,24 +1389,40 @@ async function writeBrandBibleSection(
     writer.doc.setLineWidth(0.28);
     writer.doc.roundedRect(writer.margin, startY, writer.contentW, panelH, 1.5, 1.5, 'FD');
 
-    // Left: Brand Logo slot
+    // Left: Brand Logos & Graphics slot(s)
     const logoBoxX = writer.margin + 3.5;
-    const logoBoxW = 46;
+    const logoBoxW = brandGraphicsList.length > 1 ? 68 : 46;
     const imgY = startY + 7.2;
     const imgH = 29;
 
     writer.doc.setFont('helvetica', 'bold');
     writer.doc.setFontSize(7.5);
     writer.doc.setTextColor(...PALETTE.slate);
-    writer.doc.text('BRAND LOGO', logoBoxX, startY + 5);
-    writer.drawImageInBox(logoImg, logoBoxX, imgY, logoBoxW, imgH, 'No Logo Attached');
-    if (b.brandLogoCaption) {
-      writer.doc.setFont('helvetica', 'normal');
-      writer.doc.setFontSize(6.6);
-      writer.doc.setTextColor(...PALETTE.muted);
-      const cap =
-        writer.doc.splitTextToSize(sanitizePdfText(b.brandLogoCaption), logoBoxW)[0] || '';
-      writer.doc.text(cap, logoBoxX, imgY + imgH + 3.5);
+    writer.doc.text(
+      brandGraphicsList.length > 1
+        ? `BRAND LOGOS (${brandGraphicsList.length})`
+        : 'BRAND LOGO',
+      logoBoxX,
+      startY + 5
+    );
+
+    if (brandGraphicsList.length > 0) {
+      const lGap = 2.5;
+      const shownLogos = brandGraphicsList.slice(0, 2);
+      const lSlotW =
+        shownLogos.length === 1 ? logoBoxW : (logoBoxW - lGap * (shownLogos.length - 1)) / shownLogos.length;
+      shownLogos.forEach((g, idx) => {
+        const lx = logoBoxX + idx * (lSlotW + lGap);
+        writer.drawImageInBox(logoImgs[idx] || null, lx, imgY, lSlotW, imgH, 'Logo');
+        writer.doc.setFont('helvetica', 'normal');
+        writer.doc.setFontSize(6.2);
+        writer.doc.setTextColor(...PALETTE.muted);
+        const cap =
+          writer.doc.splitTextToSize(sanitizePdfText(g.caption || `Logo ${idx + 1}`), lSlotW)[0] || '';
+        writer.doc.text(cap, lx, imgY + imgH + 3.5);
+      });
+    } else {
+      writer.drawImageInBox(null, logoBoxX, imgY, logoBoxW, imgH, 'No Logo Attached');
     }
 
     // Divider line
@@ -1380,7 +1444,7 @@ async function writeBrandBibleSection(
     if (shownPhotos.length > 0) {
       const availW = writer.margin + writer.contentW - 3.5 - prodStartX;
       const gap = 3;
-      const slotW = Math.min(36, (availW - gap * 3) / 4);
+      const slotW = Math.min(36, (availW - gap * 3) / Math.max(shownPhotos.length, 1));
       shownPhotos.forEach((photo, idx) => {
         const px = prodStartX + idx * (slotW + gap);
         writer.drawImageInBox(productImgs[idx], px, imgY, slotW, imgH, 'Image');
@@ -4607,7 +4671,10 @@ export async function downloadStoryboardPdf(project: PipelineProject): Promise<v
   );
   await writeStoryboardSection(writer, project);
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
-  triggerBlobDownload(writer.toBlob(), `${slug}-storyboard.pdf`);
+  const filename = `${slug}-storyboard.pdf`;
+  const blob = writer.toBlob();
+  triggerBlobDownload(blob, filename);
+  void maybeAutoSavePdfToDrive(project, filename, blob);
 }
 
 export async function downloadCallSheetPdf(
@@ -4629,7 +4696,10 @@ export async function downloadCallSheetPdf(
   );
   writeShootPlanSection(writer, project, activePlan);
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
-  triggerBlobDownload(writer.toBlob(), `${slug}-call-sheet.pdf`);
+  const filename = `${slug}-call-sheet.pdf`;
+  const blob = writer.toBlob();
+  triggerBlobDownload(blob, filename);
+  void maybeAutoSavePdfToDrive(project, filename, blob);
 }
 
 export async function downloadMasterSlideshowPdf(
@@ -4641,9 +4711,11 @@ export async function downloadMasterSlideshowPdf(
   const deck = new SlideDeckWriter(project);
 
   // Preload official 52Launch badge + client brand & shot visual assets in parallel
+  const brandGraphicsList = getAllBrandGraphics(project);
+  const primaryLogoUrl = brandGraphicsList[0]?.url || project.brandBible?.brandLogoUrl;
   const [brand, logoImg, ...prodImgs] = await Promise.all([
     load52LaunchBrandAssets(),
-    loadImageForPdf(project.brandBible?.brandLogoUrl),
+    loadImageForPdf(primaryLogoUrl),
     ...project.product.photos.slice(0, 4).map((p) => loadImageForPdf(p.url)),
   ]);
 
@@ -4680,7 +4752,10 @@ export async function downloadMasterSlideshowPdf(
     }
   }
 
-  triggerBlobDownload(deck.toBlob(), `${slug}-presentation-slideshow-16x9.pdf`);
+  const filename = `${slug}-presentation-slideshow-16x9.pdf`;
+  const blob = deck.toBlob();
+  triggerBlobDownload(blob, filename);
+  void maybeAutoSavePdfToDrive(project, filename, blob);
 }
 
 export async function downloadMasterPdf(
@@ -4776,7 +4851,10 @@ export async function downloadMasterPdf(
       await writeSectionById(writer, sections[i]);
     }
 
-    triggerBlobDownload(writer.toBlob(), `${slug}-master-production-book.pdf`);
+    const filename = `${slug}-master-production-book.pdf`;
+    const blob = writer.toBlob();
+    triggerBlobDownload(blob, filename);
+    await maybeAutoSavePdfToDrive(project, filename, blob);
     return;
   }
 
@@ -4793,10 +4871,10 @@ export async function downloadMasterPdf(
       brand.badgeBurgundy
     );
     await writeSectionById(writer, sectionId);
-    triggerBlobDownload(
-      writer.toBlob(),
-      `${slug}-${meta?.filenameSuffix || sectionId}.pdf`
-    );
+    const filename = `${slug}-${meta?.filenameSuffix || sectionId}.pdf`;
+    const blob = writer.toBlob();
+    triggerBlobDownload(blob, filename);
+    void maybeAutoSavePdfToDrive(project, filename, blob);
     if (i < sections.length - 1) {
       await new Promise((resolve) => setTimeout(resolve, 260));
     }

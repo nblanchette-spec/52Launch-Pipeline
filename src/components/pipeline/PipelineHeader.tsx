@@ -7,16 +7,17 @@ import {
   Check,
   Lock,
   Printer,
-  Layers,
   FileText,
   LayoutGrid,
   Rocket,
+  Cpu,
 } from 'lucide-react';
 import {
   PipelineProject,
   PipelineStepNumber,
   ProjectSummary,
 } from '../../types/pipeline';
+import type { LlmRoutingMode } from '../../utils/googleDriveSync';
 
 interface PipelineHeaderProps {
   projects: ProjectSummary[];
@@ -35,7 +36,10 @@ interface PipelineHeaderProps {
   onOpenMasterExport: () => void;
   onDownloadBackup: () => void;
   onImportBackup: (file: File) => void;
-  onSwitchToClassicStudio: () => void;
+  llmMode?: LlmRoutingMode;
+  falConfigured?: boolean;
+  geminiConfigured?: boolean;
+  onChangeLlmMode?: (mode: LlmRoutingMode) => void;
 }
 
 const STEPS: Array<{
@@ -71,7 +75,10 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   onOpenMasterExport,
   onDownloadBackup,
   onImportBackup,
-  onSwitchToClassicStudio,
+  llmMode = 'auto',
+  falConfigured = false,
+  geminiConfigured = false,
+  onChangeLlmMode,
 }) => {
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -210,7 +217,35 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onChangeLlmMode && (
+            <div
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-[#F6F6F7] border border-[#D8D8DF] rounded-md"
+              title="Choose how text & brief generation routes between Google Gemini Direct and Gemini via Fal"
+            >
+              <Cpu className="w-3.5 h-3.5 text-[#891A23] shrink-0" />
+              <span className="text-[11px] font-medium text-[#5A5A66] hidden md:inline">
+                AI Engine:
+              </span>
+              <select
+                aria-label="AI Engine routing mode"
+                value={llmMode}
+                onChange={(e) => onChangeLlmMode(e.target.value as LlmRoutingMode)}
+                className="bg-transparent text-xs font-semibold text-[#111114] focus:outline-none cursor-pointer pr-1"
+              >
+                <option value="auto">
+                  Auto (Gemini{falConfigured ? ' + Fal Backup' : ''})
+                </option>
+                <option value="fal_gemini" disabled={!falConfigured}>
+                  Gemini via Fal{falConfigured ? '' : ' (Not configured)'}
+                </option>
+                <option value="google_direct" disabled={!geminiConfigured}>
+                  Gemini Direct{geminiConfigured ? '' : ' (Not configured)'}
+                </option>
+              </select>
+            </div>
+          )}
+
           {!isWelcomeOpen && activeProject && activeProject.shots.length > 0 && (
             <button
               type="button"
@@ -270,16 +305,6 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
               </button>
             </>
           )}
-
-          <button
-            type="button"
-            onClick={onSwitchToClassicStudio}
-            title="Open original Storyboard Studio view"
-            className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#6E6E7A] hover:text-[#891A23] border border-transparent hover:border-[#E2E2E6] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            Classic Studio
-          </button>
         </div>
       </div>
 

@@ -35,6 +35,7 @@ import {
 } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
 import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step5StoryboardFramesProps {
@@ -179,7 +180,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
 
   useEffect(() => {
     fetch('/api/pipeline/fal-status')
-      .then((r) => r.json())
+      .then((r) => parseJsonResponse<{ falKeyConfigured?: boolean }>(r))
       .then((d) => setFalConfigured(Boolean(d?.falKeyConfigured)))
       .catch(() => setFalConfigured(null));
   }, []);
@@ -268,8 +269,10 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project.id }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not extract assets.');
+      const data = await parseJsonResponse<{ project: PipelineProject }>(
+        resp,
+        'Could not extract assets.'
+      );
       await onUpdateProject(data.project);
       setStatusNote(
         `Extracted ${data.project.storyboardStudio?.assets?.length || 0} characters, locations & props from your Brand Bible and Shot List.`
@@ -302,10 +305,12 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           customStyleNoteOverride: targetStudio.customStyleNote,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not generate asset sheet.');
+      const data = await parseJsonResponse<{ project: PipelineProject }>(
+        resp,
+        'Could not generate asset sheet.'
+      );
       await onUpdateProject(data.project);
-      return data.project as PipelineProject;
+      return data.project;
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Asset sheet generation failed.');
       return null;
@@ -355,8 +360,10 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dataUrl, prefix: 'frame' }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload sheet.');
+      const data = await parseJsonResponse<{ url: string }>(
+        resp,
+        'Could not upload sheet.'
+      );
       await updateAsset(assetId, { imageUrl: data.url, locked: true });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not upload asset image.');
@@ -407,13 +414,16 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
           includePrevShotFrame: includePrev,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || `Could not generate frame for ${shot.id}.`);
+      const data = await parseJsonResponse<{
+        project: PipelineProject;
+        endpointUsed?: string;
+        refCount?: number;
+      }>(resp, `Could not generate frame for ${shot.id}.`);
       await onUpdateProject(data.project);
       setStatusNote(
         `Generated ${shot.id} frame via ${data.endpointUsed || 'Fal Nano Banana'} (${data.refCount || 0} reference image${data.refCount === 1 ? '' : 's'} applied).`
       );
-      return data.project as PipelineProject;
+      return data.project;
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : `Failed to generate ${shot.id}.`);
       return null;
@@ -464,8 +474,10 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dataUrl, prefix: 'frame' }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload frame.');
+      const data = await parseJsonResponse<{ url: string }>(
+        resp,
+        'Could not upload frame.'
+      );
 
       updateShot(shotId, {
         frameImageUrl: data.url,
@@ -652,7 +664,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
 
       {falConfigured === false && (
         <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-900">
-          Add <span className="font-mono font-semibold">FAL_KEY</span> in Settings &gt; Secrets to run Fal Nano Banana generation directly here (or continue pasting/uploading frames below).
+          Add <span className="font-mono font-semibold">FAL_KEY</span> to the server environment variables to run Fal Nano Banana generation directly here (or continue pasting/uploading frames below).
         </div>
       )}
 
@@ -869,8 +881,10 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                   </span>
                 </div>
               </div>
-              {project.product.photos.length > 0 && (
-                <div className="flex items-center gap-1.5">
+              {(project.product.photos.length > 0 ||
+                project.brandBible?.brandLogoUrl ||
+                (project.brandBible?.brandGraphics?.length || 0) > 0) && (
+                <div className="flex items-center gap-1.5 flex-wrap">
                   {project.product.photos.slice(0, 4).map((p) => (
                     <img
                       key={p.id}
@@ -879,14 +893,33 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
                       className="w-9 h-9 rounded-md object-cover border border-[#D5D5DC]"
                     />
                   ))}
-                  {project.brandBible?.brandLogoUrl && (
-                    <img
-                      src={project.brandBible.brandLogoUrl}
-                      alt="Brand Logo"
-                      className="w-9 h-9 rounded-md object-contain bg-white border border-[#C6202F]/50 p-0.5"
-                      title="Brand Logo"
-                    />
-                  )}
+                  {(() => {
+                    const logos: Array<{ id: string; url: string; caption?: string }> = [];
+                    const seen = new Set<string>();
+                    if (project.brandBible?.brandLogoUrl) {
+                      seen.add(project.brandBible.brandLogoUrl);
+                      logos.push({
+                        id: 'primary-logo',
+                        url: project.brandBible.brandLogoUrl,
+                        caption: project.brandBible.brandLogoCaption || 'Primary Logo',
+                      });
+                    }
+                    (project.brandBible?.brandGraphics || []).forEach((g, idx) => {
+                      if (g.url && !seen.has(g.url)) {
+                        seen.add(g.url);
+                        logos.push({ id: g.id || `bg-${idx}`, url: g.url, caption: g.caption });
+                      }
+                    });
+                    return logos.slice(0, 4).map((g) => (
+                      <img
+                        key={g.id}
+                        src={g.url}
+                        alt={g.caption || 'Brand Graphic'}
+                        className="w-9 h-9 rounded-md object-contain bg-white border border-[#C6202F]/50 p-0.5"
+                        title={g.caption || 'Brand Graphic'}
+                      />
+                    ));
+                  })()}
                 </div>
               )}
             </div>

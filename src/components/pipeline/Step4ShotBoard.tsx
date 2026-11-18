@@ -23,6 +23,7 @@ import {
 } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
 import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step4ShotBoardProps {
@@ -148,8 +149,10 @@ export const Step4ShotBoard: React.FC<Step4ShotBoardProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dataUrl, prefix: 'frame' }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload frame.');
+      const data = await parseJsonResponse<{ url: string }>(
+        resp,
+        'Could not upload frame.'
+      );
 
       updateShot(shotId, {
         frameImageUrl: data.url,

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import path from 'path';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { fal } from '@fal-ai/client';
 import {
   deleteProject,
@@ -22,6 +22,7 @@ import type {
   FrameCheckResult,
   PipelineProject,
   PipelineShot,
+  ProductPhoto,
   ShootPlan,
   ShotClipHistoryItem,
   StoryboardImageModel,
@@ -52,7 +53,17 @@ import {
   DriveAuthError,
   type DriveFileDescriptor,
   syncProjectAssetsToDrive,
+  uploadPdfBufferToProjectDrive,
 } from './driveHelpers.ts';
+import {
+  formatLlmError,
+  generateJsonWithGeminiOrFal,
+  getGeminiClient,
+  getLlmStatus,
+  type LlmInlinePart,
+  type LlmRoutingMode,
+  setLlmMode,
+} from './llmHelpers.ts';
 import {
   FLUX3_ENDPOINTS,
   type StudioAspectRatio,
@@ -64,91 +75,6 @@ import {
   type StudioWorkflowMode,
   type TopazUpscaleMode,
 } from '../src/utils/videoStudioCatalog.ts';
-
-const GEMINI_MODEL = 'gemini-3.8-flash';
-
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured in the server environment.');
-  }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-}
-
-function formatGeminiError(err: unknown, fallback: string): string {
-  const raw = err instanceof Error ? err.message : '';
-  if (!raw) return fallback;
-
-  // Unwrap SDK JSON error payloads so the UI never displays raw JSON
-  let message = raw;
-  let code: number | undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed?.error?.message) {
-      message = String(parsed.error.message);
-      code = typeof parsed.error.code === 'number' ? parsed.error.code : undefined;
-    }
-  } catch {
-    // Not raw JSON; keep raw message
-  }
-
-  const lower = message.toLowerCase();
-  if (code === 403 || lower.includes('permission_denied') || lower.includes('api_key_invalid')) {
-    return 'Gemini could not authenticate. Check your GEMINI_API_KEY in Settings > Secrets.';
-  }
-  if (code === 429 || lower.includes('resource_exhausted') || lower.includes('quota')) {
-    return 'Gemini is temporarily busy or out of quota. Wait a moment and try again.';
-  }
-  if (code === 404 || lower.includes('not_found')) {
-    return 'The AI model could not be reached right now. Please try again in a moment.';
-  }
-  return message || fallback;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isTransientGeminiError(err: unknown): boolean {
-  const status = (err as { status?: number; code?: number })?.status ?? (err as { code?: number })?.code;
-  const raw = err instanceof Error ? err.message.toLowerCase() : String(err || '').toLowerCase();
-  return (
-    status === 429 ||
-    status === 503 ||
-    raw.includes('429') ||
-    raw.includes('503') ||
-    raw.includes('resource_exhausted') ||
-    raw.includes('quota') ||
-    raw.includes('unavailable') ||
-    raw.includes('overloaded') ||
-    raw.includes('rate limit')
-  );
-}
-
-async function withGeminiRetry<T>(fn: () => Promise<T>): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (isTransientGeminiError(err) && attempt < 2) {
-        const delayMs = 1500 * Math.pow(2, attempt) + Math.floor(Math.random() * 500);
-        await sleep(delayMs);
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
 
 async function falSubscribeWithNegativeFallback(
   endpointId: string,
@@ -251,6 +177,91 @@ export function createPipelineRouter(): Router {
     }
   });
 
+  // AI Routing Status & Mode Control (Direct Gemini + Gemini via Fal)
+  router.get('/pipeline/llm-status', (_req, res) => {
+    res.json(getLlmStatus());
+  });
+
+  router.post('/pipeline/llm-mode', (req, res) => {
+    const mode = req.body?.mode as LlmRoutingMode | undefined;
+    if (mode !== 'auto' && mode !== 'fal_gemini' && mode !== 'google_direct') {
+      return res.status(400).json({ error: 'Invalid AI routing mode.' });
+    }
+    setLlmMode(mode);
+    res.json(getLlmStatus());
+  });
+
+  // Upload any client-generated PDF deliverable directly into the project Drive destination folder
+  router.post('/pipeline/drive-upload-pdf', async (req, res) => {
+    try {
+      const { projectId, filename, pdfBase64, destinationFolderId, destinationFolderUrl } =
+        req.body as {
+          projectId: string;
+          filename: string;
+          pdfBase64: string;
+          destinationFolderId?: string;
+          destinationFolderUrl?: string;
+        };
+
+      const authHeader = req.headers.authorization;
+      const token =
+        authHeader && authHeader.startsWith('Bearer ')
+          ? authHeader.slice('Bearer '.length).trim()
+          : '';
+      if (!token) {
+        return res.status(401).json({ error: 'Sign in with Google Drive first.' });
+      }
+
+      const project = await getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found.' });
+      if (!filename || !pdfBase64) {
+        return res.status(400).json({ error: 'Missing PDF filename or base64 payload.' });
+      }
+
+      if (destinationFolderId) {
+        project.googleDriveDestinationFolderId = String(destinationFolderId).trim();
+      }
+      if (destinationFolderUrl) {
+        project.googleDriveDestinationFolderUrl = String(destinationFolderUrl).trim();
+      }
+
+      const cleanB64 = pdfBase64.replace(/^data:[^;]+;base64,/, '');
+      const pdfBuf = Buffer.from(cleanB64, 'base64');
+
+      const uploaded = await uploadPdfBufferToProjectDrive(
+        project,
+        token,
+        filename,
+        pdfBuf,
+        destinationFolderUrl || project.googleDriveDestinationFolderUrl || project.googleDriveFolderUrls?.[0]
+      );
+
+      project.googleDriveBackupFolderId = uploaded.backupFolderId;
+      project.googleDriveBackupFolderUrl = uploaded.backupFolderUrl;
+      if (!project.googleDriveDestinationFolderId) {
+        project.googleDriveDestinationFolderId = uploaded.backupFolderId;
+        project.googleDriveDestinationFolderUrl = uploaded.backupFolderUrl;
+      }
+      project.googleDriveSyncedAt = new Date().toISOString();
+      project.googleDriveSyncStatus = 'synced';
+      await saveProject(project);
+
+      res.json({
+        success: true,
+        backupFolderId: uploaded.backupFolderId,
+        backupFolderUrl: uploaded.backupFolderUrl,
+        filename: uploaded.filename,
+      });
+    } catch (err) {
+      if (err instanceof DriveAuthError) {
+        return res.status(err.status).json({ error: err.message });
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not save PDF to Google Drive.',
+      });
+    }
+  });
+
   // Create new project from New Project Form
   router.post('/projects', async (req, res) => {
     try {
@@ -259,6 +270,7 @@ export function createPipelineRouter(): Router {
         product,
         intake,
         initialPhotoDataUrls,
+        initialBrandGraphicsDataUrls,
         googleDriveFolderUrl,
         extractedStyleGuide,
         stagedGuidePdfs,
@@ -312,9 +324,32 @@ export function createPipelineRouter(): Router {
       }
 
       let savedLogoUrl: string | null = null;
+      const brandGraphics: ProductPhoto[] = [];
+      if (Array.isArray(initialBrandGraphicsDataUrls)) {
+        for (let i = 0; i < initialBrandGraphicsDataUrls.length; i++) {
+          const item = initialBrandGraphicsDataUrls[i];
+          if (item?.dataUrl && typeof item.dataUrl === 'string' && item.dataUrl.startsWith('data:image/')) {
+            const savedG = await saveDataUrlAsset(id, item.dataUrl, 'logo');
+            brandGraphics.push({
+              id: `logo-${Date.now()}-${i}`,
+              url: savedG.url,
+              caption: item.caption || `${client} brand graphic ${i + 1}`,
+            });
+          }
+        }
+      }
       if (typeof initialLogoDataUrl === 'string' && initialLogoDataUrl.startsWith('data:image/')) {
         const savedLogo = await saveDataUrlAsset(id, initialLogoDataUrl, 'logo');
         savedLogoUrl = savedLogo.url;
+        if (!brandGraphics.some((g) => g.url === savedLogo.url)) {
+          brandGraphics.unshift({
+            id: `logo-primary-${Date.now()}`,
+            url: savedLogo.url,
+            caption: `${client} Primary Logo`,
+          });
+        }
+      } else if (brandGraphics.length > 0) {
+        savedLogoUrl = brandGraphics[0].url;
       }
 
       const normalizedGuide: ExtractedStyleGuide | null =
@@ -389,6 +424,7 @@ export function createPipelineRouter(): Router {
           },
           brandLogoUrl: savedLogoUrl,
           brandLogoCaption: normalizedGuide?.brandLogoNotes || '',
+          brandGraphics,
           characters: [],
           productRules: normalizedGuide?.productVisualRules || '',
           bannedList: normalizedGuide?.bannedElements || [],
@@ -554,7 +590,7 @@ export function createPipelineRouter(): Router {
     }
   });
 
-  // STEP 2: Generate Brand Bible (Gemini 2.5 Pro with product photos)
+  // STEP 2: Generate Brand Bible (Gemini Direct or Gemini via Fal)
   router.post('/pipeline/brand-bible', async (req, res) => {
     try {
       const { projectId } = req.body;
@@ -563,31 +599,48 @@ export function createPipelineRouter(): Router {
         return res.status(404).json({ error: 'Project not found.' });
       }
 
-      const ai = getGeminiClient();
-      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> =
-        [];
+      const parts: LlmInlinePart[] = [];
 
-      for (const photo of project.product.photos) {
+      for (const photo of project.product.photos.slice(0, 4)) {
         const inline = await readAssetAsInlineData(project.id, photo.url);
         if (inline) {
-          parts.push({ inlineData: inline });
+          parts.push({ inlineData: inline, filename: photo.caption || 'product-photo' });
         }
       }
 
+      const seenBrandUrls = new Set<string>();
+      const brandLogoPool: Array<{ url: string; caption?: string }> = [];
       if (project.brandBible?.brandLogoUrl) {
-        const logoInline = await readAssetAsInlineData(project.id, project.brandBible.brandLogoUrl);
-        if (logoInline) {
-          parts.push({ text: '--- Attached Brand Logo Reference ---' });
-          parts.push({ inlineData: logoInline });
+        seenBrandUrls.add(project.brandBible.brandLogoUrl);
+        brandLogoPool.push({
+          url: project.brandBible.brandLogoUrl,
+          caption: project.brandBible.brandLogoCaption || 'Primary Brand Logo',
+        });
+      }
+      if (Array.isArray(project.brandBible?.brandGraphics)) {
+        for (const g of project.brandBible.brandGraphics) {
+          if (g.url && !seenBrandUrls.has(g.url)) {
+            seenBrandUrls.add(g.url);
+            brandLogoPool.push({ url: g.url, caption: g.caption });
+          }
         }
       }
 
-      if (Array.isArray(project.brandGuideDocuments)) {
-        for (const doc of project.brandGuideDocuments.slice(0, 4)) {
+      for (const graphic of brandLogoPool.slice(0, 3)) {
+        const logoInline = await readAssetAsInlineData(project.id, graphic.url);
+        if (logoInline) {
+          parts.push({ text: `--- Attached Brand Logo / Graphic: ${graphic.caption || 'Logo'} ---` });
+          parts.push({ inlineData: logoInline, filename: graphic.caption || 'brand-logo' });
+        }
+      }
+
+      // Only attach raw brand guide PDFs if extractedStyleGuide is absent (prevents huge payload timeouts on re-run)
+      if (!project.extractedStyleGuide && Array.isArray(project.brandGuideDocuments)) {
+        for (const doc of project.brandGuideDocuments.slice(0, 2)) {
           const docInline = await readAssetAsInlineData(project.id, doc.url);
-          if (docInline) {
+          if (docInline && Buffer.from(docInline.data, 'base64').length <= 8 * 1024 * 1024) {
             parts.push({ text: `--- Attached Client Brand / Style Guide PDF: ${doc.name} ---` });
-            parts.push({ inlineData: docInline });
+            parts.push({ inlineData: docInline, filename: doc.name });
           }
         }
       }
@@ -601,13 +654,14 @@ export function createPipelineRouter(): Router {
 - Lighting: ${project.extractedStyleGuide.lighting || 'N/A'}
 - Lens & Framing: ${project.extractedStyleGuide.lensAndFraming || 'N/A'}
 - Grade: ${project.extractedStyleGuide.grade || 'N/A'}
+- Visual Style Notes: ${project.extractedStyleGuide.visualStyleNotes || 'N/A'}
 - Product Visual Rules: ${project.extractedStyleGuide.productVisualRules || 'N/A'}
 - Brand Logo Usage Notes: ${project.extractedStyleGuide.brandLogoNotes || 'N/A'}
 - Banned Elements: ${project.extractedStyleGuide.bannedElements.join(', ') || 'None'}\n`
         : '';
 
       const prompt = `You are the brand strategist for 52Launch.
-From the client intake, attached brand/style guide PDFs, and real product photos produce a complete Brand Bible:
+From the client intake, attached brand/style guide PDFs or extracted data, and real product photos produce a complete Brand Bible:
 - positioning: one sharp sentence
 - audience: clear description of who this is for
 - toneOfVoice: 3-5 adjectives plus clear guidance
@@ -637,73 +691,94 @@ CLIENT & PRODUCT INTAKE:
         project.intake.shootLocationDatesBudgetNotes || 'Not specified'
       }
 - Attached Product Photos Count: ${project.product.photos.length}
+- Attached Brand Graphics Count: ${brandLogoPool.length}
 - Attached Style Guide PDFs Count: ${project.brandGuideDocuments?.length || 0}${guideBlock}`;
 
-      parts.push({ text: prompt });
-
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              positioning: { type: Type.STRING },
-              audience: { type: Type.STRING },
-              toneOfVoice: {
-                type: Type.OBJECT,
-                properties: {
-                  adjectives: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  guidance: { type: Type.STRING },
-                },
-                required: ['adjectives', 'guidance'],
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        positioning?: string;
+        audience?: string;
+        toneOfVoice?: { adjectives?: string[]; guidance?: string };
+        visualStyle?: {
+          palette?: string;
+          typography?: string;
+          lighting?: string;
+          lensAndFraming?: string;
+          grade?: string;
+        };
+        characters?: Array<{ name: string; fixedDescriptor: string }>;
+        productRules?: string;
+        bannedList?: string[];
+        claimsAllowed?: string[];
+        claimsToFlag?: string[];
+      }>({
+        prompt,
+        parts,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            positioning: { type: Type.STRING },
+            audience: { type: Type.STRING },
+            toneOfVoice: {
+              type: Type.OBJECT,
+              properties: {
+                adjectives: { type: Type.ARRAY, items: { type: Type.STRING } },
+                guidance: { type: Type.STRING },
               },
-              visualStyle: {
-                type: Type.OBJECT,
-                properties: {
-                  palette: { type: Type.STRING },
-                  typography: { type: Type.STRING },
-                  lighting: { type: Type.STRING },
-                  lensAndFraming: { type: Type.STRING },
-                  grade: { type: Type.STRING },
-                },
-                required: ['palette', 'typography', 'lighting', 'lensAndFraming', 'grade'],
-              },
-              characters: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                    fixedDescriptor: { type: Type.STRING },
-                  },
-                  required: ['name', 'fixedDescriptor'],
-                },
-              },
-              productRules: { type: Type.STRING },
-              bannedList: { type: Type.ARRAY, items: { type: Type.STRING } },
-              claimsAllowed: { type: Type.ARRAY, items: { type: Type.STRING } },
-              claimsToFlag: { type: Type.ARRAY, items: { type: Type.STRING } },
+              required: ['adjectives', 'guidance'],
             },
-            required: [
-              'positioning',
-              'audience',
-              'toneOfVoice',
-              'visualStyle',
-              'characters',
-              'productRules',
-              'bannedList',
-              'claimsAllowed',
-              'claimsToFlag',
-            ],
+            visualStyle: {
+              type: Type.OBJECT,
+              properties: {
+                palette: { type: Type.STRING },
+                typography: { type: Type.STRING },
+                lighting: { type: Type.STRING },
+                lensAndFraming: { type: Type.STRING },
+                grade: { type: Type.STRING },
+              },
+              required: ['palette', 'typography', 'lighting', 'lensAndFraming', 'grade'],
+            },
+            characters: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  fixedDescriptor: { type: Type.STRING },
+                },
+                required: ['name', 'fixedDescriptor'],
+              },
+            },
+            productRules: { type: Type.STRING },
+            bannedList: { type: Type.ARRAY, items: { type: Type.STRING } },
+            claimsAllowed: { type: Type.ARRAY, items: { type: Type.STRING } },
+            claimsToFlag: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
+          required: [
+            'positioning',
+            'audience',
+            'toneOfVoice',
+            'visualStyle',
+            'characters',
+            'productRules',
+            'bannedList',
+            'claimsAllowed',
+            'claimsToFlag',
+          ],
         },
-        })
-      );
+        jsonSchemaHint: `{
+  "positioning": "string",
+  "audience": "string",
+  "toneOfVoice": { "adjectives": ["string"], "guidance": "string" },
+  "visualStyle": { "palette": "string", "typography": "string", "lighting": "string", "lensAndFraming": "string", "grade": "string" },
+  "characters": [{ "name": "string", "fixedDescriptor": "string" }],
+  "productRules": "string",
+  "bannedList": ["string"],
+  "claimsAllowed": ["string"],
+  "claimsToFlag": ["string"]
+}`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = llmResult.data || {};
       const updatedBible = {
         positioning: parsed.positioning || '',
         audience: parsed.audience || '',
@@ -722,6 +797,9 @@ CLIENT & PRODUCT INTAKE:
         },
         brandLogoUrl: project.brandBible?.brandLogoUrl ?? null,
         brandLogoCaption: project.brandBible?.brandLogoCaption ?? '',
+        brandGraphics: Array.isArray(project.brandBible?.brandGraphics)
+          ? project.brandBible.brandGraphics
+          : [],
         characters: Array.isArray(parsed.characters)
           ? parsed.characters.map(
               (c: { name: string; fixedDescriptor: string }, idx: number) => ({
@@ -757,7 +835,7 @@ CLIENT & PRODUCT INTAKE:
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'Brand Bible',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Generated Brand Bible for ${project.product.name}`,
             seed: null,
             status: 'success',
@@ -770,7 +848,7 @@ CLIENT & PRODUCT INTAKE:
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(
+        error: formatLlmError(
           err,
           'Could not generate Brand Bible. Check your connection and try again.'
         ),
@@ -778,7 +856,7 @@ CLIENT & PRODUCT INTAKE:
     }
   });
 
-  // STEP 3: Generate Creative Brief (Gemini 2.5 Pro)
+  // STEP 3: Generate Creative Brief (Gemini Direct or Gemini via Fal)
   router.post('/pipeline/creative-brief', async (req, res) => {
     try {
       const { projectId } = req.body;
@@ -786,8 +864,6 @@ CLIENT & PRODUCT INTAKE:
       if (!project) {
         return res.status(404).json({ error: 'Project not found.' });
       }
-
-      const ai = getGeminiClient();
 
       const prompt = `You are the Creative Director at 52Launch.
 Write a Creative Brief for "${project.product.name}" (Client: ${project.client}):
@@ -820,65 +896,76 @@ APPROVED BRAND BIBLE:
           : ''
       }`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              objective: { type: Type.STRING },
-              keyMessage: { type: Type.STRING },
-              concepts: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING },
-                    logline: { type: Type.STRING },
-                    whyItWorks: { type: Type.STRING },
-                    risks: { type: Type.STRING },
-                  },
-                  required: ['title', 'logline', 'whyItWorks', 'risks'],
-                },
-              },
-              recommendedConcept: {
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        objective?: string;
+        keyMessage?: string;
+        concepts?: Array<{ title: string; logline: string; whyItWorks: string; risks: string }>;
+        recommendedConcept?: { title: string; reason: string };
+        deliverables?: string[];
+        voDirection?: { pace: string; emotionalArc: string; speaker: string };
+        claimsCheck?: string;
+      }>({
+        prompt,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            objective: { type: Type.STRING },
+            keyMessage: { type: Type.STRING },
+            concepts: {
+              type: Type.ARRAY,
+              items: {
                 type: Type.OBJECT,
                 properties: {
                   title: { type: Type.STRING },
-                  reason: { type: Type.STRING },
+                  logline: { type: Type.STRING },
+                  whyItWorks: { type: Type.STRING },
+                  risks: { type: Type.STRING },
                 },
-                required: ['title', 'reason'],
+                required: ['title', 'logline', 'whyItWorks', 'risks'],
               },
-              deliverables: { type: Type.ARRAY, items: { type: Type.STRING } },
-              voDirection: {
-                type: Type.OBJECT,
-                properties: {
-                  pace: { type: Type.STRING },
-                  emotionalArc: { type: Type.STRING },
-                  speaker: { type: Type.STRING },
-                },
-                required: ['pace', 'emotionalArc', 'speaker'],
-              },
-              claimsCheck: { type: Type.STRING },
             },
-            required: [
-              'objective',
-              'keyMessage',
-              'concepts',
-              'recommendedConcept',
-              'deliverables',
-              'voDirection',
-              'claimsCheck',
-            ],
+            recommendedConcept: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                reason: { type: Type.STRING },
+              },
+              required: ['title', 'reason'],
+            },
+            deliverables: { type: Type.ARRAY, items: { type: Type.STRING } },
+            voDirection: {
+              type: Type.OBJECT,
+              properties: {
+                pace: { type: Type.STRING },
+                emotionalArc: { type: Type.STRING },
+                speaker: { type: Type.STRING },
+              },
+              required: ['pace', 'emotionalArc', 'speaker'],
+            },
+            claimsCheck: { type: Type.STRING },
           },
+          required: [
+            'objective',
+            'keyMessage',
+            'concepts',
+            'recommendedConcept',
+            'deliverables',
+            'voDirection',
+            'claimsCheck',
+          ],
         },
-        })
-      );
+        jsonSchemaHint: `{
+  "objective": "string",
+  "keyMessage": "string",
+  "concepts": [{ "title": "string", "logline": "string", "whyItWorks": "string", "risks": "string" }],
+  "recommendedConcept": { "title": "string", "reason": "string" },
+  "deliverables": ["string"],
+  "voDirection": { "pace": "string", "emotionalArc": "string", "speaker": "string" },
+  "claimsCheck": "string"
+}`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = llmResult.data || {};
       const nextBrief = {
         objective: parsed.objective || '',
         keyMessage: parsed.keyMessage || '',
@@ -928,7 +1015,7 @@ APPROVED BRAND BIBLE:
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'Creative Brief',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Generated Creative Brief for ${project.product.name}`,
             seed: null,
             status: 'success',
@@ -941,12 +1028,12 @@ APPROVED BRAND BIBLE:
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate Creative Brief.'),
+        error: formatLlmError(err, 'Could not generate Creative Brief.'),
       });
     }
   });
 
-  // STEP 4: Generate Shot List (Gemini 2.5 Pro)
+  // STEP 4: Generate Shot List (Gemini Direct or Gemini via Fal)
   router.post('/pipeline/shot-list', async (req, res) => {
     try {
       const { projectId } = req.body;
@@ -954,8 +1041,6 @@ APPROVED BRAND BIBLE:
       if (!project) {
         return res.status(404).json({ error: 'Project not found.' });
       }
-
-      const ai = getGeminiClient();
 
       const prompt = `You are the Director & Line Producer at 52Launch.
 Generate a complete, ordered Shot List covering the whole spot, mixing AI and live shots together.
@@ -1006,51 +1091,46 @@ APPROVED CREATIVE BRIEF:
 - Deliverables: ${project.creativeBrief.deliverables.join(', ')}
 - VO Direction: ${JSON.stringify(project.creativeBrief.voDirection)}`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                deliverable: { type: Type.STRING },
-                durationSec: { type: Type.NUMBER },
-                scene: { type: Type.STRING },
-                route: { type: Type.STRING },
-                model: { type: Type.STRING },
-                productInFrame: { type: Type.BOOLEAN },
-                framePrompt: { type: Type.STRING },
-                shootDirection: { type: Type.STRING },
-                voLine: { type: Type.STRING },
-                continuityNotes: { type: Type.STRING },
-                chainFrom: { type: Type.STRING },
-              },
-              required: [
-                'id',
-                'deliverable',
-                'durationSec',
-                'scene',
-                'route',
-                'model',
-                'productInFrame',
-                'framePrompt',
-                'shootDirection',
-                'voLine',
-                'continuityNotes',
-                'chainFrom',
-              ],
+      const llmResult = await generateJsonWithGeminiOrFal<Array<Partial<PipelineShot>>>({
+        prompt,
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              id: { type: Type.STRING },
+              deliverable: { type: Type.STRING },
+              durationSec: { type: Type.NUMBER },
+              scene: { type: Type.STRING },
+              route: { type: Type.STRING },
+              model: { type: Type.STRING },
+              productInFrame: { type: Type.BOOLEAN },
+              framePrompt: { type: Type.STRING },
+              shootDirection: { type: Type.STRING },
+              voLine: { type: Type.STRING },
+              continuityNotes: { type: Type.STRING },
+              chainFrom: { type: Type.STRING },
             },
+            required: [
+              'id',
+              'deliverable',
+              'durationSec',
+              'scene',
+              'route',
+              'model',
+              'productInFrame',
+              'framePrompt',
+              'shootDirection',
+              'voLine',
+              'continuityNotes',
+              'chainFrom',
+            ],
           },
         },
-        })
-      );
+        jsonSchemaHint: `[{ "id": "S01", "deliverable": "string", "durationSec": 5, "scene": "string", "route": "ai_video|live|hybrid", "model": "flux3|seedance|veo|omni|none", "productInFrame": true, "framePrompt": "string", "shootDirection": "string", "voLine": "string", "continuityNotes": "string", "chainFrom": "none" }]`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '[]').trim());
+      const parsed = llmResult.data;
       const shots: PipelineShot[] = (Array.isArray(parsed) ? parsed : []).map(
         (s: Partial<PipelineShot>, idx: number) => {
           const route =
@@ -1109,7 +1189,7 @@ APPROVED CREATIVE BRIEF:
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'Shot List',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Generated ${shots.length} ordered AI/hybrid/live shots`,
             seed: null,
             status: 'success',
@@ -1122,12 +1202,12 @@ APPROVED CREATIVE BRIEF:
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate Shot List.'),
+        error: formatLlmError(err, 'Could not generate Shot List.'),
       });
     }
   });
 
-  // STEP 6: Gemini Vision Frame Check (0-5 scoring + Product Fidelity)
+  // STEP 6: Vision Frame Check (0-5 scoring + Product Fidelity)
   router.post('/pipeline/frame-check', async (req, res) => {
     try {
       const { projectId, shotId } = req.body;
@@ -1153,21 +1233,19 @@ APPROVED CREATIVE BRIEF:
         });
       }
 
-      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> =
-        [{ inlineData: frameInline }];
+      const parts: LlmInlinePart[] = [{ inlineData: frameInline, filename: `${shot.id}-frame` }];
 
       let productPhotoCount = 0;
       if (shot.productInFrame) {
-        for (const photo of project.product.photos) {
+        for (const photo of project.product.photos.slice(0, 4)) {
           const prodInline = await readAssetAsInlineData(project.id, photo.url);
           if (prodInline) {
-            parts.push({ inlineData: prodInline });
+            parts.push({ inlineData: prodInline, filename: photo.caption || 'product-photo' });
             productPhotoCount++;
           }
         }
       }
 
-      const ai = getGeminiClient();
       const prompt = `You are a strict QC reviewer for 52Launch.
 The FIRST attached image is the uploaded storyboard frame for shot ${shot.id}.
 ${
@@ -1209,42 +1287,54 @@ BRAND BIBLE:
 - Product Rules: ${project.brandBible.productRules}
 - Banned List: ${project.brandBible.bannedList.join(', ')}`;
 
-      parts.push({ text: prompt });
-
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              characterMatch: { type: Type.INTEGER },
-              styleMatch: { type: Type.INTEGER },
-              compositionMatch: { type: Type.INTEGER },
-              artifacts: { type: Type.INTEGER },
-              productFidelity: { type: Type.INTEGER },
-              problems: { type: Type.ARRAY, items: { type: Type.STRING } },
-              productDifferences: { type: Type.ARRAY, items: { type: Type.STRING } },
-              improvedFramePrompt: { type: Type.STRING },
-            },
-            required: [
-              'characterMatch',
-              'styleMatch',
-              'compositionMatch',
-              'artifacts',
-              'productFidelity',
-              'problems',
-              'productDifferences',
-              'improvedFramePrompt',
-            ],
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        characterMatch?: number;
+        styleMatch?: number;
+        compositionMatch?: number;
+        artifacts?: number;
+        productFidelity?: number;
+        problems?: string[];
+        productDifferences?: string[];
+        improvedFramePrompt?: string;
+      }>({
+        prompt,
+        parts,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            characterMatch: { type: Type.INTEGER },
+            styleMatch: { type: Type.INTEGER },
+            compositionMatch: { type: Type.INTEGER },
+            artifacts: { type: Type.INTEGER },
+            productFidelity: { type: Type.INTEGER },
+            problems: { type: Type.ARRAY, items: { type: Type.STRING } },
+            productDifferences: { type: Type.ARRAY, items: { type: Type.STRING } },
+            improvedFramePrompt: { type: Type.STRING },
           },
+          required: [
+            'characterMatch',
+            'styleMatch',
+            'compositionMatch',
+            'artifacts',
+            'productFidelity',
+            'problems',
+            'productDifferences',
+            'improvedFramePrompt',
+          ],
         },
-        })
-      );
+        jsonSchemaHint: `{
+  "characterMatch": 4,
+  "styleMatch": 4,
+  "compositionMatch": 4,
+  "artifacts": 5,
+  "productFidelity": 4,
+  "problems": ["string"],
+  "productDifferences": ["string"],
+  "improvedFramePrompt": "string"
+}`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = llmResult.data || {};
       const clampScore = (val: unknown) =>
         Math.max(0, Math.min(5, Math.round(Number(val) || 0)));
 
@@ -1297,7 +1387,7 @@ BRAND BIBLE:
             timestamp: new Date().toISOString(),
             step: 'Frame Suggestions',
             shotId: shot.id,
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Advisory review on ${shot.id}`,
             seed: null,
             status: 'success',
@@ -1310,7 +1400,7 @@ BRAND BIBLE:
       res.json({ project: saved, frameCheck });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(
+        error: formatLlmError(
           err,
           'Frame Check could not complete. Please try again.'
         ),
@@ -1318,7 +1408,7 @@ BRAND BIBLE:
     }
   });
 
-  // STEP 7A: Generate Video Prompts & Negative Prompts (Fast batched ThinkingLevel.LOW)
+  // STEP 7A: Generate Video Prompts & Negative Prompts (Fast batched Gemini/Fal)
   router.post('/pipeline/video-prompts', async (req, res) => {
     try {
       const { projectId, shotId } = req.body;
@@ -1336,23 +1426,19 @@ BRAND BIBLE:
           .json({ error: 'No AI or hybrid shots found to write video prompts for.' });
       }
 
-      const ai = getGeminiClient();
       const updatedMap = new Map<
         string,
         { videoPrompt: string; negativePrompt: string }
       >();
+      let lastModelUsed = 'gemini-2.5-flash';
 
-      const buildSingleShotParts = async (shot: PipelineShot) => {
-        const parts: Array<{
-          inlineData?: { data: string; mimeType: string };
-          text?: string;
-        }> = [];
+      const buildSingleShotSpec = async (shot: PipelineShot) => {
+        const parts: LlmInlinePart[] = [];
         if (shot.frameImageUrl) {
           const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
-          if (inline) parts.push({ inlineData: inline });
+          if (inline) parts.push({ inlineData: inline, filename: `${shot.id}-start-frame` });
         }
-        parts.push({
-          text: `You are a Commercial Video Prompt Director for 52Launch.
+        const prompt = `You are a Commercial Video Prompt Director for 52Launch.
 Write the video prompt and negative prompt for shot ${shot.id} using the attached start frame (if present).
 
 MODEL TARGET: ${shot.model === 'flux3' ? 'Flux 3' : shot.model === 'veo' ? 'Google Veo 3.1' : shot.model === 'omni' ? 'Google Gemini Omni Flash' : shot.model}
@@ -1365,60 +1451,53 @@ BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
 STRICT RULES:
 1. Describe MOTION, CAMERA, and TIMING only. Keep it concise — add ONE clean line preserving the start frame's framing, wardrobe, and lighting.
 2. ${
-            shot.model === 'flux3' || shot.model === 'veo' || shot.model === 'omni'
-              ? `${shot.model === 'veo' ? 'Google Veo 3.1' : shot.model === 'omni' ? 'Google Gemini Omni Flash' : 'Flux 3'} generates native audio: describe realistic ambient sound matching the scene${
-                  shot.voLine
-                    ? ', and explicitly state "no dialogue" because voiceover is recorded separately.'
-                    : '.'
-                }`
-              : 'Keep it concise — one clean camera move and one clear subject action.'
-          }
+          shot.model === 'flux3' || shot.model === 'veo' || shot.model === 'omni'
+            ? `${shot.model === 'veo' ? 'Google Veo 3.1' : shot.model === 'omni' ? 'Google Gemini Omni Flash' : 'Flux 3'} generates native audio: describe realistic ambient sound matching the scene${
+                shot.voLine
+                  ? ', and explicitly state "no dialogue" because voiceover is recorded separately.'
+                  : '.'
+              }`
+            : 'Keep it concise — one clean camera move and one clear subject action.'
+        }
 3. One action per shot. Never add characters, props, or claims not already in the shot.
-4. For negativePrompt: list common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS every item from the Brand Bible banned list.`,
-        });
-        return parts;
+4. For negativePrompt: list common video artifacts (warping, extra limbs, text glitches, logo distortion, flickering, morphing faces) PLUS every item from the Brand Bible banned list.`;
+        return { parts, prompt };
       };
 
       if (targetShots.length === 1) {
         const shot = targetShots[0];
-        const parts = await buildSingleShotParts(shot);
-        const response = await withGeminiRetry(() =>
-          ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: { parts },
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  videoPrompt: { type: Type.STRING },
-                  negativePrompt: { type: Type.STRING },
-                },
-                required: ['videoPrompt', 'negativePrompt'],
-              },
+        const { parts, prompt } = await buildSingleShotSpec(shot);
+        const llmResult = await generateJsonWithGeminiOrFal<{
+          videoPrompt?: string;
+          negativePrompt?: string;
+        }>({
+          prompt,
+          parts,
+          thinkingLow: true,
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              videoPrompt: { type: Type.STRING },
+              negativePrompt: { type: Type.STRING },
             },
-          })
-        );
-        const parsed = JSON.parse((response.text ?? '{}').trim());
+            required: ['videoPrompt', 'negativePrompt'],
+          },
+          jsonSchemaHint: `{ "videoPrompt": "string", "negativePrompt": "string" }`,
+        });
+        lastModelUsed = llmResult.modelUsed;
         updatedMap.set(shot.id, {
-          videoPrompt: parsed.videoPrompt || '',
-          negativePrompt: parsed.negativePrompt || '',
+          videoPrompt: llmResult.data?.videoPrompt || '',
+          negativePrompt: llmResult.data?.negativePrompt || '',
         });
       } else {
-        // Batched single-request generation across all AI/hybrid shots for ~5x speedup and fewer quota calls
-        const batchParts: Array<{
-          inlineData?: { data: string; mimeType: string };
-          text?: string;
-        }> = [];
-
+        const batchParts: LlmInlinePart[] = [];
         const shotSpecs: string[] = [];
         for (const shot of targetShots) {
-          if (shot.frameImageUrl) {
+          if (shot.frameImageUrl && batchParts.length < 10) {
             const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
             if (inline) {
               batchParts.push({ text: `Reference start frame for shot ${shot.id}:` });
-              batchParts.push({ inlineData: inline });
+              batchParts.push({ inlineData: inline, filename: `${shot.id}-start-frame` });
             }
           }
           shotSpecs.push(
@@ -1426,8 +1505,7 @@ STRICT RULES:
           );
         }
 
-        batchParts.push({
-          text: `You are a Commercial Video Prompt Director for 52Launch.
+        const batchPrompt = `You are a Commercial Video Prompt Director for 52Launch.
 Write concise video prompts and negative prompts for ALL ${targetShots.length} shots below in a single JSON array.
 
 BRAND BIBLE BANNED LIST: ${project.brandBible.bannedList.join(', ') || 'None'}
@@ -1439,35 +1517,32 @@ STRICT RULES FOR EVERY SHOT:
 4. Return the exact "shotId" for every shot listed.
 
 SHOTS TO WRITE:
-${shotSpecs.join('\n')}`,
-        });
+${shotSpecs.join('\n')}`;
 
-        const batchResponse = await withGeminiRetry(() =>
-          ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: { parts: batchParts },
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    shotId: { type: Type.STRING },
-                    videoPrompt: { type: Type.STRING },
-                    negativePrompt: { type: Type.STRING },
-                  },
-                  required: ['shotId', 'videoPrompt', 'negativePrompt'],
-                },
+        const batchResult = await generateJsonWithGeminiOrFal<
+          Array<{ shotId?: string; videoPrompt?: string; negativePrompt?: string }>
+        >({
+          prompt: batchPrompt,
+          parts: batchParts,
+          thinkingLow: true,
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                shotId: { type: Type.STRING },
+                videoPrompt: { type: Type.STRING },
+                negativePrompt: { type: Type.STRING },
               },
+              required: ['shotId', 'videoPrompt', 'negativePrompt'],
             },
-          })
-        );
+          },
+          jsonSchemaHint: `[{ "shotId": "S01", "videoPrompt": "string", "negativePrompt": "string" }]`,
+        });
+        lastModelUsed = batchResult.modelUsed;
 
-        const parsedList = JSON.parse((batchResponse.text ?? '[]').trim());
-        if (Array.isArray(parsedList)) {
-          for (const item of parsedList) {
+        if (Array.isArray(batchResult.data)) {
+          for (const item of batchResult.data) {
             const sid = String(item?.shotId || '').trim();
             if (sid) {
               updatedMap.set(sid, {
@@ -1478,32 +1553,30 @@ ${shotSpecs.join('\n')}`,
           }
         }
 
-        // Fill any shot missing from batch response individually
         const missingShots = targetShots.filter((s) => !updatedMap.has(s.id));
         for (const shot of missingShots) {
-          const parts = await buildSingleShotParts(shot);
-          const singleRes = await withGeminiRetry(() =>
-            ai.models.generateContent({
-              model: GEMINI_MODEL,
-              contents: { parts },
-              config: {
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    videoPrompt: { type: Type.STRING },
-                    negativePrompt: { type: Type.STRING },
-                  },
-                  required: ['videoPrompt', 'negativePrompt'],
-                },
+          const { parts, prompt } = await buildSingleShotSpec(shot);
+          const singleRes = await generateJsonWithGeminiOrFal<{
+            videoPrompt?: string;
+            negativePrompt?: string;
+          }>({
+            prompt,
+            parts,
+            thinkingLow: true,
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                videoPrompt: { type: Type.STRING },
+                negativePrompt: { type: Type.STRING },
               },
-            })
-          );
-          const p = JSON.parse((singleRes.text ?? '{}').trim());
+              required: ['videoPrompt', 'negativePrompt'],
+            },
+            jsonSchemaHint: `{ "videoPrompt": "string", "negativePrompt": "string" }`,
+          });
+          lastModelUsed = singleRes.modelUsed;
           updatedMap.set(shot.id, {
-            videoPrompt: p.videoPrompt || '',
-            negativePrompt: p.negativePrompt || '',
+            videoPrompt: singleRes.data?.videoPrompt || '',
+            negativePrompt: singleRes.data?.negativePrompt || '',
           });
         }
       }
@@ -1534,7 +1607,7 @@ ${shotSpecs.join('\n')}`,
             timestamp: new Date().toISOString(),
             step: 'Video Prompts',
             shotId: shotId || undefined,
-            model: GEMINI_MODEL,
+            model: lastModelUsed,
             prompt: `Generated video prompts for ${targetShots.length} AI/hybrid shot(s)`,
             seed: null,
             status: 'success',
@@ -1547,16 +1620,16 @@ ${shotSpecs.join('\n')}`,
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate video prompts.'),
+        error: formatLlmError(err, 'Could not generate video prompts.'),
       });
     }
   });
 
   // Check whether FAL_KEY is configured on server (never sends key to browser)
   router.get('/pipeline/fal-status', (_req, res) => {
-    const key = process.env.FAL_KEY;
+    const key = process.env.FAL_KEY?.trim();
     res.json({
-      falKeyConfigured: Boolean(key && key.trim() && key !== 'MY_FAL_KEY'),
+      falKeyConfigured: Boolean(key),
     });
   });
 
@@ -1578,8 +1651,8 @@ ${shotSpecs.join('\n')}`,
       );
 
       let falUrl: string | null = null;
-      const falKey = process.env.FAL_KEY;
-      if (falKey && falKey !== 'MY_FAL_KEY') {
+      const falKey = process.env.FAL_KEY?.trim();
+      if (falKey) {
         try {
           fal.config({ credentials: falKey });
           falUrl = await uploadMediaRefToFal(projectId, saved.url);
@@ -1664,11 +1737,10 @@ ${shotSpecs.join('\n')}`,
       return res.status(400).json({ error: 'Enter a video prompt before generating.' });
     }
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
       return res.status(400).json({
-        error:
-          'Add FAL_KEY in Settings > Secrets to run live video generation directly here.',
+        error: 'Add FAL_KEY to the server environment variables.',
       });
     }
 
@@ -1877,9 +1949,9 @@ ${shotSpecs.join('\n')}`,
     const shot = project.shots.find((s) => s.id === shotId);
     if (!shot) return res.status(404).json({ error: `Shot ${shotId} not found.` });
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
-      return res.status(400).json({ error: 'Add FAL_KEY in Settings > Secrets first.' });
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
+      return res.status(400).json({ error: 'Add FAL_KEY to the server environment variables.' });
     }
     if (!draftCacheUrl) {
       return res.status(400).json({ error: 'No FLUX 3 draft cache available for this clip.' });
@@ -1970,9 +2042,9 @@ ${shotSpecs.join('\n')}`,
       return res.status(404).json({ error: `Shot ${shotId} not found.` });
     }
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
-      return res.status(400).json({ error: 'Add FAL_KEY in Settings > Secrets first.' });
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
+      return res.status(400).json({ error: 'Add FAL_KEY to the server environment variables.' });
     }
 
     const sourceRef = videoUrl || shot?.videoUrl;
@@ -2138,11 +2210,10 @@ ${shotSpecs.join('\n')}`,
       });
     }
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
       return res.status(400).json({
-        error:
-          'Add FAL_KEY in Settings > Secrets to generate videos directly here, or click "Generate AI video" on a card to preview/copy inside the 52Video Studio popup.',
+        error: 'Add FAL_KEY to the server environment variables.',
       });
     }
 
@@ -2276,7 +2347,7 @@ ${shotSpecs.join('\n')}`,
     }
   });
 
-  // STEP 8A: Generate VO Script (Gemini 4 Hydrogen)
+  // STEP 8A: Generate VO Script (Gemini Direct or Gemini via Fal)
   router.post('/pipeline/vo-script', async (req, res) => {
     try {
       const { projectId } = req.body as { projectId: string };
@@ -2285,7 +2356,6 @@ ${shotSpecs.join('\n')}`,
         return res.status(404).json({ error: 'Project not found.' });
       }
 
-      const ai = getGeminiClient();
       const shotsContext = project.shots
         .map((s) => {
           const targetWords = Math.max(3, Math.round((Number(s.durationSec) || 4) * 2.5));
@@ -2320,44 +2390,39 @@ CREATIVE BRIEF VO DIRECTION:
 ORDERED SHOTS:
 ${shotsContext}`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  shotId: { type: Type.STRING },
-                  speaker: { type: Type.STRING },
-                  direction: { type: Type.STRING },
-                  line: { type: Type.STRING },
-                  audioTags: { type: Type.STRING },
-                  emotionalTone: { type: Type.STRING },
-                  emotionIntensity: { type: Type.NUMBER },
-                  pauseAfter: { type: Type.NUMBER },
-                },
-                required: [
-                  'shotId',
-                  'speaker',
-                  'direction',
-                  'line',
-                  'audioTags',
-                  'emotionalTone',
-                  'emotionIntensity',
-                  'pauseAfter',
-                ],
-              },
+      const llmResult = await generateJsonWithGeminiOrFal<Array<Partial<VoScriptLine>>>({
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              shotId: { type: Type.STRING },
+              speaker: { type: Type.STRING },
+              direction: { type: Type.STRING },
+              line: { type: Type.STRING },
+              audioTags: { type: Type.STRING },
+              emotionalTone: { type: Type.STRING },
+              emotionIntensity: { type: Type.NUMBER },
+              pauseAfter: { type: Type.NUMBER },
             },
+            required: [
+              'shotId',
+              'speaker',
+              'direction',
+              'line',
+              'audioTags',
+              'emotionalTone',
+              'emotionIntensity',
+              'pauseAfter',
+            ],
           },
-        })
-      );
+        },
+        jsonSchemaHint: `[{ "shotId": "S01", "speaker": "string", "direction": "string", "line": "string", "audioTags": "string", "emotionalTone": "Warm & Friendly", "emotionIntensity": 0.8, "pauseAfter": 0.35 }]`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '[]').trim());
+      const parsed = llmResult.data;
       const shotDurationMap = new Map(
         project.shots.map((s) => [s.id, Number(s.durationSec) || 4])
       );
@@ -2415,7 +2480,7 @@ ${shotsContext}`;
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'VO Script',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Wrote ${voScript.length} timed VO lines for ${project.product.name}`,
             seed: null,
             status: 'success',
@@ -2428,7 +2493,7 @@ ${shotsContext}`;
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate VO script.'),
+        error: formatLlmError(err, 'Could not generate VO script.'),
       });
     }
   });
@@ -2478,9 +2543,9 @@ ${shotsContext}`;
       });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(
+        error: formatLlmError(
           err,
-          'Could not audition Gemini voice. Check GEMINI_API_KEY in Settings > Secrets.'
+          'Could not audition Gemini voice. Verify GEMINI_API_KEY in the server environment variables.'
         ),
       });
     }
@@ -2645,7 +2710,7 @@ ${shotsContext}`;
       });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate Gemini voiceover audio.'),
+        error: formatLlmError(err, 'Could not generate Gemini voiceover audio.'),
       });
     }
   });
@@ -2666,7 +2731,6 @@ ${shotsContext}`;
         return res.status(400).json({ error: 'Write or add VO lines before translating.' });
       }
 
-      const ai = getGeminiClient();
       const langLabel = targetLanguageName || targetLanguage;
       const linesInput = project.voScript.map((v) => ({
         id: v.id,
@@ -2685,36 +2749,28 @@ Also translate "direction" and "speaker" naturally into ${langLabel}, and return
 LINES TO TRANSLATE:
 ${JSON.stringify(linesInput)}`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  speaker: { type: Type.STRING },
-                  direction: { type: Type.STRING },
-                  line: { type: Type.STRING },
-                },
-                required: ['id', 'speaker', 'direction', 'line'],
-              },
+      const llmResult = await generateJsonWithGeminiOrFal<
+        Array<{ id: string; speaker: string; direction: string; line: string }>
+      >({
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              id: { type: Type.STRING },
+              speaker: { type: Type.STRING },
+              direction: { type: Type.STRING },
+              line: { type: Type.STRING },
             },
+            required: ['id', 'speaker', 'direction', 'line'],
           },
-        })
-      );
+        },
+        jsonSchemaHint: `[{ "id": "string", "speaker": "string", "direction": "string", "line": "string" }]`,
+      });
 
-      const translated = JSON.parse((response.text ?? '[]').trim()) as Array<{
-        id: string;
-        speaker: string;
-        direction: string;
-        line: string;
-      }>;
+      const translated = Array.isArray(llmResult.data) ? llmResult.data : [];
       const translatedMap = new Map(translated.map((t) => [t.id, t]));
 
       const nextLines = project.voScript.map((v) => {
@@ -2760,7 +2816,7 @@ ${JSON.stringify(linesInput)}`;
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'VO Translation',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Translated ${nextLines.length} VO lines into ${langLabel}`,
             seed: null,
             status: 'success',
@@ -2773,12 +2829,12 @@ ${JSON.stringify(linesInput)}`;
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not translate VO script.'),
+        error: formatLlmError(err, 'Could not translate VO script.'),
       });
     }
   });
 
-  // STEP 9: Generate Live & Hybrid Shoot Plan (Gemini 4 Hydrogen)
+  // STEP 9: Generate Live & Hybrid Shoot Plan (Gemini Direct or Gemini via Fal)
   router.post('/pipeline/shoot-plan', async (req, res) => {
     try {
       const { projectId } = req.body as { projectId: string };
@@ -2810,7 +2866,6 @@ ${JSON.stringify(linesInput)}`;
         return res.json({ project: saved });
       }
 
-      const ai = getGeminiClient();
       const shotsText = liveHybridShots
         .map(
           (s) =>
@@ -2848,144 +2903,151 @@ PROJECT & INTAKE NOTES:
 LIVE & HYBRID SHOTS TO SCHEDULE (${liveHybridShots.length} total):
 ${shotsText}`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              shootDays: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    dayLabel: { type: Type.STRING },
-                    location: { type: Type.STRING },
-                    callTime: { type: Type.STRING },
-                    breakfastTime: { type: Type.STRING },
-                    lunchTime: { type: Type.STRING },
-                    wrapTime: { type: Type.STRING },
-                    scheduleBreakdown: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          timeSlot: { type: Type.STRING },
-                          activity: { type: Type.STRING },
-                          category: {
-                            type: Type.STRING,
-                            description: 'call, setup, meal, move, wrap, or general',
-                          },
-                          shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                          notes: { type: Type.STRING },
-                          estimatedMinutes: { type: Type.INTEGER },
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        shootDays?: Array<{
+          dayLabel?: string;
+          location?: string;
+          callTime?: string;
+          breakfastTime?: string;
+          lunchTime?: string;
+          wrapTime?: string;
+          scheduleBreakdown?: Array<{
+            timeSlot?: string;
+            activity?: string;
+            category?: string;
+            shotIds?: string[];
+            notes?: string;
+            estimatedMinutes?: number;
+          }>;
+          setups?: Array<{
+            setupName?: string;
+            timeSlot?: string;
+            lightingNotes?: string;
+            shotIds?: string[];
+            estimatedMinutes?: number;
+          }>;
+        }>;
+        equipment?: string[];
+        propsAndUnits?: Array<{ item?: string; quantity?: string; suppliedBy?: string }>;
+        crew?: string[];
+        risks?: string[];
+        clientQuestions?: string[];
+      }>({
+        prompt,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            shootDays: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  dayLabel: { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  callTime: { type: Type.STRING },
+                  breakfastTime: { type: Type.STRING },
+                  lunchTime: { type: Type.STRING },
+                  wrapTime: { type: Type.STRING },
+                  scheduleBreakdown: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        timeSlot: { type: Type.STRING },
+                        activity: { type: Type.STRING },
+                        category: {
+                          type: Type.STRING,
+                          description: 'call, setup, meal, move, wrap, or general',
                         },
-                        required: ['timeSlot', 'activity', 'category', 'notes'],
+                        shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        notes: { type: Type.STRING },
+                        estimatedMinutes: { type: Type.INTEGER },
                       },
-                    },
-                    setups: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          setupName: { type: Type.STRING },
-                          timeSlot: { type: Type.STRING },
-                          lightingNotes: { type: Type.STRING },
-                          shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                          estimatedMinutes: { type: Type.INTEGER },
-                        },
-                        required: ['setupName', 'lightingNotes', 'shotIds', 'estimatedMinutes'],
-                      },
+                      required: ['timeSlot', 'activity', 'category', 'notes'],
                     },
                   },
-                  required: ['dayLabel', 'location', 'callTime', 'wrapTime', 'setups'],
-                },
-              },
-              equipment: { type: Type.ARRAY, items: { type: Type.STRING } },
-              propsAndUnits: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    item: { type: Type.STRING },
-                    quantity: { type: Type.STRING },
-                    suppliedBy: { type: Type.STRING },
+                  setups: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        setupName: { type: Type.STRING },
+                        timeSlot: { type: Type.STRING },
+                        lightingNotes: { type: Type.STRING },
+                        shotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        estimatedMinutes: { type: Type.INTEGER },
+                      },
+                      required: ['setupName', 'lightingNotes', 'shotIds', 'estimatedMinutes'],
+                    },
                   },
-                  required: ['item', 'quantity', 'suppliedBy'],
                 },
+                required: ['dayLabel', 'location', 'callTime', 'wrapTime', 'setups'],
               },
-              crew: { type: Type.ARRAY, items: { type: Type.STRING } },
-              risks: { type: Type.ARRAY, items: { type: Type.STRING } },
-              clientQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
             },
-            required: [
-              'shootDays',
-              'equipment',
-              'propsAndUnits',
-              'crew',
-              'risks',
-              'clientQuestions',
-            ],
+            equipment: { type: Type.ARRAY, items: { type: Type.STRING } },
+            propsAndUnits: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  item: { type: Type.STRING },
+                  quantity: { type: Type.STRING },
+                  suppliedBy: { type: Type.STRING },
+                },
+                required: ['item', 'quantity', 'suppliedBy'],
+              },
+            },
+            crew: { type: Type.ARRAY, items: { type: Type.STRING } },
+            risks: { type: Type.ARRAY, items: { type: Type.STRING } },
+            clientQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
+          required: [
+            'shootDays',
+            'equipment',
+            'propsAndUnits',
+            'crew',
+            'risks',
+            'clientQuestions',
+          ],
         },
-        })
-      );
+        jsonSchemaHint: `{
+  "shootDays": [{ "dayLabel": "Shoot Day 1", "location": "string", "callTime": "07:00 AM", "breakfastTime": "07:30 AM", "lunchTime": "12:30 PM - 01:30 PM", "wrapTime": "06:30 PM", "scheduleBreakdown": [{ "timeSlot": "string", "activity": "string", "category": "call|setup|meal|move|wrap|general", "shotIds": ["S01"], "notes": "string", "estimatedMinutes": 45 }], "setups": [{ "setupName": "string", "timeSlot": "string", "lightingNotes": "string", "shotIds": ["S01"], "estimatedMinutes": 60 }] }],
+  "equipment": ["string"],
+  "propsAndUnits": [{ "item": "string", "quantity": "string", "suppliedBy": "string" }],
+  "crew": ["string"],
+  "risks": ["string"],
+  "clientQuestions": ["string"]
+}`,
+      });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = llmResult.data || {};
       const shootPlan: ShootPlan = {
         shootDays: Array.isArray(parsed.shootDays)
-          ? parsed.shootDays.map(
-              (
-                day: {
-                  dayLabel?: string;
-                  location?: string;
-                  callTime?: string;
-                  breakfastTime?: string;
-                  lunchTime?: string;
-                  wrapTime?: string;
-                  scheduleBreakdown?: Array<{
-                    timeSlot?: string;
-                    activity?: string;
-                    category?: string;
-                    shotIds?: string[];
-                    notes?: string;
-                    estimatedMinutes?: number;
-                  }>;
-                  setups?: Array<{
-                    setupName?: string;
-                    timeSlot?: string;
-                    lightingNotes?: string;
-                    shotIds?: string[];
-                    estimatedMinutes?: number;
-                  }>;
-                },
-                idx: number
-              ) => {
-                const dayCallTime = day.callTime || '07:00 AM';
-                const dayWrapTime = day.wrapTime || '06:30 PM';
-                const dayLunchTime = day.lunchTime || '12:30 PM - 01:30 PM';
-                const dayBreakfastTime = day.breakfastTime || '07:30 AM';
+          ? parsed.shootDays.map((day, idx) => {
+              const dayCallTime = day.callTime || '07:00 AM';
+              const dayWrapTime = day.wrapTime || '06:30 PM';
+              const dayLunchTime = day.lunchTime || '12:30 PM - 01:30 PM';
+              const dayBreakfastTime = day.breakfastTime || '07:30 AM';
 
-                const parsedSetups = Array.isArray(day.setups)
-                  ? day.setups.map((st) => ({
-                      setupName: st.setupName || 'Setup',
-                      timeSlot: st.timeSlot || undefined,
-                      lightingNotes: st.lightingNotes || '',
-                      shotIds: Array.isArray(st.shotIds) ? st.shotIds : [],
-                      estimatedMinutes: Number(st.estimatedMinutes) || 45,
-                    }))
-                  : [];
+              const parsedSetups = Array.isArray(day.setups)
+                ? day.setups.map((st) => ({
+                    setupName: st.setupName || 'Setup',
+                    timeSlot: st.timeSlot || undefined,
+                    lightingNotes: st.lightingNotes || '',
+                    shotIds: Array.isArray(st.shotIds) ? st.shotIds : [],
+                    estimatedMinutes: Number(st.estimatedMinutes) || 45,
+                  }))
+                : [];
 
-                // Build default schedule breakdown if model omitted it
-                let scheduleBreakdown = Array.isArray(day.scheduleBreakdown) && day.scheduleBreakdown.length > 0
+              let scheduleBreakdown =
+                Array.isArray(day.scheduleBreakdown) && day.scheduleBreakdown.length > 0
                   ? day.scheduleBreakdown.map((sb, sbIdx) => ({
                       id: `sb-${Date.now()}-${idx}-${sbIdx}`,
                       timeSlot: sb.timeSlot || 'TBD',
                       activity: sb.activity || 'Activity',
-                      category: (['call', 'setup', 'meal', 'move', 'wrap', 'general'].includes(sb.category || '')
+                      category: (['call', 'setup', 'meal', 'move', 'wrap', 'general'].includes(
+                        sb.category || ''
+                      )
                         ? sb.category
                         : 'general') as 'call' | 'setup' | 'meal' | 'move' | 'wrap' | 'general',
                       shotIds: Array.isArray(sb.shotIds) ? sb.shotIds : [],
@@ -2994,74 +3056,73 @@ ${shotsText}`;
                     }))
                   : [];
 
-                if (scheduleBreakdown.length === 0) {
-                  scheduleBreakdown = [
-                    {
-                      id: `sb-${Date.now()}-${idx}-call`,
-                      timeSlot: `${dayCallTime} - 07:45 AM`,
-                      activity: 'Crew Call & Equipment Load-In',
-                      category: 'call',
-                      shotIds: [],
-                      notes: 'Grip & Electric truck unload, DIT staging, sound check',
-                      estimatedMinutes: 45,
-                    },
-                    {
-                      id: `sb-${Date.now()}-${idx}-bfast`,
-                      timeSlot: `${dayBreakfastTime} - 08:15 AM`,
-                      activity: 'Hot Breakfast & Morning Briefing',
-                      category: 'meal',
-                      shotIds: [],
-                      notes: 'Director & DP walk department heads through day plan',
-                      estimatedMinutes: 45,
-                    },
-                  ];
-
-                  parsedSetups.forEach((st, sIdx) => {
-                    scheduleBreakdown.push({
-                      id: `sb-${Date.now()}-${idx}-st-${sIdx}`,
-                      timeSlot: st.timeSlot || `Morning Setup ${sIdx + 1}`,
-                      activity: st.setupName,
-                      category: 'setup',
-                      shotIds: st.shotIds,
-                      notes: st.lightingNotes,
-                      estimatedMinutes: st.estimatedMinutes,
-                    });
-                  });
-
-                  scheduleBreakdown.push({
-                    id: `sb-${Date.now()}-${idx}-lunch`,
-                    timeSlot: dayLunchTime,
-                    activity: 'Mandatory Crew Lunch Break',
+              if (scheduleBreakdown.length === 0) {
+                scheduleBreakdown = [
+                  {
+                    id: `sb-${Date.now()}-${idx}-call`,
+                    timeSlot: `${dayCallTime} - 07:45 AM`,
+                    activity: 'Crew Call & Equipment Load-In',
+                    category: 'call',
+                    shotIds: [],
+                    notes: 'Grip & Electric truck unload, DIT staging, sound check',
+                    estimatedMinutes: 45,
+                  },
+                  {
+                    id: `sb-${Date.now()}-${idx}-bfast`,
+                    timeSlot: `${dayBreakfastTime} - 08:15 AM`,
+                    activity: 'Hot Breakfast & Morning Briefing',
                     category: 'meal',
                     shotIds: [],
-                    notes: 'Hot catering provided on-set (quiet hour for media offload)',
-                    estimatedMinutes: 60,
-                  });
+                    notes: 'Director & DP walk department heads through day plan',
+                    estimatedMinutes: 45,
+                  },
+                ];
 
+                parsedSetups.forEach((st, sIdx) => {
                   scheduleBreakdown.push({
-                    id: `sb-${Date.now()}-${idx}-wrap`,
-                    timeSlot: `${dayWrapTime}`,
-                    activity: 'Company Wrap & Final DIT Backup',
-                    category: 'wrap',
-                    shotIds: [],
-                    notes: 'All media verified, equipment locked down, sound logs signed',
-                    estimatedMinutes: 30,
+                    id: `sb-${Date.now()}-${idx}-st-${sIdx}`,
+                    timeSlot: st.timeSlot || `Morning Setup ${sIdx + 1}`,
+                    activity: st.setupName,
+                    category: 'setup',
+                    shotIds: st.shotIds,
+                    notes: st.lightingNotes,
+                    estimatedMinutes: st.estimatedMinutes,
                   });
-                }
+                });
 
-                return {
-                  id: `day-${Date.now()}-${idx}`,
-                  dayLabel: day.dayLabel || `Shoot Day ${idx + 1}`,
-                  location: day.location || 'TBD — confirm with client',
-                  callTime: dayCallTime,
-                  breakfastTime: dayBreakfastTime,
-                  lunchTime: dayLunchTime,
-                  wrapTime: dayWrapTime,
-                  scheduleBreakdown,
-                  setups: parsedSetups,
-                };
+                scheduleBreakdown.push({
+                  id: `sb-${Date.now()}-${idx}-lunch`,
+                  timeSlot: dayLunchTime,
+                  activity: 'Mandatory Crew Lunch Break',
+                  category: 'meal',
+                  shotIds: [],
+                  notes: 'Hot catering provided on-set (quiet hour for media offload)',
+                  estimatedMinutes: 60,
+                });
+
+                scheduleBreakdown.push({
+                  id: `sb-${Date.now()}-${idx}-wrap`,
+                  timeSlot: `${dayWrapTime}`,
+                  activity: 'Company Wrap & Final DIT Backup',
+                  category: 'wrap',
+                  shotIds: [],
+                  notes: 'All media verified, equipment locked down, sound logs signed',
+                  estimatedMinutes: 30,
+                });
               }
-            )
+
+              return {
+                id: `day-${Date.now()}-${idx}`,
+                dayLabel: day.dayLabel || `Shoot Day ${idx + 1}`,
+                location: day.location || 'TBD — confirm with client',
+                callTime: dayCallTime,
+                breakfastTime: dayBreakfastTime,
+                lunchTime: dayLunchTime,
+                wrapTime: dayWrapTime,
+                scheduleBreakdown,
+                setups: parsedSetups,
+              };
+            })
           : [],
         equipment: Array.isArray(parsed.equipment) ? parsed.equipment : [],
         propsAndUnits: Array.isArray(parsed.propsAndUnits)
@@ -3092,7 +3153,7 @@ ${shotsText}`;
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
             step: 'Shoot Plan',
-            model: GEMINI_MODEL,
+            model: llmResult.modelUsed,
             prompt: `Generated Live & Hybrid Shoot Plan covering ${liveHybridShots.length} shot(s)`,
             seed: null,
             status: 'success',
@@ -3105,7 +3166,7 @@ ${shotsText}`;
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not generate Shoot Plan.'),
+        error: formatLlmError(err, 'Could not generate Shoot Plan.'),
       });
     }
   });
@@ -3246,10 +3307,9 @@ ${shotsText}`;
         });
       }
 
-      const ai = getGeminiClient();
-      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> = [];
+      const parts: LlmInlinePart[] = [];
 
-      // Attach PDFs and images directly for Gemini multimodal inspection
+      // Attach PDFs and images directly for multimodal inspection (and PDF text fallback on Fal)
       for (const inline of extracted.inlineParts.slice(0, 14)) {
         parts.push({ text: `--- Attached File: ${inline.fileName} ---` });
         parts.push({
@@ -3257,6 +3317,7 @@ ${shotsText}`;
             mimeType: inline.mimeType,
             data: inline.data,
           },
+          filename: inline.fileName,
         });
       }
 
@@ -3299,61 +3360,103 @@ Return a JSON object with:
     "logoFileName": string (filename of extracted graphic most likely to be the main brand logo, or "")
   }`;
 
-      parts.push({ text: prompt });
-
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              client: { type: Type.STRING },
-              productName: { type: Type.STRING },
-              productDescription: { type: Type.STRING },
-              provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
-              audience: { type: Type.STRING },
-              tone: { type: Type.STRING },
-              clientMarketingIdeas: { type: Type.STRING },
-              videosWanted: { type: Type.STRING },
-              shootLocationDatesBudgetNotes: { type: Type.STRING },
-              styleGuide: {
-                type: Type.OBJECT,
-                properties: {
-                  summary: { type: Type.STRING },
-                  palette: { type: Type.STRING },
-                  paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  typography: { type: Type.STRING },
-                  lighting: { type: Type.STRING },
-                  lensAndFraming: { type: Type.STRING },
-                  grade: { type: Type.STRING },
-                  visualStyleNotes: { type: Type.STRING },
-                  productVisualRules: { type: Type.STRING },
-                  brandLogoNotes: { type: Type.STRING },
-                  bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  logoFileName: { type: Type.STRING },
-                },
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        client?: string;
+        productName?: string;
+        productDescription?: string;
+        provableClaims?: string[];
+        audience?: string;
+        tone?: string;
+        clientMarketingIdeas?: string;
+        videosWanted?: string;
+        shootLocationDatesBudgetNotes?: string;
+        styleGuide?: {
+          summary?: string;
+          palette?: string;
+          paletteHexes?: string[];
+          typography?: string;
+          lighting?: string;
+          lensAndFraming?: string;
+          grade?: string;
+          visualStyleNotes?: string;
+          productVisualRules?: string;
+          brandLogoNotes?: string;
+          bannedElements?: string[];
+          logoFileName?: string;
+        };
+      }>({
+        prompt,
+        parts,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            client: { type: Type.STRING },
+            productName: { type: Type.STRING },
+            productDescription: { type: Type.STRING },
+            provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
+            audience: { type: Type.STRING },
+            tone: { type: Type.STRING },
+            clientMarketingIdeas: { type: Type.STRING },
+            videosWanted: { type: Type.STRING },
+            shootLocationDatesBudgetNotes: { type: Type.STRING },
+            styleGuide: {
+              type: Type.OBJECT,
+              properties: {
+                summary: { type: Type.STRING },
+                palette: { type: Type.STRING },
+                paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                typography: { type: Type.STRING },
+                lighting: { type: Type.STRING },
+                lensAndFraming: { type: Type.STRING },
+                grade: { type: Type.STRING },
+                visualStyleNotes: { type: Type.STRING },
+                productVisualRules: { type: Type.STRING },
+                brandLogoNotes: { type: Type.STRING },
+                bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                logoFileName: { type: Type.STRING },
               },
             },
-            required: [
-              'client',
-              'productName',
-              'productDescription',
-              'provableClaims',
-              'audience',
-              'tone',
-              'clientMarketingIdeas',
-              'videosWanted',
-              'shootLocationDatesBudgetNotes',
-            ],
           },
+          required: [
+            'client',
+            'productName',
+            'productDescription',
+            'provableClaims',
+            'audience',
+            'tone',
+            'clientMarketingIdeas',
+            'videosWanted',
+            'shootLocationDatesBudgetNotes',
+          ],
         },
-        })
-      );
+        jsonSchemaHint: `{
+  "client": "string",
+  "productName": "string",
+  "productDescription": "string",
+  "provableClaims": ["string"],
+  "audience": "string",
+  "tone": "string",
+  "clientMarketingIdeas": "string",
+  "videosWanted": "string",
+  "shootLocationDatesBudgetNotes": "string",
+  "styleGuide": {
+    "summary": "string",
+    "palette": "string",
+    "paletteHexes": ["#RRGGBB"],
+    "typography": "string",
+    "lighting": "string",
+    "lensAndFraming": "string",
+    "grade": "string",
+    "visualStyleNotes": "string",
+    "productVisualRules": "string",
+    "brandLogoNotes": "string",
+    "bannedElements": ["string"],
+    "logoFileName": "string"
+  }
+}`,
+      });
 
-      const parsedRaw = JSON.parse((response.text ?? '{}').trim());
+      const parsedRaw = llmResult.data || {};
       const rawGuide = parsedRaw.styleGuide || {};
       const extractedStyleGuide: ExtractedStyleGuide = {
         summary: String(rawGuide.summary || '').trim(),
@@ -3388,15 +3491,24 @@ Return a JSON object with:
         shootLocationDatesBudgetNotes: parsedRaw.shootLocationDatesBudgetNotes || '',
       };
 
-      // Import extracted images & PDF embedded graphics (up to 16)
-      const importedPhotos: Array<{ id: string; url: string; caption: string }> = [];
-      const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
+      const isLikelyLogoName = (name: string) =>
+        Boolean(logoHintName && name.toLowerCase().includes(logoHintName)) ||
+        /logo|wordmark|brandmark|badge|emblem|icon|monogram|lockup/i.test(name);
 
-      for (const img of extracted.imageFiles.slice(0, 16)) {
+      // Import extracted images & PDF embedded graphics, separating brand graphics/logos from product angles
+      const importedPhotos: ProductPhoto[] = [];
+      const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+      const importedBrandGraphics: ProductPhoto[] = [];
+      const importedBrandGraphicsDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+
+      for (const img of extracted.imageFiles.slice(0, 20)) {
+        const isBrandGraphic = isLikelyLogoName(img.fileName);
         if (project) {
-          const alreadyImported = project.product.photos.some(
-            (p) => p.caption === img.fileName
-          );
+          const existingPool = isBrandGraphic
+            ? project.brandBible?.brandGraphics || []
+            : project.product.photos;
+          const alreadyImported = existingPool.some((p) => p.caption === img.fileName);
           if (!alreadyImported) {
             const ext = img.mimeType.includes('png')
               ? 'png'
@@ -3406,44 +3518,42 @@ Return a JSON object with:
             const saved = await saveBufferAsset(
               project.id,
               Buffer.from(img.data, 'base64'),
-              'product',
+              isBrandGraphic ? 'logo' : 'product',
               ext
             );
-            const photoEntry = {
-              id: `photo-drive-${img.fileId.slice(0, 8)}-${Date.now()}`,
+            const entry: ProductPhoto = {
+              id: `${isBrandGraphic ? 'logo' : 'photo'}-drive-${img.fileId.slice(0, 8)}-${Date.now()}`,
               url: saved.url,
               caption: img.fileName,
             };
-            importedPhotos.push(photoEntry);
+            if (isBrandGraphic) importedBrandGraphics.push(entry);
+            else importedPhotos.push(entry);
           }
         } else {
-          importedPhotoDataUrls.push({
+          const dataEntry = {
             dataUrl: `data:${img.mimeType};base64,${img.data}`,
             caption: img.fileName,
-          });
+          };
+          if (isBrandGraphic) importedBrandGraphicsDataUrls.push(dataEntry);
+          else importedPhotoDataUrls.push(dataEntry);
         }
       }
 
-      // Detect likely brand logo among extracted graphics
-      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
       let suggestedLogoUrl: string | undefined;
       let suggestedLogoDataUrl: string | undefined;
       if (project) {
-        const allPool = [...project.product.photos, ...importedPhotos];
+        const logoPool = [...(project.brandBible?.brandGraphics || []), ...importedBrandGraphics, ...importedPhotos];
         const logoCandidate =
-          allPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
-          allPool.find((p) => /logo|wordmark|brandmark|badge|emblem/i.test(p.caption));
-        if (logoCandidate) {
+          logoPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          logoPool[0];
+        if (logoCandidate && isLikelyLogoName(logoCandidate.caption)) {
           suggestedLogoUrl = logoCandidate.url;
         }
       } else {
+        const logoPoolData = [...importedBrandGraphicsDataUrls, ...importedPhotoDataUrls];
         const logoCandidateData =
-          importedPhotoDataUrls.find(
-            (p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)
-          ) ||
-          importedPhotoDataUrls.find((p) =>
-            /logo|wordmark|brandmark|badge|emblem/i.test(p.caption)
-          );
+          logoPoolData.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          logoPoolData.find((p) => isLikelyLogoName(p.caption));
         if (logoCandidateData) {
           suggestedLogoDataUrl = logoCandidateData.dataUrl;
         }
@@ -3491,6 +3601,14 @@ Return a JSON object with:
         if (importedPhotos.length > 0) {
           project.product.photos = [...project.product.photos, ...importedPhotos];
         }
+        if (importedBrandGraphics.length > 0) {
+          const existingG = project.brandBible.brandGraphics || [];
+          const seenUrls = new Set(existingG.map((g) => g.url));
+          project.brandBible.brandGraphics = [
+            ...existingG,
+            ...importedBrandGraphics.filter((g) => !seenUrls.has(g.url)),
+          ];
+        }
         if (newGuideDocs.length > 0) {
           project.brandGuideDocuments = [
             ...(project.brandGuideDocuments || []),
@@ -3499,7 +3617,6 @@ Return a JSON object with:
         }
         project.extractedStyleGuide = extractedStyleGuide;
 
-        // Pre-fill empty Brand Bible fields so extracted PDF info carries directly into Step 2
         const paletteText = [
           extractedStyleGuide.palette,
           extractedStyleGuide.paletteHexes.length > 0
@@ -3563,6 +3680,8 @@ Return a JSON object with:
         analyzedFiles: extracted.analyzedFiles,
         importedPhotos,
         importedPhotoDataUrls,
+        importedBrandGraphics,
+        importedBrandGraphicsDataUrls,
         warnings: extracted.warnings,
       });
     } catch (err) {
@@ -3570,7 +3689,7 @@ Return a JSON object with:
         return res.status(err.status).json({ error: err.message });
       }
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not parse Google Drive files.'),
+        error: formatLlmError(err, 'Could not parse Google Drive files.'),
       });
     }
   });
@@ -3594,8 +3713,7 @@ Return a JSON object with:
         return res.status(404).json({ error: 'Project not found.' });
       }
 
-      const ai = getGeminiClient();
-      const parts: Array<{ inlineData?: { data: string; mimeType: string }; text?: string }> = [];
+      const parts: LlmInlinePart[] = [];
       const extractedGraphics: Array<{
         id: string;
         fileName: string;
@@ -3629,6 +3747,7 @@ Return a JSON object with:
             mimeType: 'application/pdf',
             data: match[2],
           },
+          filename: pdfName,
         });
 
         let gCount = 0;
@@ -3652,10 +3771,11 @@ Return a JSON object with:
                 mimeType: g.mimeType,
                 data: b64,
               },
+              filename: g.name,
             });
           }
         } catch {
-          // Non-fatal: Gemini still reads the full PDF inline
+          // Non-fatal: PDF text + inline still handled by LLM router
         }
 
         validPdfs.push({ name: pdfName, dataUrl, buffer: pdfBuf, graphicCount: gCount });
@@ -3709,61 +3829,103 @@ Return JSON with:
     "logoFileName": string
   }`;
 
-      parts.push({ text: prompt });
-
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
+      const llmResult = await generateJsonWithGeminiOrFal<{
+        client?: string;
+        productName?: string;
+        productDescription?: string;
+        provableClaims?: string[];
+        audience?: string;
+        tone?: string;
+        clientMarketingIdeas?: string;
+        videosWanted?: string;
+        shootLocationDatesBudgetNotes?: string;
+        styleGuide?: {
+          summary?: string;
+          palette?: string;
+          paletteHexes?: string[];
+          typography?: string;
+          lighting?: string;
+          lensAndFraming?: string;
+          grade?: string;
+          visualStyleNotes?: string;
+          productVisualRules?: string;
+          brandLogoNotes?: string;
+          bannedElements?: string[];
+          logoFileName?: string;
+        };
+      }>({
+        prompt,
+        parts,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            client: { type: Type.STRING },
+            productName: { type: Type.STRING },
+            productDescription: { type: Type.STRING },
+            provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
+            audience: { type: Type.STRING },
+            tone: { type: Type.STRING },
+            clientMarketingIdeas: { type: Type.STRING },
+            videosWanted: { type: Type.STRING },
+            shootLocationDatesBudgetNotes: { type: Type.STRING },
+            styleGuide: {
               type: Type.OBJECT,
               properties: {
-                client: { type: Type.STRING },
-                productName: { type: Type.STRING },
-                productDescription: { type: Type.STRING },
-                provableClaims: { type: Type.ARRAY, items: { type: Type.STRING } },
-                audience: { type: Type.STRING },
-                tone: { type: Type.STRING },
-                clientMarketingIdeas: { type: Type.STRING },
-                videosWanted: { type: Type.STRING },
-                shootLocationDatesBudgetNotes: { type: Type.STRING },
-                styleGuide: {
-                  type: Type.OBJECT,
-                  properties: {
-                    summary: { type: Type.STRING },
-                    palette: { type: Type.STRING },
-                    paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    typography: { type: Type.STRING },
-                    lighting: { type: Type.STRING },
-                    lensAndFraming: { type: Type.STRING },
-                    grade: { type: Type.STRING },
-                    visualStyleNotes: { type: Type.STRING },
-                    productVisualRules: { type: Type.STRING },
-                    brandLogoNotes: { type: Type.STRING },
-                    bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    logoFileName: { type: Type.STRING },
-                  },
-                },
+                summary: { type: Type.STRING },
+                palette: { type: Type.STRING },
+                paletteHexes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                typography: { type: Type.STRING },
+                lighting: { type: Type.STRING },
+                lensAndFraming: { type: Type.STRING },
+                grade: { type: Type.STRING },
+                visualStyleNotes: { type: Type.STRING },
+                productVisualRules: { type: Type.STRING },
+                brandLogoNotes: { type: Type.STRING },
+                bannedElements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                logoFileName: { type: Type.STRING },
               },
-              required: [
-                'client',
-                'productName',
-                'productDescription',
-                'provableClaims',
-                'audience',
-                'tone',
-                'clientMarketingIdeas',
-                'videosWanted',
-                'shootLocationDatesBudgetNotes',
-              ],
             },
           },
-        })
-      );
+          required: [
+            'client',
+            'productName',
+            'productDescription',
+            'provableClaims',
+            'audience',
+            'tone',
+            'clientMarketingIdeas',
+            'videosWanted',
+            'shootLocationDatesBudgetNotes',
+          ],
+        },
+        jsonSchemaHint: `{
+  "client": "string",
+  "productName": "string",
+  "productDescription": "string",
+  "provableClaims": ["string"],
+  "audience": "string",
+  "tone": "string",
+  "clientMarketingIdeas": "string",
+  "videosWanted": "string",
+  "shootLocationDatesBudgetNotes": "string",
+  "styleGuide": {
+    "summary": "string",
+    "palette": "string",
+    "paletteHexes": ["#RRGGBB"],
+    "typography": "string",
+    "lighting": "string",
+    "lensAndFraming": "string",
+    "grade": "string",
+    "visualStyleNotes": "string",
+    "productVisualRules": "string",
+    "brandLogoNotes": "string",
+    "bannedElements": ["string"],
+    "logoFileName": "string"
+  }
+}`,
+      });
 
-      const parsedRaw = JSON.parse((response.text ?? '{}').trim());
+      const parsedRaw = llmResult.data || {};
       const rawGuide = parsedRaw.styleGuide || {};
       const extractedStyleGuide: ExtractedStyleGuide = {
         summary: String(rawGuide.summary || '').trim(),
@@ -3799,45 +3961,59 @@ Return JSON with:
         shootLocationDatesBudgetNotes: parsedRaw.shootLocationDatesBudgetNotes || '',
       };
 
-      const importedPhotos: Array<{ id: string; url: string; caption: string }> = [];
+      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
+      const isLikelyLogoName = (name: string) =>
+        Boolean(logoHintName && name.toLowerCase().includes(logoHintName)) ||
+        /logo|wordmark|brandmark|badge|emblem|icon|monogram|lockup/i.test(name);
+
+      const importedPhotos: ProductPhoto[] = [];
       const importedPhotoDataUrls: Array<{ dataUrl: string; caption: string }> = [];
+      const importedBrandGraphics: ProductPhoto[] = [];
+      const importedBrandGraphicsDataUrls: Array<{ dataUrl: string; caption: string }> = [];
       const newGuideDocs: BrandGuideDocument[] = [];
       const stagedGuidePdfs: Array<{ name: string; dataUrl: string; graphicCount?: number }> = [];
       const nowIso = new Date().toISOString();
 
       for (const g of extractedGraphics) {
+        const isBrandGraphic = isLikelyLogoName(g.fileName);
         if (project) {
-          const already = project.product.photos.some((p) => p.caption === g.fileName);
+          const existingPool = isBrandGraphic
+            ? project.brandBible?.brandGraphics || []
+            : project.product.photos;
+          const already = existingPool.some((p) => p.caption === g.fileName);
           if (!already) {
             const savedImg = await saveBufferAsset(
               project.id,
               Buffer.from(g.data, 'base64'),
-              'product',
+              isBrandGraphic ? 'logo' : 'product',
               g.ext
             );
-            importedPhotos.push({
-              id: `photo-pdf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            const entry: ProductPhoto = {
+              id: `${isBrandGraphic ? 'logo' : 'photo'}-pdf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               url: savedImg.url,
               caption: g.fileName,
-            });
+            };
+            if (isBrandGraphic) importedBrandGraphics.push(entry);
+            else importedPhotos.push(entry);
           }
         } else {
-          importedPhotoDataUrls.push({
+          const dataEntry = {
             dataUrl: `data:${g.mimeType};base64,${g.data}`,
             caption: g.fileName,
-          });
+          };
+          if (isBrandGraphic) importedBrandGraphicsDataUrls.push(dataEntry);
+          else importedPhotoDataUrls.push(dataEntry);
         }
       }
 
-      const logoHintName = String(rawGuide.logoFileName || '').toLowerCase();
       let suggestedLogoUrl: string | undefined;
       let suggestedLogoDataUrl: string | undefined;
 
       if (project) {
-        const allPool = [...project.product.photos, ...importedPhotos];
+        const logoPool = [...(project.brandBible?.brandGraphics || []), ...importedBrandGraphics, ...importedPhotos];
         const logoHit =
-          allPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
-          allPool.find((p) => /logo|wordmark|brandmark|badge|emblem/i.test(p.caption));
+          logoPool.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          logoPool.find((p) => isLikelyLogoName(p.caption));
         if (logoHit) suggestedLogoUrl = logoHit.url;
 
         for (const p of validPdfs) {
@@ -3854,6 +4030,14 @@ Return JSON with:
 
         if (importedPhotos.length > 0) {
           project.product.photos = [...project.product.photos, ...importedPhotos];
+        }
+        if (importedBrandGraphics.length > 0) {
+          const existingG = project.brandBible.brandGraphics || [];
+          const seenUrls = new Set(existingG.map((g) => g.url));
+          project.brandBible.brandGraphics = [
+            ...existingG,
+            ...importedBrandGraphics.filter((g) => !seenUrls.has(g.url)),
+          ];
         }
         if (newGuideDocs.length > 0) {
           project.brandGuideDocuments = [
@@ -3903,13 +4087,10 @@ Return JSON with:
         project.updatedAt = nowIso;
         await saveProject(project);
       } else {
+        const logoPoolData = [...importedBrandGraphicsDataUrls, ...importedPhotoDataUrls];
         const logoHitData =
-          importedPhotoDataUrls.find(
-            (p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)
-          ) ||
-          importedPhotoDataUrls.find((p) =>
-            /logo|wordmark|brandmark|badge|emblem/i.test(p.caption)
-          );
+          logoPoolData.find((p) => logoHintName && p.caption.toLowerCase().includes(logoHintName)) ||
+          logoPoolData.find((p) => isLikelyLogoName(p.caption));
         if (logoHitData) suggestedLogoDataUrl = logoHitData.dataUrl;
 
         for (const p of validPdfs) {
@@ -3933,11 +4114,13 @@ Return JSON with:
         analyzedFiles,
         importedPhotos,
         importedPhotoDataUrls,
+        importedBrandGraphics,
+        importedBrandGraphicsDataUrls,
         warnings,
       });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not parse uploaded PDF style guide.'),
+        error: formatLlmError(err, 'Could not parse uploaded PDF style guide.'),
       });
     }
   });
@@ -3988,8 +4171,8 @@ Return JSON with:
       }> = [];
       const warnings: string[] = [];
 
-      const falKey = process.env.FAL_KEY;
-      const canUploadFal = Boolean(uploadToFal && falKey && falKey.trim() && falKey !== 'MY_FAL_KEY');
+      const falKey = process.env.FAL_KEY?.trim();
+      const canUploadFal = Boolean(uploadToFal && falKey);
       if (canUploadFal) {
         fal.config({ credentials: falKey });
       }
@@ -4117,7 +4300,6 @@ Return JSON with:
       const project = await getProject(projectId);
       if (!project) return res.status(404).json({ error: 'Project not found.' });
 
-      const ai = getGeminiClient();
       const prompt = `You are a Continuity Supervisor preparing Storyboard Studio reference sheets for "${project.client} — ${project.product.name}".
 Analyze the Brand Bible, Creative Brief, and Ordered Shot List to identify distinct recurring visual assets so we can generate consistent reference sheets BEFORE drawing the storyboard frames:
 1. characters: distinct on-screen people (keep exact names & fixed visual descriptors from the Brand Bible if present, plus any additional characters appearing in shots).
@@ -4140,61 +4322,7 @@ ${project.shots
   )
   .join('\n')}`;
 
-      const response = await withGeminiRetry(() =>
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: prompt,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                characters: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      name: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    },
-                    required: ['name', 'description', 'linkedShotIds'],
-                  },
-                },
-                locations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      name: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    },
-                    required: ['name', 'description', 'linkedShotIds'],
-                  },
-                },
-                props: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      name: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      isRealProduct: { type: Type.BOOLEAN },
-                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    },
-                    required: ['name', 'description', 'isRealProduct', 'linkedShotIds'],
-                  },
-                },
-              },
-              required: ['characters', 'locations', 'props'],
-            },
-          },
-        })
-      );
-
-      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+      const llmResult = await generateJsonWithGeminiOrFal<{
         characters?: Array<{ name: string; description: string; linkedShotIds?: string[] }>;
         locations?: Array<{ name: string; description: string; linkedShotIds?: string[] }>;
         props?: Array<{
@@ -4203,10 +4331,62 @@ ${project.shots
           isRealProduct?: boolean;
           linkedShotIds?: string[];
         }>;
-      };
+      }>({
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            characters: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['name', 'description', 'linkedShotIds'],
+              },
+            },
+            locations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['name', 'description', 'linkedShotIds'],
+              },
+            },
+            props: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  isRealProduct: { type: Type.BOOLEAN },
+                  linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['name', 'description', 'isRealProduct', 'linkedShotIds'],
+              },
+            },
+          },
+          required: ['characters', 'locations', 'props'],
+        },
+        jsonSchemaHint: `{
+  "characters": [{ "name": "string", "description": "string", "linkedShotIds": ["S01"] }],
+  "locations": [{ "name": "string", "description": "string", "linkedShotIds": ["S01"] }],
+  "props": [{ "name": "string", "description": "string", "isRealProduct": true, "linkedShotIds": ["S01"] }]
+}`,
+      });
+
+      const parsed = llmResult.data || {};
 
       const prevStudio = ensureStudioState(project);
-      // Preserve any existing assets that already have generated images so we never lose work
       const existingWithImages = prevStudio.assets.filter((a) => Boolean(a.imageUrl));
       const existingByKey = new Map(
         existingWithImages.map((a) => [`${a.category}:${a.name.toLowerCase().trim()}`, a])
@@ -4275,7 +4455,7 @@ ${project.shots
       res.json({ project: saved });
     } catch (err) {
       res.status(500).json({
-        error: formatGeminiError(err, 'Could not extract Storyboard Studio assets.'),
+        error: formatLlmError(err, 'Could not extract Storyboard Studio assets.'),
       });
     }
   });
@@ -4305,10 +4485,10 @@ ${project.shots
     const asset = studio.assets.find((a) => a.id === assetId);
     if (!asset) return res.status(404).json({ error: 'Asset card not found.' });
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
       return res.status(400).json({
-        error: 'Add FAL_KEY in Settings > Secrets to generate Storyboard Studio sheets via Fal Nano Banana.',
+        error: 'Add FAL_KEY to the server environment variables.',
       });
     }
 
@@ -4362,12 +4542,15 @@ Style Notes: ${paletteNote}. ${styleNote}`.trim();
     } else {
       sheetAspect = '1:1';
       if (asset.useRealProductPhoto && project.product.photos.length > 0) {
-        project.product.photos.slice(0, 3).forEach((p) => {
-          if (p.url) referenceImageUrls.push(p.url);
+        project.product.photos.slice(0, 4).forEach((p) => {
+          if (p.url && !referenceImageUrls.includes(p.url)) referenceImageUrls.push(p.url);
         });
-        if (project.brandBible?.brandLogoUrl) {
+        if (project.brandBible?.brandLogoUrl && !referenceImageUrls.includes(project.brandBible.brandLogoUrl)) {
           referenceImageUrls.push(project.brandBible.brandLogoUrl);
         }
+        (project.brandBible?.brandGraphics || []).slice(0, 3).forEach((g) => {
+          if (g.url && !referenceImageUrls.includes(g.url)) referenceImageUrls.push(g.url);
+        });
       }
       sheetPrompt = `Create a clean 2x2 production PROP & PRODUCT REFERENCE SHEET on a neutral background in the style of ${styleDirective}.
 Object: "${asset.name}".
@@ -4464,10 +4647,10 @@ Style Notes: ${paletteNote}. ${styleNote}`.trim();
     if (shotIdx === -1) return res.status(404).json({ error: `Shot ${shotId} not found.` });
     const shot = project.shots[shotIdx];
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey || falKey === 'MY_FAL_KEY') {
+    const falKey = process.env.FAL_KEY?.trim();
+    if (!falKey) {
       return res.status(400).json({
-        error: 'Add FAL_KEY in Settings > Secrets to generate storyboard frames via Fal Nano Banana.',
+        error: 'Add FAL_KEY to the server environment variables.',
       });
     }
 
@@ -4496,21 +4679,32 @@ Style Notes: ${paletteNote}. ${styleNote}`.trim();
       includeRealProductPhotos !== undefined
         ? includeRealProductPhotos
         : shot.productInFrame;
-    if (useProduct && project.product.photos.length > 0) {
-      project.product.photos.slice(0, 3).forEach((p, idx) => {
-        if (p.url) {
+    if (useProduct && (project.product.photos.length > 0 || project.brandBible?.brandLogoUrl || (project.brandBible?.brandGraphics?.length || 0) > 0)) {
+      project.product.photos.slice(0, 4).forEach((p, idx) => {
+        if (p.url && !referenceImageUrls.includes(p.url)) {
           referenceImageUrls.push(p.url);
           refNotes.push(
             `Reference Image #${referenceImageUrls.length} (REAL PRODUCT PHOTO ${idx + 1}): "${project.product.name}"${p.caption ? ` (${p.caption})` : ''} — preserve the exact physical silhouette, ring/port geometry, proportions, and surface finish.`
           );
         }
       });
+      const brandGraphicPool: Array<{ url: string; caption?: string }> = [];
       if (project.brandBible?.brandLogoUrl) {
-        referenceImageUrls.push(project.brandBible.brandLogoUrl);
-        refNotes.push(
-          `Reference Image #${referenceImageUrls.length} (BRAND LOGO): preserve exact logo mark proportions where branding appears.`
-        );
+        brandGraphicPool.push({ url: project.brandBible.brandLogoUrl, caption: project.brandBible.brandLogoCaption || 'Primary Brand Logo' });
       }
+      (project.brandBible?.brandGraphics || []).forEach((g) => {
+        if (g.url && !brandGraphicPool.some((b) => b.url === g.url)) {
+          brandGraphicPool.push({ url: g.url, caption: g.caption });
+        }
+      });
+      brandGraphicPool.slice(0, 3).forEach((g, idx) => {
+        if (!referenceImageUrls.includes(g.url)) {
+          referenceImageUrls.push(g.url);
+          refNotes.push(
+            `Reference Image #${referenceImageUrls.length} (BRAND GRAPHIC / LOGO ${idx + 1}${g.caption ? `: ${g.caption}` : ''}): preserve exact logo mark proportions where branding appears.`
+          );
+        }
+      });
     }
 
     // 2. Attach Continuity Asset Sheets (Characters Contact Sheets, Location Multi-Angle Shots, Prop Sheets)

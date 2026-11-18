@@ -914,7 +914,7 @@ export function describeFalFailure(err: unknown): {
   if (status === 401 || status === 403) {
     return {
       status: 401,
-      message: 'fal.ai rejected the FAL_KEY. Verify your FAL_KEY in Settings > Secrets.',
+      message: 'fal.ai rejected the FAL_KEY. Add FAL_KEY to the server environment variables.',
     };
   }
   if (status === 429) {

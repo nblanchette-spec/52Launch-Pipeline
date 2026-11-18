@@ -37,6 +37,7 @@ import {
   processAudioWithDSP,
   urlToAudioBuffer,
 } from '../../utils/voAudioEngine';
+import { parseJsonResponse } from '../../utils/safeFetch';
 
 interface Step8VoStudioProps {
   project: PipelineProject;
@@ -573,8 +574,10 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           stylePrompt: voSettings.customStylePrompt,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Voice audition failed.');
+      const data = await parseJsonResponse<{ audioBase64: string }>(
+        resp,
+        'Voice audition failed.'
+      );
 
       stopPlayback();
       const ctx = getAudioContext();
@@ -634,8 +637,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
         voSettings,
       }),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `Could not synthesize ${line.shotId}.`);
+    const data = await parseJsonResponse<{
+      audioBase64?: string;
+      audioUrl?: string;
+      project: PipelineProject;
+    }>(resp, `Could not synthesize ${line.shotId}.`);
 
     // Pre-cache audio buffer from returned base64 for snappy playback
     if (data.audioBase64 && data.audioUrl) {
@@ -709,8 +715,10 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           targetLanguageName: langMeta?.name || translateTargetLang,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not translate script.');
+      const data = await parseJsonResponse<{ project: PipelineProject }>(
+        resp,
+        'Could not translate script.'
+      );
       onProjectUpdated(data.project);
       setTranslateOpen(false);
       setStatusNote(

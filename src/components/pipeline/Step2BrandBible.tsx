@@ -14,10 +14,12 @@ import {
   FileText,
   Palette,
   ExternalLink,
+  Award,
 } from 'lucide-react';
 import { BrandBible, PipelineProject, ProductPhoto } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
 import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 function extractHexSwatches(text: string): string[] {
@@ -57,26 +59,52 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
     [bible.visualStyle?.palette]
   );
 
+  const brandGraphicsList: ProductPhoto[] = useMemo(() => {
+    const list = [...(bible.brandGraphics || [])];
+    if (bible.brandLogoUrl && !list.some((g) => g.url === bible.brandLogoUrl)) {
+      list.unshift({
+        id: 'primary-logo',
+        url: bible.brandLogoUrl,
+        caption: bible.brandLogoCaption || 'Primary Brand Logo',
+      });
+    }
+    return list;
+  }, [bible.brandGraphics, bible.brandLogoUrl, bible.brandLogoCaption]);
+
   const handleLocalLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     setErrorMsg(null);
     setIsUploadingLogo(true);
     try {
-      const dataUrl = await readAndOptimizeLocalImage(file, 1200);
-      const resp = await fetch(`/api/projects/${project.id}/assets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataUrl, prefix: 'logo' }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload brand logo.');
+      const additions: ProductPhoto[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const dataUrl = await readAndOptimizeLocalImage(files[i], 1200);
+        const resp = await fetch(`/api/projects/${project.id}/assets`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dataUrl, prefix: 'logo' }),
+        });
+        const data = await parseJsonResponse<{ url: string; error?: string }>(
+          resp,
+          'Could not upload brand logo or graphic.'
+        );
+        additions.push({
+          id: `logo-${Date.now()}-${i}`,
+          url: data.url,
+          caption: files[i].name,
+        });
+      }
+      const nextGraphics = [...brandGraphicsList, ...additions];
+      const nextPrimary = bible.brandLogoUrl || additions[0]?.url || null;
       await onUpdateProject({
         ...project,
         brandBible: {
           ...bible,
-          brandLogoUrl: data.url,
-          brandLogoCaption: file.name,
+          brandLogoUrl: nextPrimary,
+          brandLogoCaption:
+            bible.brandLogoCaption || additions[0]?.caption || 'Brand Logo',
+          brandGraphics: nextGraphics,
           manuallyEdited: true,
         },
       });
@@ -102,8 +130,10 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dataUrl, prefix: 'product' }),
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'Could not upload product photo.');
+        const data = await parseJsonResponse<{ url: string; error?: string }>(
+          resp,
+          'Could not upload product photo.'
+        );
         nextPhotos.push({
           id: `photo-${Date.now()}-${i}`,
           url: data.url,
@@ -128,14 +158,22 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
   const handleDriveAssetsImported = async (assets: ImportedDriveAsset[]) => {
     if (assets.length === 0) return;
     if (drivePickerTarget === 'logo') {
-      const picked = assets[0];
-      if (picked?.url) {
+      const additions: ProductPhoto[] = assets
+        .filter((a) => Boolean(a.url))
+        .map((a, idx) => ({
+          id: `logo-drive-${Date.now()}-${idx}`,
+          url: a.url!,
+          caption: a.name,
+        }));
+      if (additions.length > 0) {
+        const nextGraphics = [...brandGraphicsList, ...additions];
         await onUpdateProject({
           ...project,
           brandBible: {
             ...bible,
-            brandLogoUrl: picked.url,
-            brandLogoCaption: picked.name,
+            brandLogoUrl: bible.brandLogoUrl || additions[0].url,
+            brandLogoCaption: bible.brandLogoCaption || additions[0].caption,
+            brandGraphics: nextGraphics,
             manuallyEdited: true,
           },
         });
@@ -649,82 +687,124 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5 items-start">
-              {/* Brand Logo */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+              {/* Brand Logos & Graphics (Multiple Variations) */}
               <div className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-[#24242B]">Brand Logo</span>
-                  {bible.brandLogoUrl && (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-[#24242B]">
+                    Brand Logos &amp; Graphics ({brandGraphicsList.length})
+                  </span>
+                  <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        updateBible({ brandLogoUrl: null, brandLogoCaption: '' })
-                      }
-                      className="text-[11px] text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                      onClick={() => setDrivePickerTarget('logo')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer"
                     >
-                      Remove
+                      <FolderSync className="w-3.5 h-3.5" />
+                      Add from Drive
                     </button>
-                  )}
+                    <button
+                      type="button"
+                      disabled={isUploadingLogo}
+                      onClick={() => logoInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
+                    >
+                      {isUploadingLogo ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                      ) : (
+                        <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
+                      )}
+                      Upload Logos
+                    </button>
+                    <input
+                      ref={logoInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => void handleLocalLogoUpload(e)}
+                    />
+                  </div>
                 </div>
 
-                {bible.brandLogoUrl ? (
-                  <div className="space-y-2">
-                    <div className="h-32 w-full rounded-lg bg-white/95 border border-[#E2E2E6] p-3 flex items-center justify-center overflow-hidden">
-                      <img
-                        src={bible.brandLogoUrl}
-                        alt={bible.brandLogoCaption || `${project.client} Logo`}
-                        referrerPolicy="no-referrer"
-                        className="max-h-full max-w-full object-contain"
-                      />
-                    </div>
-                    {bible.brandLogoCaption && (
-                      <div className="text-[11px] text-[#5A5A66] truncate">
-                        {bible.brandLogoCaption}
-                      </div>
-                    )}
+                {brandGraphicsList.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {brandGraphicsList.map((g, idx) => {
+                      const isPrimary =
+                        bible.brandLogoUrl === g.url || (!bible.brandLogoUrl && idx === 0);
+                      return (
+                        <div
+                          key={g.id || idx}
+                          className={`bg-white border rounded-lg overflow-hidden aspect-square relative group flex flex-col ${
+                            isPrimary
+                              ? 'border-[#C6202F] ring-2 ring-[#C6202F]/30'
+                              : 'border-[#E2E2E6]'
+                          }`}
+                        >
+                          <div className="flex-1 p-2 flex items-center justify-center overflow-hidden bg-white">
+                            <img
+                              src={g.url}
+                              alt={g.caption || `${project.client} Logo ${idx + 1}`}
+                              referrerPolicy="no-referrer"
+                              className="max-h-full max-w-full object-contain"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateBible({
+                                brandLogoUrl: g.url,
+                                brandLogoCaption: g.caption || 'Primary Brand Logo',
+                                brandGraphics: brandGraphicsList,
+                              })
+                            }
+                            className={`absolute top-1.5 left-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold cursor-pointer ${
+                              isPrimary
+                                ? 'bg-[#C6202F] text-white'
+                                : 'bg-black/75 text-white opacity-0 group-hover:opacity-100'
+                            }`}
+                          >
+                            <Award className="w-3 h-3" />
+                            {isPrimary ? 'Primary' : 'Set Primary'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextGraphics = brandGraphicsList.filter((_, i) => i !== idx);
+                              const nextPrimary =
+                                bible.brandLogoUrl === g.url
+                                  ? nextGraphics[0]?.url || null
+                                  : bible.brandLogoUrl;
+                              updateBible({
+                                brandLogoUrl: nextPrimary,
+                                brandGraphics: nextGraphics,
+                              });
+                            }}
+                            className="absolute top-1.5 right-1.5 p-1 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded opacity-0 group-hover:opacity-100 cursor-pointer"
+                            title="Remove brand graphic"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                          {g.caption && (
+                            <div className="bg-black/75 px-2 py-1 text-[10px] text-white truncate">
+                              {g.caption}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="h-32 w-full rounded-lg border border-dashed border-[#E2E2E6] bg-[#FBFBFC] flex flex-col items-center justify-center text-center px-3">
                     <ImageIcon className="w-6 h-6 text-[#8A8A96] mb-1.5" />
                     <span className="text-[11px] text-[#5A5A66]">
-                      No brand logo attached yet
+                      No brand logos or graphics attached yet
                     </span>
                   </div>
                 )}
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDrivePickerTarget('logo')}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer"
-                  >
-                    <FolderSync className="w-3.5 h-3.5" />
-                    Drive Logo
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isUploadingLogo}
-                    onClick={() => logoInputRef.current?.click()}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
-                  >
-                    {isUploadingLogo ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
-                    ) : (
-                      <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
-                    )}
-                    Upload
-                  </button>
-                </div>
-                <input
-                  ref={logoInputRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => void handleLocalLogoUpload(e)}
-                />
               </div>
 
-              {/* Product Photos */}
+              {/* Product Photos (Multiple Angles) */}
               <div className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-xl p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-[#24242B]">
@@ -750,7 +830,7 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
                       ) : (
                         <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
                       )}
-                      Upload
+                      Upload Angles
                     </button>
                     <input
                       ref={productInputRef}
@@ -764,7 +844,7 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
                 </div>
 
                 {project.product.photos.length > 0 ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {project.product.photos.map((photo, idx) => (
                       <div
                         key={photo.id || idx}
@@ -776,6 +856,23 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
+                        <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[10px] font-mono text-white">
+                          Angle {idx + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = project.product.photos.filter((_, i) => i !== idx);
+                            void onUpdateProject({
+                              ...project,
+                              product: { ...project.product, photos: next },
+                            });
+                          }}
+                          className="absolute top-1.5 right-1.5 p-1 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded opacity-0 group-hover:opacity-100 cursor-pointer"
+                          title="Remove product photo"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
                         {photo.caption && (
                           <div className="absolute bottom-0 inset-x-0 bg-black/75 px-2 py-1 text-[10px] text-white truncate">
                             {photo.caption}
@@ -946,17 +1043,17 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
               : ['']
         }
         mediaFilter="image"
-        multiple={drivePickerTarget === 'product'}
+        multiple={true}
         prefix={drivePickerTarget === 'logo' ? 'logo' : 'product'}
         title={
           drivePickerTarget === 'logo'
-            ? 'Pick Brand Logo from Google Drive'
+            ? 'Pick Brand Logos & Graphics from Google Drive'
             : 'Pick Product Photos from Google Drive'
         }
         subtitle={
           drivePickerTarget === 'logo'
-            ? 'Select your official brand logo file from Google Drive.'
-            : 'Select product reference photos from Google Drive.'
+            ? 'Select one or more brand logo variations and graphics from Google Drive.'
+            : 'Select one or more product angle photos from Google Drive.'
         }
         onClose={() => setDrivePickerTarget(null)}
         onImported={handleDriveAssetsImported}

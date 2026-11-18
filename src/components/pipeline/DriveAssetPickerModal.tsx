@@ -42,13 +42,15 @@ import {
   listSharedDrives,
   logoutGoogleDrive,
   signInWithGoogleDrive,
-  isSandboxDriveToken,
 } from '../../utils/googleDriveSync';
-import { openGooglePicker } from '../../utils/googlePicker';
 
 export type DriveMediaFilter = 'image' | 'video' | 'audio' | 'image_video' | 'pdf_and_docs' | 'all';
 export type DriveExplorerTab = 'my_drive' | 'shared_drives' | 'shared_with_me' | 'search' | 'direct_link';
-export type DrivePickerMode = 'pick_assets' | 'select_destination_folder' | 'select_source_folder';
+export type DrivePickerMode =
+  | 'pick_assets'
+  | 'pick_reference_files'
+  | 'select_destination_folder'
+  | 'select_source_folder';
 
 interface DriveAssetPickerModalProps {
   isOpen: boolean;
@@ -63,6 +65,7 @@ interface DriveAssetPickerModalProps {
   pickerMode?: DrivePickerMode;
   onClose: () => void;
   onImported?: (assets: ImportedDriveAsset[]) => void | Promise<void>;
+  onSelectDriveFiles?: (files: DriveFileItem[]) => void | Promise<void>;
   onFoldersChange?: (urls: string[]) => void;
   onSelectDestinationFolder?: (folder: { id: string; name: string; url: string }) => void | Promise<void>;
   onSelectSourceFolder?: (folder: { id: string; name: string; url: string }) => void | Promise<void>;
@@ -121,6 +124,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
   pickerMode = 'pick_assets',
   onClose,
   onImported,
+  onSelectDriveFiles,
   onFoldersChange,
   onSelectDestinationFolder,
   onSelectSourceFolder,
@@ -159,7 +163,6 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
   const [failedThumbs, setFailedThumbs] = useState<Record<string, boolean>>({});
   const [isImporting, setIsImporting] = useState(false);
-  const [isOpeningPicker, setIsOpeningPicker] = useState(false);
 
   // Status & error messages
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -236,7 +239,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen || !driveToken || isSandboxDriveToken(driveToken)) return;
+    if (!isOpen || !driveToken) return;
     if (activeTab === 'direct_link') return;
     void loadExplorer(driveToken, activeTab, currentFolder.id, activeSearchQuery);
   }, [isOpen, driveToken, activeTab, currentFolder.id, selectedSharedDrive?.id, activeSearchQuery]);
@@ -402,7 +405,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
     if (selectedItems.length === 0) return;
     setErrorMsg(null);
     let token = driveToken;
-    if (!token || isSandboxDriveToken(token)) {
+    if (!token) {
       try {
         const res = await signInWithGoogleDrive(true);
         token = res.accessToken;
@@ -427,6 +430,12 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
         modifiedTime: f.modifiedTime,
       }));
 
+      if (pickerMode === 'pick_reference_files' && onSelectDriveFiles) {
+        await onSelectDriveFiles(driveFileItems);
+        onClose();
+        return;
+      }
+
       const result = await importDriveFilesToProject({
         projectId,
         files: driveFileItems,
@@ -450,72 +459,6 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
     }
   };
 
-  const handleOpenGooglePicker = async () => {
-    setErrorMsg(null);
-    setIsOpeningPicker(true);
-    try {
-      let token = driveToken;
-      if (!token || isSandboxDriveToken(token)) {
-        const res = await signInWithGoogleDrive(false);
-        token = res.accessToken;
-        setDriveToken(token);
-        setDriveUserEmail(res.user.email || null);
-      }
-
-      const isFolderMode =
-        pickerMode === 'select_destination_folder' ||
-        pickerMode === 'select_source_folder';
-
-      const picked = await openGooglePicker({
-        accessToken: token,
-        mode: isFolderMode ? 'folders' : 'files',
-        mediaFilter: activeFilter,
-        multiSelect: isFolderMode ? false : multiple,
-        title: modalTitle,
-      });
-
-      if (!picked || picked.length === 0) return;
-
-      if (pickerMode === 'select_destination_folder') {
-        await handleConfirmDestinationFolder({
-          id: picked[0].id,
-          name: picked[0].name,
-        });
-        return;
-      }
-
-      if (pickerMode === 'select_source_folder') {
-        await handleConfirmSourceFolder({
-          id: picked[0].id,
-          name: picked[0].name,
-        });
-        return;
-      }
-
-      setIsImporting(true);
-      const result = await importDriveFilesToProject({
-        projectId,
-        files: picked,
-        prefix,
-        uploadToFal,
-        accessToken: token,
-      });
-      if (onImported) {
-        await onImported(result.assets);
-      }
-      onClose();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not open Google Picker.';
-      setErrorMsg(msg);
-      if (msg.toLowerCase().includes('expired') || msg.toLowerCase().includes('sign in')) {
-        setDriveToken(null);
-      }
-    } finally {
-      setIsOpeningPicker(false);
-      setIsImporting(false);
-    }
-  };
-
   if (!isOpen) return null;
 
   const modalTitle =
@@ -524,7 +467,9 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
       ? 'Choose Google Drive Save Destination'
       : pickerMode === 'select_source_folder'
         ? 'Select Project Source Folder'
-        : 'Company Google Drive Explorer');
+        : pickerMode === 'pick_reference_files'
+          ? 'Lock & Analyze Drive Reference Files'
+          : 'Company Google Drive Explorer');
 
   const modalSubtitle =
     subtitle ||
@@ -532,7 +477,9 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
       ? 'Browse and choose the exact Google Drive folder where all project backups, PDFs, and assets will be saved.'
       : pickerMode === 'select_source_folder'
         ? 'Browse and select company Google Drive folders containing client style guides, creative briefs, or assets.'
-        : 'Browse your company Google Drive directly within the studio. Click folders to open, or select files to import.');
+        : pickerMode === 'pick_reference_files'
+          ? 'Select Google Docs, Sheets, Slides, PDFs, or images to lock as reference files and auto-populate intake.'
+          : 'Browse your company Google Drive directly within the studio. Click folders to open, or select files to import.');
 
   return (
     <div
@@ -560,22 +507,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              disabled={isOpeningPicker || isImporting || isConnecting}
-              onClick={() => void handleOpenGooglePicker()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 brand-corner-sm cursor-pointer shadow-sm transition-colors"
-              title="Open official Google Picker"
-            >
-              {isOpeningPicker ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <HardDrive className="w-3.5 h-3.5" />
-              )}
-              <span>{isOpeningPicker ? 'Opening Picker...' : 'Google Picker'}</span>
-            </button>
-
-            {!driveToken || isSandboxDriveToken(driveToken) ? (
+            {!driveToken ? (
               <button
                 type="button"
                 disabled={isConnecting}
@@ -749,7 +681,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
 
             {/* Folder Actions */}
             <div className="flex items-center gap-2 shrink-0">
-              {driveToken && !isSandboxDriveToken(driveToken) && (
+              {driveToken && (
                 <>
                   <button
                     type="button"
@@ -772,7 +704,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                 </>
               )}
 
-              {pickerMode === 'pick_assets' && (
+              {(pickerMode === 'pick_assets' || pickerMode === 'pick_reference_files') && (
                 <div className="flex items-center gap-1 bg-[#F6F6F7] p-0.5 rounded border border-[#E2E2E6]">
                   {(['all', 'image', 'video', 'audio', 'pdf_and_docs'] as DriveMediaFilter[]).map((m) => (
                     <button
@@ -844,8 +776,16 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
         {/* Main Explorer View */}
         <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-white">
           {errorMsg && (
-            <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
-              {errorMsg}
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23] flex flex-wrap items-center justify-between gap-2">
+              <span>{errorMsg}</span>
+              <button
+                type="button"
+                disabled={isConnecting}
+                onClick={() => void handleConnect(true)}
+                className="px-2.5 py-1 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded cursor-pointer shrink-0"
+              >
+                {isConnecting ? 'Reconnecting...' : 'Grant Drive Read Access'}
+              </button>
             </div>
           )}
 
@@ -855,41 +795,28 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
             </div>
           )}
 
-          {!driveToken || isSandboxDriveToken(driveToken) ? (
+          {!driveToken ? (
             <div className="py-16 text-center space-y-3">
               <FolderSync className="w-10 h-10 text-[#C6202F] mx-auto" />
               <div className="text-base font-bold text-[#111114]">
                 Connect your Google Drive account
               </div>
               <p className="text-xs text-[#5A5A66] max-w-md mx-auto leading-relaxed">
-                Browse My Drive, Shared Drives, and team files directly inside this studio. Pick product photos, select save destination folders, or lock key reference docs.
+                Browse My Drive, Shared Drives, and team files directly inside this studio. Pick product photos, logos, select save destination folders, or lock key reference docs.
               </p>
               <div className="flex flex-wrap items-center justify-center gap-2.5">
                 <button
                   type="button"
                   disabled={isConnecting}
-                  onClick={() => void handleConnect()}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-[#1F1F1F] bg-white hover:bg-[#F2F2F5] border border-[#D8D8DF] brand-corner-sm cursor-pointer shadow-xs"
-                >
-                  {isConnecting ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-[#4A4A55]" />
-                  ) : (
-                    <FolderSync className="w-4 h-4 text-[#C6202F]" />
-                  )}
-                  {isConnecting ? 'Signing in...' : 'Sign in with Google'}
-                </button>
-                <button
-                  type="button"
-                  disabled={isOpeningPicker || isConnecting}
-                  onClick={() => void handleOpenGooglePicker()}
+                  onClick={() => void handleConnect(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 brand-corner-sm cursor-pointer shadow-xs"
                 >
-                  {isOpeningPicker ? (
+                  {isConnecting ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
-                    <HardDrive className="w-4 h-4" />
+                    <FolderSync className="w-4 h-4" />
                   )}
-                  {isOpeningPicker ? 'Opening Picker...' : 'Open Google Picker'}
+                  {isConnecting ? 'Signing in...' : 'Sign in with Google Drive'}
                 </button>
               </div>
             </div>
@@ -1086,7 +1013,7 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                         <FileText className="w-7 h-7 text-[#6E6E7A]" />
                       )}
 
-                      {pickerMode === 'pick_assets' && (
+                      {(pickerMode === 'pick_assets' || pickerMode === 'pick_reference_files') && (
                         <span
                           className={`absolute top-2 left-2 w-5 h-5 rounded-md flex items-center justify-center border ${
                             isSelected
@@ -1229,12 +1156,14 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
                 {isImporting ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Importing Assets...
+                    {pickerMode === 'pick_reference_files' ? 'Locking & Loading...' : 'Importing Assets...'}
                   </>
                 ) : (
                   <>
                     <FolderSync className="w-3.5 h-3.5" />
-                    Import Selected ({selectedItems.length})
+                    {pickerMode === 'pick_reference_files'
+                      ? `Lock & Analyze Selected (${selectedItems.length})`
+                      : `Import Selected (${selectedItems.length})`}
                   </>
                 )}
               </button>

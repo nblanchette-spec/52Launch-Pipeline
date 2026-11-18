@@ -644,26 +644,32 @@ export function extractFolderIdFromUrl(urlOrId?: string): string | null {
   return null;
 }
 
-export function generateShotListPdfBuffer(project: PipelineProject): Buffer {
+function createStyledPdfDoc(title: string, project: PipelineProject) {
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
   const margin = 42;
   const pageWidth = doc.internal.pageSize.getWidth();
   const maxWidth = pageWidth - margin * 2;
-  let y = 48;
+  let y = 46;
 
   const ensureSpace = (needed: number) => {
     if (y + needed > doc.internal.pageSize.getHeight() - 48) {
       doc.addPage();
-      y = 48;
+      y = 46;
     }
   };
 
-  const addWrappedText = (text: string, fontSize = 10, isBold = false, color: [number, number, number] = [30, 30, 35]) => {
+  const addText = (
+    text: string,
+    fontSize = 10,
+    isBold = false,
+    color: [number, number, number] = [24, 24, 30]
+  ) => {
     doc.setFont('helvetica', isBold ? 'bold' : 'normal');
     doc.setFontSize(fontSize);
     doc.setTextColor(color[0], color[1], color[2]);
-    const lines = doc.splitTextToSize(text || '', maxWidth) as string[];
-    const lineHeight = fontSize * 1.35;
+    const clean = (text || '—').replace(/[^\x09\x0A\x20-\x7E\xA0-\xFF]/g, ' ');
+    const lines = doc.splitTextToSize(clean, maxWidth) as string[];
+    const lineHeight = fontSize * 1.38;
     for (const line of lines) {
       ensureSpace(lineHeight);
       doc.text(line, margin, y);
@@ -671,72 +677,287 @@ export function generateShotListPdfBuffer(project: PipelineProject): Buffer {
     }
   };
 
-  // Title Header
-  addWrappedText('52LAUNCH PRODUCTION STUDIO — SHOT LIST & PRODUCTION PACKET', 14, true, [20, 20, 25]);
-  addWrappedText(`Client: ${project.client}   |   Product: ${project.product.name}`, 11, true, [180, 100, 10]);
-  addWrappedText(`Updated: ${new Date(project.updatedAt || Date.now()).toLocaleString()}`, 8.5, false, [110, 110, 120]);
-  y += 10;
+  const addDivider = () => {
+    ensureSpace(14);
+    doc.setDrawColor(218, 220, 226);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 10;
+  };
 
-  if (project.product.description) {
-    addWrappedText('Product Summary', 11, true);
-    addWrappedText(project.product.description, 9.5, false);
-    y += 6;
+  const addHeader = () => {
+    doc.setFillColor(17, 17, 20);
+    doc.rect(margin, y - 14, maxWidth, 44, 'F');
+    doc.setFillColor(198, 32, 47);
+    doc.rect(margin, y + 28, maxWidth, 2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text(`52LAUNCH PRODUCTION STUDIO  |  ${title.toUpperCase()}`, margin + 12, y + 4);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(220, 220, 228);
+    doc.text(
+      `${project.client || 'Client'} — ${project.product?.name || 'Product'}   ·   ${new Date().toLocaleDateString()}`,
+      margin + 12,
+      y + 19
+    );
+    y += 44;
+  };
+
+  addHeader();
+  return {
+    doc,
+    addText,
+    addDivider,
+    ensureSpace,
+    addGap: (pt = 6) => {
+      y += pt;
+    },
+    toBuffer: () => Buffer.from(doc.output('arraybuffer')),
+  };
+}
+
+export function generateShotListPdfBuffer(project: PipelineProject): Buffer {
+  const pdf = createStyledPdfDoc('Shot List & Storyboard Summary', project);
+  if (project.product?.description) {
+    pdf.addText('Product Summary', 11, true, [137, 26, 35]);
+    pdf.addText(project.product.description, 9.5);
+    pdf.addGap(6);
   }
-
-  if (project.creativeBrief?.hasGenerated) {
-    addWrappedText('Creative Brief', 11, true);
-    addWrappedText(`Objective: ${project.creativeBrief.objective}`, 9.5, false);
-    addWrappedText(`Key Message: ${project.creativeBrief.keyMessage}`, 9.5, false);
-    y += 8;
-  }
-
-  addWrappedText(`Master Shot List (${project.shots.length} Shots)`, 12, true);
-  y += 4;
-
+  pdf.addText(`Master Shot List (${project.shots.length} Shots)`, 11.5, true, [17, 17, 20]);
+  pdf.addGap(4);
   if (project.shots.length === 0) {
-    addWrappedText('No shots generated yet. Approve Brand Bible and Creative Brief to populate shots.', 9.5, false, [100, 100, 110]);
+    pdf.addText('No shots generated yet.', 9.5, false, [110, 110, 120]);
   } else {
     for (const shot of project.shots) {
-      ensureSpace(72);
-      doc.setDrawColor(215, 218, 224);
-      doc.line(margin, y, pageWidth - margin, y);
-      y += 12;
-      addWrappedText(
-        `${shot.id} · ${shot.durationSec}s · ${shot.route.toUpperCase()} (${shot.model}) · ${shot.deliverable} · Status: ${shot.status}`,
-        10,
-        true,
-        [20, 20, 25]
-      );
-      addWrappedText(`Scene: ${shot.scene}`, 9.5, false);
-      if (shot.voLine) addWrappedText(`VO: "${shot.voLine}"`, 9, false, [70, 70, 85]);
-      if (shot.shootDirection) addWrappedText(`Crew Direction: ${shot.shootDirection}`, 9, false, [70, 70, 85]);
-      if (shot.framePrompt) addWrappedText(`Frame Prompt: ${shot.framePrompt}`, 8.5, false, [100, 100, 110]);
-      y += 6;
-    }
-  }
-
-  if (project.shootPlan?.hasGenerated && project.shootPlan.shootDays.length > 0) {
-    y += 8;
-    addWrappedText('Shoot Days & Call Sheet Summary', 12, true);
-    for (const day of project.shootPlan.shootDays) {
-      ensureSpace(48);
-      addWrappedText(
-        `${day.dayLabel} — ${day.location} (Call: ${day.callTime} | Wrap: ${day.wrapTime})`,
+      pdf.ensureSpace(64);
+      pdf.addDivider();
+      pdf.addText(
+        `${shot.id} · ${shot.durationSec}s · ${shot.route.toUpperCase()} (${shot.model}) · ${shot.deliverable} · ${shot.status}`,
         10,
         true
       );
-      for (const setup of day.setups) {
-        addWrappedText(
-          `  • ${setup.setupName} [${setup.shotIds.join(', ')}] (${setup.estimatedMinutes}m) — ${setup.lightingNotes}`,
-          9,
-          false
-        );
-      }
-      y += 4;
+      pdf.addText(`Scene: ${shot.scene}`, 9.5);
+      if (shot.voLine) pdf.addText(`VO: "${shot.voLine}"`, 9, false, [75, 75, 88]);
+      if (shot.shootDirection) pdf.addText(`Crew Direction: ${shot.shootDirection}`, 9, false, [75, 75, 88]);
+      if (shot.framePrompt) pdf.addText(`Frame Prompt: ${shot.framePrompt}`, 8.5, false, [100, 100, 112]);
+      if (shot.videoPrompt) pdf.addText(`Video Prompt: ${shot.videoPrompt}`, 8.5, false, [100, 100, 112]);
+      pdf.addGap(4);
     }
   }
+  return pdf.toBuffer();
+}
 
-  return Buffer.from(doc.output('arraybuffer'));
+export function generateBrandBiblePdfBuffer(project: PipelineProject): Buffer {
+  const b = project.brandBible;
+  const pdf = createStyledPdfDoc('Brand Bible & Style Guide', project);
+  pdf.addText('Positioning', 11, true, [137, 26, 35]);
+  pdf.addText(b.positioning || 'Not generated yet.', 9.5);
+  pdf.addGap(6);
+  pdf.addText('Target Audience', 11, true, [137, 26, 35]);
+  pdf.addText(b.audience || 'Not specified.', 9.5);
+  pdf.addGap(6);
+  pdf.addText('Tone of Voice', 11, true, [137, 26, 35]);
+  pdf.addText(`Adjectives: ${(b.toneOfVoice?.adjectives || []).join(', ') || '—'}`, 9.5, true);
+  pdf.addText(b.toneOfVoice?.guidance || '', 9.5);
+  pdf.addGap(6);
+  pdf.addText('Visual Style, Palette & Typography', 11, true, [137, 26, 35]);
+  pdf.addText(`Color Palette: ${b.visualStyle?.palette || '—'}`, 9.5);
+  if (b.visualStyle?.typography) pdf.addText(`Typography: ${b.visualStyle.typography}`, 9.5);
+  pdf.addText(`Lighting: ${b.visualStyle?.lighting || '—'}`, 9.5);
+  pdf.addText(`Lens & Framing: ${b.visualStyle?.lensAndFraming || '—'}`, 9.5);
+  pdf.addText(`Color Grade: ${b.visualStyle?.grade || '—'}`, 9.5);
+  pdf.addGap(6);
+  if ((b.characters || []).length > 0) {
+    pdf.addText(`Recurring Characters (${b.characters.length})`, 11, true, [137, 26, 35]);
+    b.characters.forEach((c) => pdf.addText(`• ${c.name}: ${c.fixedDescriptor}`, 9.5));
+    pdf.addGap(6);
+  }
+  pdf.addText('Product Fidelity Rules', 11, true, [137, 26, 35]);
+  pdf.addText(b.productRules || '—', 9.5);
+  pdf.addGap(6);
+  pdf.addText('Claims Allowed', 11, true, [21, 101, 56]);
+  (b.claimsAllowed || []).forEach((c) => pdf.addText(`• ${c}`, 9.5));
+  if ((b.claimsToFlag || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Claims Flagged / Needs Proof', 11, true, [180, 90, 10]);
+    b.claimsToFlag.forEach((c) => pdf.addText(`• ${c}`, 9.5));
+  }
+  if ((b.bannedList || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Banned List (Never Show or Say)', 11, true, [168, 24, 38]);
+    b.bannedList.forEach((c) => pdf.addText(`• ${c}`, 9.5));
+  }
+  return pdf.toBuffer();
+}
+
+export function generateCreativeBriefPdfBuffer(project: PipelineProject): Buffer {
+  const br = project.creativeBrief;
+  const pdf = createStyledPdfDoc('Creative Brief', project);
+  pdf.addText('Campaign Objective', 11, true, [137, 26, 35]);
+  pdf.addText(br.objective || '—', 9.5);
+  pdf.addGap(6);
+  pdf.addText('Core Key Message', 11, true, [137, 26, 35]);
+  pdf.addText(br.keyMessage || '—', 9.5, true);
+  pdf.addGap(6);
+  pdf.addText('Recommended Concept', 11, true, [137, 26, 35]);
+  pdf.addText(br.recommendedConcept?.title || '—', 10, true);
+  pdf.addText(br.recommendedConcept?.reason || '', 9.5);
+  pdf.addGap(6);
+  if ((br.concepts || []).length > 0) {
+    pdf.addText('Explored Concepts', 11, true, [17, 17, 20]);
+    br.concepts.forEach((c, idx) => {
+      pdf.addDivider();
+      pdf.addText(`${idx + 1}. ${c.title}`, 10, true);
+      pdf.addText(`Logline: ${c.logline}`, 9.5);
+      pdf.addText(`Why It Works: ${c.whyItWorks}`, 9.5);
+      pdf.addText(`Risks: ${c.risks}`, 9.5, false, [120, 40, 45]);
+    });
+    pdf.addGap(6);
+  }
+  pdf.addText('Deliverables', 11, true, [137, 26, 35]);
+  (br.deliverables || []).forEach((d) => pdf.addText(`• ${d}`, 9.5));
+  pdf.addGap(6);
+  pdf.addText('VO Direction', 11, true, [137, 26, 35]);
+  pdf.addText(
+    `Speaker: ${br.voDirection?.speaker || '—'} | Pace: ${br.voDirection?.pace || '—'} | Arc: ${br.voDirection?.emotionalArc || '—'}`,
+    9.5
+  );
+  pdf.addGap(6);
+  pdf.addText('Claims Verification', 11, true, [21, 101, 56]);
+  pdf.addText(br.claimsCheck || '—', 9.5);
+  return pdf.toBuffer();
+}
+
+export function generateVoScriptPdfBuffer(project: PipelineProject): Buffer {
+  const pdf = createStyledPdfDoc('VO Script & Voice Direction', project);
+  if (project.voSettings) {
+    pdf.addText(
+      `Cast Voice: ${project.voSettings.voiceName} · Tone: ${project.voSettings.emotionalTone} · Speed: ${project.voSettings.speed}x · Language: ${project.voSettings.language}`,
+      9.5,
+      true,
+      [137, 26, 35]
+    );
+    pdf.addGap(6);
+  }
+  (project.voScript || []).forEach((line) => {
+    pdf.addDivider();
+    pdf.addText(
+      `${line.shotId} · ${line.speaker} · ${line.durationSec || 4}s (~${line.targetWords || 10} words)`,
+      10,
+      true
+    );
+    pdf.addText(`"${line.line}"`, 10);
+    if (line.direction) pdf.addText(`Delivery: ${line.direction}`, 9, false, [95, 95, 108]);
+  });
+  return pdf.toBuffer();
+}
+
+export function generateShootPlanPdfBuffer(project: PipelineProject): Buffer {
+  const plan = project.shootPlan;
+  const pdf = createStyledPdfDoc('Shoot Plan & Call Sheet', project);
+  for (const day of plan.shootDays || []) {
+    pdf.addDivider();
+    pdf.addText(
+      `${day.dayLabel} — ${day.location} (Call: ${day.callTime} | Lunch: ${day.lunchTime || '12:30 PM'} | Wrap: ${day.wrapTime})`,
+      10.5,
+      true,
+      [137, 26, 35]
+    );
+    for (const sb of day.scheduleBreakdown || []) {
+      pdf.addText(
+        `  [${sb.timeSlot}] ${sb.activity}${sb.shotIds?.length ? ` (${sb.shotIds.join(', ')})` : ''} — ${sb.notes}`,
+        9
+      );
+    }
+    for (const setup of day.setups || []) {
+      pdf.addText(
+        `  • Setup: ${setup.setupName} [${setup.shotIds.join(', ')}] (${setup.estimatedMinutes}m) — ${setup.lightingNotes}`,
+        9
+      );
+    }
+    pdf.addGap(4);
+  }
+  if ((plan.crew || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Crew Roster', 10.5, true);
+    plan.crew.forEach((c) => pdf.addText(`• ${c}`, 9.5));
+  }
+  if ((plan.equipment || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Camera, Lens & Grip Equipment', 10.5, true);
+    plan.equipment.forEach((e) => pdf.addText(`• ${e}`, 9.5));
+  }
+  if ((plan.propsAndUnits || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Props & Product Units', 10.5, true);
+    plan.propsAndUnits.forEach((p) =>
+      pdf.addText(`• ${p.item} — Qty: ${p.quantity} (${p.suppliedBy})`, 9.5)
+    );
+  }
+  if ((plan.risks || []).length > 0) {
+    pdf.addGap(4);
+    pdf.addText('Production Risks & Contingencies', 10.5, true, [168, 24, 38]);
+    plan.risks.forEach((r) => pdf.addText(`• ${r}`, 9.5));
+  }
+  return pdf.toBuffer();
+}
+
+export function generateMasterProductionPdfBuffer(project: PipelineProject): Buffer {
+  const pdf = createStyledPdfDoc('Master Production Packet', project);
+  pdf.addText(`Project Summary — ${project.client} (${project.product?.name})`, 11, true, [137, 26, 35]);
+  if (project.product?.description) pdf.addText(project.product.description, 9.5);
+  pdf.addText(
+    `Shots: ${project.shots.length} | VO Lines: ${project.voScript.length} | Shoot Days: ${project.shootPlan?.shootDays?.length || 0} | Locked Refs: ${(project.lockedDriveReferences || []).filter((r) => r.selected).length}`,
+    9.5,
+    true
+  );
+  pdf.addDivider();
+
+  if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
+    pdf.addText('1. BRAND BIBLE SUMMARY', 11, true, [137, 26, 35]);
+    pdf.addText(`Positioning: ${project.brandBible.positioning}`, 9.5);
+    pdf.addText(`Audience: ${project.brandBible.audience}`, 9.5);
+    pdf.addText(`Palette: ${project.brandBible.visualStyle?.palette || '—'}`, 9.5);
+    pdf.addText(`Typography: ${project.brandBible.visualStyle?.typography || '—'}`, 9.5);
+    pdf.addText(`Product Rules: ${project.brandBible.productRules || '—'}`, 9.5);
+    pdf.addDivider();
+  }
+
+  if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
+    pdf.addText('2. CREATIVE BRIEF SUMMARY', 11, true, [137, 26, 35]);
+    pdf.addText(`Objective: ${project.creativeBrief.objective}`, 9.5);
+    pdf.addText(`Key Message: ${project.creativeBrief.keyMessage}`, 9.5);
+    pdf.addText(
+      `Recommended Concept: ${project.creativeBrief.recommendedConcept?.title || '—'} — ${project.creativeBrief.recommendedConcept?.reason || ''}`,
+      9.5
+    );
+    pdf.addDivider();
+  }
+
+  if (project.shots.length > 0) {
+    pdf.addText(`3. MASTER SHOT LIST (${project.shots.length})`, 11, true, [137, 26, 35]);
+    for (const s of project.shots) {
+      pdf.addText(`${s.id} (${s.durationSec}s · ${s.route}): ${s.scene}`, 9);
+    }
+    pdf.addDivider();
+  }
+
+  if (project.voScript.length > 0) {
+    pdf.addText(`4. VOICEOVER SCRIPT (${project.voScript.length} Lines)`, 11, true, [137, 26, 35]);
+    for (const v of project.voScript) {
+      pdf.addText(`${v.shotId} [${v.speaker}]: "${v.line}"`, 9);
+    }
+    pdf.addDivider();
+  }
+
+  if (project.shootPlan?.hasGenerated && project.shootPlan.shootDays.length > 0) {
+    pdf.addText('5. CALL SHEET & SHOOT DAYS', 11, true, [137, 26, 35]);
+    for (const day of project.shootPlan.shootDays) {
+      pdf.addText(`${day.dayLabel} — ${day.location} (${day.callTime} to ${day.wrapTime})`, 9.5, true);
+    }
+  }
+  return pdf.toBuffer();
 }
 
 async function createDriveFolder(
@@ -785,6 +1006,22 @@ async function findDriveItemByName(
   if (!res.ok) return null;
   const data = await res.json();
   return Array.isArray(data.files) && data.files.length > 0 ? data.files[0] : null;
+}
+
+async function ensureSubfolder(
+  accessToken: string,
+  parentId: string,
+  subfolderName: string
+): Promise<string> {
+  const existing = await findDriveItemByName(
+    accessToken,
+    subfolderName,
+    parentId,
+    'application/vnd.google-apps.folder'
+  );
+  if (existing) return existing.id;
+  const created = await createDriveFolder(accessToken, subfolderName, parentId);
+  return created.id;
 }
 
 async function ensureBackupFolder(
@@ -854,12 +1091,11 @@ async function ensureBackupFolder(
         folderUrl: createdSub.webViewLink || `https://drive.google.com/drive/folders/${createdSub.id}`,
       };
     } catch {
-      // Under drive.file scope, writing inside an externally-created folder can return 403/404.
-      // Fall through cleanly to creating/reusing an app-owned project folder in the user's Drive.
+      // Fall through cleanly to dedicated folder in My Drive
     }
   }
 
-  // 3. Create/reuse dedicated app-owned folder in My Drive (always permitted under drive.file)
+  // 3. Create/reuse dedicated app-owned folder in My Drive
   const folderName = `52Launch Studio — ${project.client} (${project.product.name})`;
   const existingRoot = await findDriveItemByName(
     accessToken,
@@ -880,7 +1116,7 @@ async function ensureBackupFolder(
   };
 }
 
-async function upsertDriveFile(
+export async function upsertDriveFile(
   accessToken: string,
   folderId: string,
   filename: string,
@@ -923,6 +1159,104 @@ async function upsertDriveFile(
   return filename;
 }
 
+async function copyOrExportLockedRefToFolder(
+  accessToken: string,
+  targetFolderId: string,
+  ref: { fileId: string; name: string; mimeType: string }
+): Promise<string | null> {
+  const mime = (ref.mimeType || '').toLowerCase();
+  const baseName = ref.name || `reference-${ref.fileId}`;
+
+  // Google Workspace native files (Docs, Sheets, Slides, Drawings) -> export PDF / PNG so an immutable copy is archived
+  if (
+    mime === 'application/vnd.google-apps.document' ||
+    mime === 'application/vnd.google-apps.spreadsheet' ||
+    mime === 'application/vnd.google-apps.presentation' ||
+    mime === 'application/vnd.google-apps.drawing'
+  ) {
+    const exportMime =
+      mime === 'application/vnd.google-apps.drawing' ? 'image/png' : 'application/pdf';
+    const ext = exportMime === 'image/png' ? '.png' : '.pdf';
+    const outName = baseName.toLowerCase().endsWith(ext) ? baseName : `${baseName}${ext}`;
+    const res = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(ref.fileId)}/export?mimeType=${encodeURIComponent(exportMime)}`,
+      accessToken
+    );
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    await upsertDriveFile(accessToken, targetFolderId, outName, exportMime, buf);
+    return `Reference Files/${outName}`;
+  }
+
+  if (mime.startsWith('application/vnd.google-apps.')) {
+    return null;
+  }
+
+  // Binary file (PDF, image, video, docx, etc.): check if already copied in target folder
+  const existing = await findDriveItemByName(accessToken, baseName, targetFolderId);
+  if (existing) {
+    return `Reference Files/${baseName}`;
+  }
+
+  // Try fast Drive server-side copy first
+  const copyRes = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(ref.fileId)}/copy?supportsAllDrives=true&fields=id,name`,
+    accessToken,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: baseName,
+        parents: [targetFolderId],
+      }),
+    }
+  );
+  if (copyRes.ok) {
+    return `Reference Files/${baseName}`;
+  }
+
+  // Fallback: download and upload directly if copy blocked on external shared file
+  const dlRes = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(ref.fileId)}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`,
+    accessToken
+  );
+  if (!dlRes.ok) return null;
+  const buf = Buffer.from(await dlRes.arrayBuffer());
+  await upsertDriveFile(
+    accessToken,
+    targetFolderId,
+    baseName,
+    ref.mimeType || 'application/octet-stream',
+    buf
+  );
+  return `Reference Files/${baseName}`;
+}
+
+export async function uploadPdfBufferToProjectDrive(
+  project: PipelineProject,
+  accessToken: string,
+  filename: string,
+  pdfBuffer: Buffer,
+  preferredFolderUrl?: string
+): Promise<{
+  backupFolderId: string;
+  backupFolderUrl: string;
+  filename: string;
+}> {
+  const { folderId, folderUrl } = await ensureBackupFolder(
+    project,
+    accessToken,
+    preferredFolderUrl
+  );
+  const safeName = filename.toLowerCase().endsWith('.pdf') ? filename : `${filename}.pdf`;
+  await upsertDriveFile(accessToken, folderId, safeName, 'application/pdf', pdfBuffer);
+  return {
+    backupFolderId: folderId,
+    backupFolderUrl: folderUrl,
+    filename: safeName,
+  };
+}
+
 export async function syncProjectAssetsToDrive(
   project: PipelineProject,
   accessToken: string,
@@ -953,32 +1287,183 @@ export async function syncProjectAssetsToDrive(
     await upsertDriveFile(accessToken, folderId, `${slug}-project.json`, 'application/json', jsonBuffer)
   );
 
-  // 2. Shot List & Production PDF
-  const pdfBuffer = generateShotListPdfBuffer(project);
+  // 2. Archive ALL Generated Deliverable PDFs in Destination Folder
+  if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
+    const biblePdf = generateBrandBiblePdfBuffer(project);
+    uploadedFiles.push(
+      await upsertDriveFile(accessToken, folderId, `${slug}-brand-bible.pdf`, 'application/pdf', biblePdf)
+    );
+  }
+  if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
+    const briefPdf = generateCreativeBriefPdfBuffer(project);
+    uploadedFiles.push(
+      await upsertDriveFile(accessToken, folderId, `${slug}-creative-brief.pdf`, 'application/pdf', briefPdf)
+    );
+  }
+  const shotlistPdf = generateShotListPdfBuffer(project);
   uploadedFiles.push(
-    await upsertDriveFile(accessToken, folderId, `${slug}-shotlist.pdf`, 'application/pdf', pdfBuffer)
+    await upsertDriveFile(accessToken, folderId, `${slug}-shotlist-storyboard.pdf`, 'application/pdf', shotlistPdf)
+  );
+  if ((project.voScript || []).length > 0) {
+    const voPdf = generateVoScriptPdfBuffer(project);
+    uploadedFiles.push(
+      await upsertDriveFile(accessToken, folderId, `${slug}-vo-script.pdf`, 'application/pdf', voPdf)
+    );
+  }
+  if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
+    const callSheetPdf = generateShootPlanPdfBuffer(project);
+    uploadedFiles.push(
+      await upsertDriveFile(accessToken, folderId, `${slug}-call-sheet-shoot-plan.pdf`, 'application/pdf', callSheetPdf)
+    );
+  }
+  const masterPdf = generateMasterProductionPdfBuffer(project);
+  uploadedFiles.push(
+    await upsertDriveFile(accessToken, folderId, `${slug}-master-production-book.pdf`, 'application/pdf', masterPdf)
   );
 
-  // 3. Storyboard frame images
-  for (const shot of project.shots || []) {
-    if (!shot.frameImageUrl) continue;
-    const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
-    if (!inline) continue;
-    const ext = inline.mimeType.includes('jpeg')
-      ? 'jpg'
-      : inline.mimeType.includes('webp')
-        ? 'webp'
-        : 'png';
-    const frameBuf = Buffer.from(inline.data, 'base64');
-    uploadedFiles.push(
+  // 3. Archive Locked Drive Reference Files + Uploaded Product Photos, Brand Graphics & Style Guide PDFs into Reference Files/
+  const selectedRefs = (project.lockedDriveReferences || []).filter((r) => r.selected);
+  const productPhotos = project.product?.photos || [];
+  const brandGraphicsList = [
+    ...(project.brandBible?.brandGraphics || []),
+    ...(project.brandBible?.brandLogoUrl &&
+    !(project.brandBible.brandGraphics || []).some((g) => g.url === project.brandBible.brandLogoUrl)
+      ? [
+          {
+            id: 'primary-logo',
+            url: project.brandBible.brandLogoUrl,
+            caption: project.brandBible.brandLogoCaption || 'primary-brand-logo',
+          },
+        ]
+      : []),
+  ];
+  const guideDocs = project.brandGuideDocuments || [];
+
+  if (
+    selectedRefs.length > 0 ||
+    productPhotos.length > 0 ||
+    brandGraphicsList.length > 0 ||
+    guideDocs.length > 0
+  ) {
+    const refFolderId = await ensureSubfolder(accessToken, folderId, 'Reference Files');
+
+    for (const ref of selectedRefs) {
+      try {
+        const savedName = await copyOrExportLockedRefToFolder(accessToken, refFolderId, ref);
+        if (savedName) uploadedFiles.push(savedName);
+      } catch {
+        // Non-fatal: continue archiving remaining references
+      }
+    }
+
+    for (let i = 0; i < productPhotos.length; i++) {
+      const photo = productPhotos[i];
+      if (!photo.url) continue;
+      const inline = await readAssetAsInlineData(project.id, photo.url);
+      if (!inline) continue;
+      const ext = inline.mimeType.includes('jpeg')
+        ? 'jpg'
+        : inline.mimeType.includes('webp')
+          ? 'webp'
+          : 'png';
+      const safeCap = (photo.caption || `angle-${i + 1}`)
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40);
+      const fname = `product-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
       await upsertDriveFile(
         accessToken,
-        folderId,
-        `${shot.id}-storyboard-frame.${ext}`,
+        refFolderId,
+        fname,
         inline.mimeType,
-        frameBuf
-      )
-    );
+        Buffer.from(inline.data, 'base64')
+      );
+      uploadedFiles.push(`Reference Files/${fname}`);
+    }
+
+    for (let i = 0; i < brandGraphicsList.length; i++) {
+      const graphic = brandGraphicsList[i];
+      if (!graphic.url) continue;
+      const inline = await readAssetAsInlineData(project.id, graphic.url);
+      if (!inline) continue;
+      const ext = inline.mimeType.includes('jpeg')
+        ? 'jpg'
+        : inline.mimeType.includes('webp')
+          ? 'webp'
+          : 'png';
+      const safeCap = (graphic.caption || `graphic-${i + 1}`)
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40);
+      const fname = `brand-graphic-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
+      await upsertDriveFile(
+        accessToken,
+        refFolderId,
+        fname,
+        inline.mimeType,
+        Buffer.from(inline.data, 'base64')
+      );
+      uploadedFiles.push(`Reference Files/${fname}`);
+    }
+
+    for (const doc of guideDocs) {
+      if (!doc.url) continue;
+      const inline = await readAssetAsInlineData(project.id, doc.url);
+      if (!inline) continue;
+      const fname = doc.name.toLowerCase().endsWith('.pdf') ? doc.name : `${doc.name}.pdf`;
+      await upsertDriveFile(
+        accessToken,
+        refFolderId,
+        fname,
+        'application/pdf',
+        Buffer.from(inline.data, 'base64')
+      );
+      uploadedFiles.push(`Reference Files/${fname}`);
+    }
+  }
+
+  // 4. Storyboard Continuity Sheets & Generated Frames
+  const sbAssetsWithImages = (project.storyboardStudio?.assets || []).filter((a) =>
+    Boolean(a.imageUrl)
+  );
+  const shotsWithFrames = (project.shots || []).filter((s) => Boolean(s.frameImageUrl));
+
+  if (sbAssetsWithImages.length > 0 || shotsWithFrames.length > 0) {
+    const framesFolderId = await ensureSubfolder(accessToken, folderId, 'Storyboards & Frames');
+
+    for (const asset of sbAssetsWithImages) {
+      if (!asset.imageUrl) continue;
+      const inline = await readAssetAsInlineData(project.id, asset.imageUrl);
+      if (!inline) continue;
+      const ext = inline.mimeType.includes('jpeg') ? 'jpg' : 'png';
+      const safeName = (asset.name || asset.id)
+        .replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .slice(0, 40);
+      const fname = `sheet-${asset.category}-${safeName}.${ext}`;
+      await upsertDriveFile(
+        accessToken,
+        framesFolderId,
+        fname,
+        inline.mimeType,
+        Buffer.from(inline.data, 'base64')
+      );
+      uploadedFiles.push(`Storyboards & Frames/${fname}`);
+    }
+
+    for (const shot of shotsWithFrames) {
+      if (!shot.frameImageUrl) continue;
+      const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
+      if (!inline) continue;
+      const ext = inline.mimeType.includes('jpeg')
+        ? 'jpg'
+        : inline.mimeType.includes('webp')
+          ? 'webp'
+          : 'png';
+      const frameBuf = Buffer.from(inline.data, 'base64');
+      const fname = `${shot.id}-storyboard-frame.${ext}`;
+      await upsertDriveFile(accessToken, framesFolderId, fname, inline.mimeType, frameBuf);
+      uploadedFiles.push(`Storyboards & Frames/${fname}`);
+    }
   }
 
   return {

@@ -15,6 +15,7 @@ import {
   TopazUpscaleMode,
 } from '../../utils/videoStudioCatalog';
 import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface TopazUpscaleModalProps {
@@ -95,9 +96,11 @@ export const TopazUpscaleModal: React.FC<TopazUpscaleModalProps> = ({
           prefix: 'upscale-src',
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload video file.');
-      setCustomVideoUrl(data.falUrl || data.url);
+      const data = await parseJsonResponse<{ falUrl?: string; url?: string }>(
+        resp,
+        'Could not upload video file.'
+      );
+      setCustomVideoUrl(data.falUrl || data.url || null);
       if (!customLabel.trim()) {
         setCustomLabel(file.name.replace(/\.[^.]+$/, ''));
       }
@@ -132,8 +135,10 @@ export const TopazUpscaleModal: React.FC<TopazUpscaleModalProps> = ({
           creativity,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Topaz upscale failed.');
+      const data = await parseJsonResponse<{ project: PipelineProject }>(
+        resp,
+        'Topaz upscale failed.'
+      );
       onProjectUpdated(data.project);
       onClose();
     } catch (err) {

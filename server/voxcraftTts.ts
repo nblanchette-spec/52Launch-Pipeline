@@ -222,11 +222,6 @@ function getTtsClient(fallbackClient: GoogleGenAI): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     apiVersion: 'v1beta',
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
   });
 }
 

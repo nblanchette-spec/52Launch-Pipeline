@@ -60,6 +60,7 @@ export interface BrandBible {
   };
   brandLogoUrl?: string | null;
   brandLogoCaption?: string;
+  brandGraphics?: ProductPhoto[];
   characters: BibleCharacter[];
   productRules: string;
   bannedList: string[];

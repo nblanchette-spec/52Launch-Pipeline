@@ -14,6 +14,7 @@ import {
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
 import { ImportedDriveAsset } from '../../utils/googleDriveSync';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import { DriveAssetPickerModal } from './DriveAssetPickerModal';
 
 interface Step6FrameCheckProps {
@@ -86,8 +87,10 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dataUrl, prefix: 'frame' }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Could not upload replacement frame.');
+      const data = await parseJsonResponse<{ url: string }>(
+        resp,
+        'Could not upload replacement frame.'
+      );
 
       const nextShots: PipelineShot[] = project.shots.map((s) =>
         s.id === shotId

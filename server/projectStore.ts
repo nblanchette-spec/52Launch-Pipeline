@@ -7,7 +7,9 @@ import type {
   ProjectThumbnailItem,
 } from '../src/types/pipeline.ts';
 
-const DATA_ROOT = path.resolve(process.cwd(), 'data');
+const DATA_ROOT = path.resolve(
+  process.env.DATA_DIR || path.join(process.cwd(), 'data')
+);
 
 async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
@@ -122,7 +124,12 @@ export async function readAssetAsInlineData(
     const filename = path.basename(assetUrlOrDataUrl);
     filePath = path.join(getProjectAssetsDir(projectId), filename);
   } else if (assetUrlOrDataUrl.startsWith('/src/assets/')) {
-    filePath = path.resolve(process.cwd(), assetUrlOrDataUrl.slice(1));
+    const allowedAssetsDir = path.resolve(process.cwd(), 'src', 'assets');
+    const candidatePath = path.resolve(process.cwd(), assetUrlOrDataUrl.slice(1));
+    if (!candidatePath.startsWith(allowedAssetsDir + path.sep)) {
+      return null;
+    }
+    filePath = candidatePath;
   }
 
   if (!filePath) return null;
@@ -492,9 +499,14 @@ export function buildProjectSummary(proj: PipelineProject): ProjectSummary {
     const p = photos[i];
     pushThumb(p.url, p.caption || `Product ${i + 1}`, 'product');
   }
-  // Finally brand logo if nothing else filled all 6 slots
+  // Finally brand logo & brand graphics if slots remain
   if (proj.brandBible?.brandLogoUrl) {
     pushThumb(proj.brandBible.brandLogoUrl, 'Brand Logo', 'logo');
+  }
+  if (Array.isArray(proj.brandBible?.brandGraphics)) {
+    proj.brandBible.brandGraphics.forEach((g, idx) => {
+      pushThumb(g.url, g.caption || `Brand Graphic ${idx + 1}`, 'logo');
+    });
   }
 
   const next = computeNextStep(proj);
@@ -515,7 +527,10 @@ export function buildProjectSummary(proj: PipelineProject): ProjectSummary {
     voReadyCount,
     totalVoCount: voLines.length,
     coverImageUrl: thumbnailStrip[0]?.url || null,
-    brandLogoUrl: proj.brandBible?.brandLogoUrl || null,
+    brandLogoUrl:
+      proj.brandBible?.brandLogoUrl ||
+      proj.brandBible?.brandGraphics?.[0]?.url ||
+      null,
     thumbnailStrip,
     paletteHexes: Array.isArray(proj.extractedStyleGuide?.paletteHexes)
       ? proj.extractedStyleGuide.paletteHexes.slice(0, 5)
@@ -701,6 +716,12 @@ export async function importProjectBackupBundle(bundle: {
       ? {
           ...incoming.brandBible,
           brandLogoUrl: rewriteUrl(incoming.brandBible.brandLogoUrl),
+          brandGraphics: Array.isArray(incoming.brandBible.brandGraphics)
+            ? incoming.brandBible.brandGraphics.map((g) => ({
+                ...g,
+                url: rewriteUrl(g.url) || g.url,
+              }))
+            : incoming.brandBible.brandGraphics,
         }
       : incoming.brandBible,
     updatedAt: new Date().toISOString(),

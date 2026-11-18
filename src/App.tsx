@@ -22,33 +22,15 @@ import { PrintableStoryboardView } from './components/pipeline/PrintableStoryboa
 import { MasterPdfExportModal } from './components/pipeline/MasterPdfExportModal';
 import {
   getGoogleDriveAccessToken,
-  isSandboxDriveToken,
+  getLlmRoutingStatus,
+  LlmRoutingMode,
+  LlmRoutingStatus,
+  setLlmRoutingMode,
   syncProjectToDriveServer,
 } from './utils/googleDriveSync';
-
-// Preserve Classic Studio components so existing features remain accessible
-import { BrandProject, MacroPhase, WorkflowStepId } from './types/studio';
-import {
-  exportWorkspaceJson,
-  loadProjectsFromStorage,
-  parseImportedWorkspaceJson,
-  saveProjectsToStorage,
-} from './utils/storage';
-import { HeaderBar } from './components/HeaderBar';
-import { WorkflowSidebar } from './components/WorkflowSidebar';
-import { DashboardView } from './components/DashboardView';
-import { Step1Onboarding } from './components/Step1Onboarding';
-import { Step2BriefMoodBoard } from './components/Step2BriefMoodBoard';
-import { Step3Ideation } from './components/Step3Ideation';
-import { Step4StoryboardStudio } from './components/Step4StoryboardStudio';
-import { Step5ProductionPrep } from './components/Step5ProductionPrep';
-import { Step6ProductionBook } from './components/Step6ProductionBook';
-import { NewProjectModal } from './components/NewProjectModal';
-import { ExternalPhaseModal } from './components/ExternalPhaseModal';
+import { parseJsonResponse } from './utils/safeFetch';
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<'pipeline' | 'classic'>('pipeline');
-
   // --- New Production Pipeline State (Server /data storage) ---
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
   const [activeProject, setActiveProject] = useState<PipelineProject | null>(null);
@@ -61,6 +43,7 @@ export default function App() {
   const [isMasterExportOpen, setIsMasterExportOpen] = useState(false);
   const [isLoadingPipeline, setIsLoadingPipeline] = useState(true);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
+  const [llmStatus, setLlmStatus] = useState<LlmRoutingStatus | null>(null);
 
   const driveSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -79,7 +62,13 @@ export default function App() {
           ? [proj.googleDriveFolderUrl]
           : [];
 
-    if (urls.length === 0 && !proj.googleDriveBackupFolderId) return;
+    const hasDestination = Boolean(
+      proj.googleDriveDestinationFolderId || proj.googleDriveBackupFolderId
+    );
+    const hasLockedRefs = Boolean(
+      proj.lockedDriveReferences && proj.lockedDriveReferences.some((r) => r.selected)
+    );
+    if (urls.length === 0 && !hasDestination && !hasLockedRefs) return;
 
     if (driveSyncTimerRef.current) {
       clearTimeout(driveSyncTimerRef.current);
@@ -88,7 +77,7 @@ export default function App() {
     driveSyncTimerRef.current = setTimeout(() => {
       void (async () => {
         const token = await getGoogleDriveAccessToken();
-        if (!token || isSandboxDriveToken(token)) return;
+        if (!token) return;
         try {
           const res = await syncProjectToDriveServer(
             proj.id,
@@ -164,7 +153,10 @@ export default function App() {
 
   const fetchProjectSummariesOnly = async (): Promise<ProjectSummary[]> => {
     const resp = await fetch('/api/projects');
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ projects?: ProjectSummary[]; error?: string }>(
+      resp,
+      'Could not load projects.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not load projects.');
     const list: ProjectSummary[] = data.projects || [];
     setProjectSummaries(list);
@@ -188,7 +180,10 @@ export default function App() {
     requestedStep?: PipelineStepNumber
   ) => {
     const resp = await fetch(`/api/projects/${id}`);
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not load project.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not load project.');
     const proj: PipelineProject = data.project;
     setActiveProject(proj);
@@ -221,7 +216,10 @@ export default function App() {
     const resp = await fetch(`/api/projects/${projectId}`, {
       method: 'DELETE',
     });
-    const data = await resp.json().catch(() => ({}));
+    const data = await parseJsonResponse<{ error?: string }>(
+      resp,
+      'Could not delete project.'
+    ).catch(() => ({ error: 'Could not delete project.' }));
     if (!resp.ok) {
       showPipelineNotice(data.error || 'Could not delete project.');
       return;
@@ -248,10 +246,33 @@ export default function App() {
         if (mounted) setIsLoadingPipeline(false);
       }
     })();
+    void getLlmRoutingStatus()
+      .then((status) => {
+        if (mounted) setLlmStatus(status);
+      })
+      .catch(() => undefined);
     return () => {
       mounted = false;
     };
   }, []);
+
+  const handleChangeLlmMode = async (mode: LlmRoutingMode) => {
+    try {
+      const updated = await setLlmRoutingMode(mode);
+      setLlmStatus(updated);
+      const label =
+        mode === 'fal_gemini'
+          ? 'Gemini via Fal'
+          : mode === 'google_direct'
+            ? 'Gemini Direct'
+            : 'Auto (Gemini + Fal Backup)';
+      showPipelineNotice(`AI Engine switched to ${label}.`);
+    } catch (err) {
+      showPipelineNotice(
+        err instanceof Error ? err.message : 'Could not switch AI Engine mode.'
+      );
+    }
+  };
 
   const handleCreatePipelineProject = async (payload: {
     client: string;
@@ -264,6 +285,7 @@ export default function App() {
       shootLocationDatesBudgetNotes: string;
     };
     initialPhotoDataUrls: Array<{ dataUrl: string; caption: string }>;
+    initialBrandGraphicsDataUrls?: Array<{ dataUrl: string; caption: string }>;
     extractedStyleGuide?: ExtractedStyleGuide | null;
     stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
     initialLogoDataUrl?: string | null;
@@ -276,6 +298,7 @@ export default function App() {
       name: string;
       mimeType: string;
       webViewLink?: string;
+      folderUrl?: string;
       selected: boolean;
     }>;
   }) => {
@@ -284,7 +307,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not create project.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not create project.');
     const created: PipelineProject = data.project;
     setActiveProject(created);
@@ -318,20 +344,24 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project: updated }),
     });
-    const data = await resp.json();
-    if (resp.ok && data.project) {
-      setActiveProject(data.project);
-      scheduleDriveAutoSave(data.project);
+    const data = await parseJsonResponse<{ project?: PipelineProject; error?: string }>(
+      resp,
+      'Could not save project.'
+    );
+    const savedProject = data.project;
+    if (resp.ok && savedProject) {
+      setActiveProject(savedProject);
+      scheduleDriveAutoSave(savedProject);
       setProjectSummaries((prev) =>
         prev.map((s) =>
-          s.id === data.project.id
+          s.id === savedProject.id
             ? {
                 ...s,
-                client: data.project.client,
-                productName: data.project.product.name,
-                updatedAt: data.project.updatedAt,
-                shotCount: data.project.shots.length,
-                approvals: data.project.approvals,
+                client: savedProject.client,
+                productName: savedProject.product.name,
+                updatedAt: savedProject.updatedAt,
+                shotCount: savedProject.shots.length,
+                approvals: savedProject.approvals,
               }
             : s
         )
@@ -346,7 +376,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate Brand Bible.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate Brand Bible.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -360,7 +393,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate Creative Brief.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate Creative Brief.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -374,7 +410,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate Shot List.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate Shot List.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -388,7 +427,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id, shotId }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Frame Check failed.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Frame Check failed.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -401,7 +443,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id, shotId }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate video prompts.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate video prompts.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -426,7 +471,10 @@ export default function App() {
         chainedLastFrameDataUrl,
       }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Video generation failed.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Video generation failed.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -440,7 +488,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate VO script.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate VO script.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -454,7 +505,10 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId: activeProject.id }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+      resp,
+      'Could not generate Shoot Plan.'
+    );
     if (!resp.ok) throw new Error(data.error || 'Could not generate Shoot Plan.');
     setActiveProject(data.project);
     scheduleDriveAutoSave(data.project);
@@ -476,7 +530,10 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed),
       });
-      const data = await resp.json();
+      const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
+        resp,
+        'Could not import project backup.'
+      );
       if (!resp.ok) throw new Error(data.error || 'Could not import project backup.');
       await refreshProjectList(data.project.id);
       showPipelineNotice(`Imported "${data.project.product.name}".`);
@@ -486,183 +543,6 @@ export default function App() {
       );
     }
   };
-
-  // --- Preserved Classic Storyboard Studio State ---
-  const initialClassic = loadProjectsFromStorage();
-  const [classicProjects, setClassicProjects] = useState<BrandProject[]>(
-    initialClassic.projects
-  );
-  const [classicActiveId, setClassicActiveId] = useState<string>(
-    initialClassic.activeProjectId
-  );
-  const [classicStep, setClassicStep] = useState<WorkflowStepId>('step-4');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [newClassicOpen, setNewClassicOpen] = useState(false);
-  const [phaseModal, setPhaseModal] = useState<{
-    projectId: string;
-    mode: 'phase-2' | 'phase-3';
-  } | null>(null);
-
-  const classicActiveProject =
-    classicProjects.find((p) => p.id === classicActiveId) ?? classicProjects[0];
-
-  useEffect(() => {
-    saveProjectsToStorage(classicProjects, classicActiveProject.id);
-  }, [classicProjects, classicActiveProject.id]);
-
-  if (workspaceMode === 'classic') {
-    const modalProject = phaseModal
-      ? classicProjects.find((p) => p.id === phaseModal.projectId) ?? classicActiveProject
-      : classicActiveProject;
-
-    return (
-      <div className="min-h-screen bg-[#F6F6F7] text-[#111114] flex flex-col">
-        <div className="no-print bg-white border-b border-[#E2E2E6] px-5 py-2 flex items-center justify-between text-xs">
-          <span className="text-[#5A5A66]">
-            Viewing Classic 6-Step Storyboard Studio
-          </span>
-          <button
-            type="button"
-            onClick={() => setWorkspaceMode('pipeline')}
-            className="px-3.5 py-1 font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] brand-corner-sm cursor-pointer transition-colors"
-          >
-            Return to Production Pipeline
-          </button>
-        </div>
-
-        <HeaderBar
-          projects={classicProjects}
-          activeProject={classicActiveProject}
-          activeStep={classicStep}
-          onSelectProject={(id) => setClassicActiveId(id)}
-          onSelectStep={(step) => setClassicStep(step)}
-          onOpenNewProject={() => setNewClassicOpen(true)}
-          onExportBackup={() => exportWorkspaceJson(classicProjects)}
-          onImportBackup={async (file) => {
-            const text = await file.text();
-            const imported = parseImportedWorkspaceJson(text);
-            setClassicProjects((prev) => [...imported, ...prev]);
-          }}
-          onOpenPhaseModal={(mode) =>
-            setPhaseModal({ projectId: classicActiveProject.id, mode })
-          }
-          onSetActivePhase={(phase: MacroPhase) =>
-            setClassicProjects((prev) =>
-              prev.map((p) =>
-                p.id === classicActiveProject.id ? { ...p, activePhase: phase } : p
-              )
-            )
-          }
-        />
-
-        <div className="flex flex-1 min-h-0">
-          {classicStep !== 'dashboard' && (
-            <WorkflowSidebar
-              project={classicActiveProject}
-              activeStep={classicStep}
-              collapsed={sidebarCollapsed}
-              onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-              onSelectStep={(step) => setClassicStep(step)}
-            />
-          )}
-
-          <main className="flex-1 min-w-0 overflow-y-auto print-only-full">
-            {classicStep === 'dashboard' && (
-              <DashboardView
-                projects={classicProjects}
-                activeProjectId={classicActiveProject.id}
-                onSelectProjectAndStep={(pid, step) => {
-                  setClassicActiveId(pid);
-                  setClassicStep(step);
-                }}
-                onOpenNewProject={() => setNewClassicOpen(true)}
-                onDeleteProject={(pid) =>
-                  setClassicProjects((prev) => prev.filter((p) => p.id !== pid))
-                }
-                onOpenPhaseModal={(pid, mode) => setPhaseModal({ projectId: pid, mode })}
-              />
-            )}
-            {classicStep === 'step-1' && (
-              <Step1Onboarding
-                project={classicActiveProject}
-                onUpdateProject={(u) =>
-                  setClassicProjects((prev) =>
-                    prev.map((p) => (p.id === u.id ? u : p))
-                  )
-                }
-                onNavigateStep={(s) => setClassicStep(s)}
-              />
-            )}
-            {classicStep === 'step-2' && (
-              <Step2BriefMoodBoard
-                project={classicActiveProject}
-                onUpdateProject={(u) =>
-                  setClassicProjects((prev) =>
-                    prev.map((p) => (p.id === u.id ? u : p))
-                  )
-                }
-                onNavigateStep={(s) => setClassicStep(s)}
-              />
-            )}
-            {classicStep === 'step-3' && (
-              <Step3Ideation
-                project={classicActiveProject}
-                onUpdateProject={(u) =>
-                  setClassicProjects((prev) =>
-                    prev.map((p) => (p.id === u.id ? u : p))
-                  )
-                }
-                onNavigateStep={(s) => setClassicStep(s)}
-              />
-            )}
-            {classicStep === 'step-4' && (
-              <Step4StoryboardStudio
-                project={classicActiveProject}
-                onUpdateProject={(u) =>
-                  setClassicProjects((prev) =>
-                    prev.map((p) => (p.id === u.id ? u : p))
-                  )
-                }
-                onNavigateStep={(s) => setClassicStep(s)}
-              />
-            )}
-            {classicStep === 'step-5' && (
-              <Step5ProductionPrep
-                project={classicActiveProject}
-                onUpdateProject={(u) =>
-                  setClassicProjects((prev) =>
-                    prev.map((p) => (p.id === u.id ? u : p))
-                  )
-                }
-                onNavigateStep={(s) => setClassicStep(s)}
-              />
-            )}
-            {classicStep === 'step-6' && (
-              <Step6ProductionBook project={classicActiveProject} />
-            )}
-          </main>
-        </div>
-
-        <NewProjectModal
-          isOpen={newClassicOpen}
-          onClose={() => setNewClassicOpen(false)}
-          onCreate={(p) => {
-            setClassicProjects((prev) => [p, ...prev]);
-            setClassicActiveId(p.id);
-            setClassicStep('step-1');
-          }}
-        />
-        <ExternalPhaseModal
-          mode={phaseModal?.mode ?? null}
-          project={modalProject}
-          onClose={() => setPhaseModal(null)}
-          onUpdateProject={(u) =>
-            setClassicProjects((prev) => prev.map((p) => (p.id === u.id ? u : p)))
-          }
-        />
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-[#F6F6F7] text-[#111114] flex flex-col">
@@ -705,7 +585,10 @@ export default function App() {
         onOpenMasterExport={() => setIsMasterExportOpen(true)}
         onDownloadBackup={handleDownloadBackup}
         onImportBackup={(f) => void handleImportBackup(f)}
-        onSwitchToClassicStudio={() => setWorkspaceMode('classic')}
+        llmMode={llmStatus?.mode}
+        falConfigured={llmStatus?.falConfigured}
+        geminiConfigured={llmStatus?.geminiConfigured}
+        onChangeLlmMode={(mode) => void handleChangeLlmMode(mode)}
       />
 
       {pipelineNotice && (

@@ -41,6 +41,7 @@ import {
   RotateCcw,
   ClipboardPaste,
 } from 'lucide-react';
+import { parseJsonResponse } from '../../utils/safeFetch';
 import {
   PipelineProject,
   PipelineShot,
@@ -408,7 +409,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     setCurrentTime(0);
 
     fetch('/api/pipeline/fal-status')
-      .then((r) => r.json())
+      .then((r) => parseJsonResponse<{ falKeyConfigured?: boolean }>(r))
       .then((d) => setFalKeyConfigured(Boolean(d.falKeyConfigured)))
       .catch(() => setFalKeyConfigured(null));
   }, [isOpen, shot?.id, chainedStartFrameDataUrl]);
@@ -617,9 +618,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
         prefix,
       }),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || 'Could not upload media file.');
-    return data.url || data.falUrl;
+    const data = await parseJsonResponse<{ url?: string; falUrl?: string }>(
+      resp,
+      'Could not upload media file.'
+    );
+    return (data.url || data.falUrl) as string;
   };
 
   const handleVideoUpload = async (
@@ -751,8 +754,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           referenceTask,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Video generation failed.');
+      const data = await parseJsonResponse<{ project: PipelineProject; clipId?: string }>(
+        resp,
+        'Video generation failed.'
+      );
       onProjectUpdated(data.project);
       if (data.clipId) {
         setActiveClipId(data.clipId);
@@ -802,8 +807,10 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           safetyTolerance,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Draft enhance failed.');
+      const data = await parseJsonResponse<{ project: PipelineProject }>(
+        resp,
+        'Draft enhance failed.'
+      );
       onProjectUpdated(data.project);
       setPreviewVersion('original');
     } catch (err) {
@@ -907,7 +914,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             <Info className="w-4 h-4 text-[#C6202F] shrink-0" />
             <span>
               Your shot frame and prompt are pre-loaded. Add{' '}
-              <strong className="font-mono">FAL_KEY</strong> in Settings &gt; Secrets to
+              <strong className="font-mono">FAL_KEY</strong> to the server environment variables to
               run live renders directly inside this studio.
             </span>
           </div>

@@ -9,37 +9,18 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
+import { parseJsonResponse } from './safeFetch';
 
 export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/drive.metadata.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',
 ];
-
-export function isSandboxDriveToken(token?: string | null): boolean {
-  return token === 'sandbox-token-52launch';
-}
 
 export interface DriveUser {
   email: string | null;
   displayName?: string | null;
   photoURL?: string | null;
-}
-
-declare global {
-  interface Window {
-    google?: {
-      picker?: {
-        PickerBuilder: any;
-        DocsView: any;
-        ViewId: any;
-        DocsViewMode: any;
-        Feature: any;
-        Action: any;
-        Response: any;
-        Document: any;
-      };
-    };
-  }
 }
 
 const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -73,13 +54,6 @@ export function initDriveAuth(
   authFailureCallback = onAuthFailure || null;
 
   return onAuthStateChanged(auth, (user: User | null) => {
-    if (isSandboxDriveToken(cachedAccessToken) && cachedUser) {
-      if (onAuthSuccess && cachedAccessToken) {
-        onAuthSuccess(cachedUser, cachedAccessToken);
-      }
-      return;
-    }
-
     if (user) {
       const mapped = mapFirebaseUser(user);
       cachedUser = mapped;
@@ -140,23 +114,6 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   } finally {
     isSigningIn = false;
   }
-}
-
-export async function signInWithSandboxMode(): Promise<{
-  user: DriveUser;
-  accessToken: string;
-}> {
-  const userInfo: DriveUser = {
-    email: 'nblanchette@52launch.com',
-    displayName: '52Launch Director (Sandbox)',
-    photoURL: undefined,
-  };
-  cachedAccessToken = 'sandbox-token-52launch';
-  cachedUser = userInfo;
-  if (authSuccessCallback) {
-    authSuccessCallback(userInfo, cachedAccessToken);
-  }
-  return { user: userInfo, accessToken: cachedAccessToken };
 }
 
 export async function logoutGoogleDrive(): Promise<void> {
@@ -596,8 +553,14 @@ export async function syncProjectToDriveServer(
       destinationFolderUrl,
     }),
   });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || 'Drive sync failed.');
+  const data = await parseJsonResponse<{
+    syncedAt?: string;
+    backupFolderUrl?: string;
+    backupFolderId?: string;
+    uploadedFiles?: string[];
+    warning?: string;
+    error?: string;
+  }>(resp, 'Drive sync failed.');
   return {
     success: true,
     syncedAt: data.syncedAt || new Date().toISOString(),
@@ -606,6 +569,78 @@ export async function syncProjectToDriveServer(
     uploadedFiles: data.uploadedFiles,
     warning: data.warning,
   };
+}
+
+export async function uploadPdfToDriveServer(params: {
+  projectId: string;
+  filename: string;
+  pdfBlob: Blob;
+  destinationFolderId?: string;
+  destinationFolderUrl?: string;
+  accessToken?: string | null;
+}): Promise<{
+  success: boolean;
+  backupFolderId?: string;
+  backupFolderUrl?: string;
+  filename?: string;
+}> {
+  const token = params.accessToken ?? cachedAccessToken;
+  if (!token) {
+    throw new Error('Sign in with Google Drive first to auto-save PDFs.');
+  }
+
+  const pdfBase64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not encode PDF for Drive upload.'));
+    reader.readAsDataURL(params.pdfBlob);
+  });
+
+  const resp = await fetch('/api/pipeline/drive-upload-pdf', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      projectId: params.projectId,
+      filename: params.filename,
+      pdfBase64,
+      destinationFolderId: params.destinationFolderId,
+      destinationFolderUrl: params.destinationFolderUrl,
+    }),
+  });
+
+  return parseJsonResponse<{
+    success: boolean;
+    backupFolderId?: string;
+    backupFolderUrl?: string;
+    filename?: string;
+  }>(resp, 'Could not upload PDF to Google Drive.');
+}
+
+export type LlmRoutingMode = 'auto' | 'fal_gemini' | 'google_direct';
+
+export interface LlmRoutingStatus {
+  mode: LlmRoutingMode;
+  geminiConfigured: boolean;
+  falConfigured: boolean;
+  geminiTextModel: string;
+  falGeminiModel: string;
+}
+
+export async function getLlmRoutingStatus(): Promise<LlmRoutingStatus> {
+  const resp = await fetch('/api/pipeline/llm-status');
+  return parseJsonResponse<LlmRoutingStatus>(resp, 'Could not fetch AI routing status.');
+}
+
+export async function setLlmRoutingMode(mode: LlmRoutingMode): Promise<LlmRoutingStatus> {
+  const resp = await fetch('/api/pipeline/llm-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  return parseJsonResponse<LlmRoutingStatus>(resp, 'Could not switch AI engine mode.');
 }
 
 export interface ParsedDriveIntakeResult {
@@ -625,6 +660,8 @@ export interface ParsedDriveIntakeResult {
   stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
   suggestedLogoUrl?: string;
   suggestedLogoDataUrl?: string;
+  importedBrandGraphics?: Array<{ id: string; url: string; caption: string }>;
+  importedBrandGraphicsDataUrls?: Array<{ dataUrl: string; caption: string }>;
   extractedGraphicCount?: number;
   analyzedFiles: Array<{ name: string; status: string }>;
   importedPhotos?: Array<{ id: string; url: string; caption: string }>;
@@ -641,9 +678,10 @@ export async function parseLocalStyleGuidePdfs(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ projectId, files }),
   });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || 'Could not parse PDF style guide.');
-  return data;
+  return parseJsonResponse<ParsedDriveIntakeResult>(
+    resp,
+    'Could not parse PDF style guide.'
+  );
 }
 
 export async function parseGoogleDriveFolder(
@@ -668,12 +706,10 @@ export async function parseGoogleDriveFolder(
       filesToAnalyze,
     }),
   });
-  const data = await resp.json();
   if (resp.status === 401) {
     cachedAccessToken = null;
   }
-  if (!resp.ok) throw new Error(data.error || 'Drive parse failed.');
-  return data;
+  return parseJsonResponse<ParsedDriveIntakeResult>(resp, 'Drive parse failed.');
 }
 
 export interface ImportedDriveAsset {
@@ -713,11 +749,13 @@ export async function importDriveFilesToProject(params: {
       uploadToFal: Boolean(params.uploadToFal),
     }),
   });
-  const data = await resp.json();
   if (resp.status === 401) {
     cachedAccessToken = null;
   }
-  if (!resp.ok) throw new Error(data.error || 'Could not import selected Drive files.');
+  const data = await parseJsonResponse<{
+    assets?: ImportedDriveAsset[];
+    warnings?: string[];
+  }>(resp, 'Could not import selected Drive files.');
   return {
     assets: Array.isArray(data.assets) ? data.assets : [],
     warnings: Array.isArray(data.warnings) ? data.warnings : [],

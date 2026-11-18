@@ -33,7 +33,6 @@ import {
   getGoogleDriveUser,
   initDriveAuth,
   signInWithGoogleDrive,
-  signInWithSandboxMode,
   logoutGoogleDrive,
   syncProjectToDriveServer,
   listGoogleDriveFolderFiles,
@@ -43,10 +42,9 @@ import {
   createDriveFolderOnDrive,
   DriveFileItem,
   ImportedDriveAsset,
-  isSandboxDriveToken,
 } from '../../utils/googleDriveSync';
-import { openGooglePicker } from '../../utils/googlePicker';
-import { DriveAssetPickerModal } from './DriveAssetPickerModal';
+import { parseJsonResponse } from '../../utils/safeFetch';
+import { DriveAssetPickerModal, DriveMediaFilter } from './DriveAssetPickerModal';
 
 interface Step1NewProjectProps {
   existingProject: PipelineProject | null;
@@ -66,6 +64,7 @@ interface Step1NewProjectProps {
       shootLocationDatesBudgetNotes: string;
     };
     initialPhotoDataUrls: Array<{ dataUrl: string; caption: string }>;
+    initialBrandGraphicsDataUrls?: Array<{ dataUrl: string; caption: string }>;
     extractedStyleGuide?: ExtractedStyleGuide | null;
     stagedGuidePdfs?: Array<{ name: string; dataUrl: string; graphicCount?: number }>;
     initialLogoDataUrl?: string | null;
@@ -184,7 +183,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     return map;
   });
 
-  // Staged vs existing photos
+  // Staged vs existing product photos
   const [stagedPhotos, setStagedPhotos] = useState<
     Array<{ id: string; dataUrl: string; caption: string }>
   >([]);
@@ -192,7 +191,28 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     isNewMode ? [] : existingProject?.product.photos || []
   );
 
+  // Staged vs existing brand graphics / logo variations
+  const [stagedBrandGraphics, setStagedBrandGraphics] = useState<
+    Array<{ id: string; dataUrl: string; caption: string }>
+  >([]);
+  const [existingBrandGraphics, setExistingBrandGraphics] = useState<ProductPhoto[]>(() => {
+    if (isNewMode || !existingProject) return [];
+    const list = [...(existingProject.brandBible?.brandGraphics || [])];
+    if (
+      existingProject.brandBible?.brandLogoUrl &&
+      !list.some((g) => g.url === existingProject.brandBible.brandLogoUrl)
+    ) {
+      list.unshift({
+        id: 'primary-logo',
+        url: existingProject.brandBible.brandLogoUrl,
+        caption: existingProject.brandBible.brandLogoCaption || 'Primary Brand Logo',
+      });
+    }
+    return list;
+  });
+
   const displayedPhotos = isNewMode ? stagedPhotos : existingPhotos;
+  const displayedBrandGraphics = isNewMode ? stagedBrandGraphics : existingBrandGraphics;
 
   const [audience, setAudience] = useState(
     isNewMode ? '' : existingProject?.intake.audience || ''
@@ -210,9 +230,13 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
-  const [photoPickerOpen, setPhotoPickerOpen] = useState(false);
+  const [isUploadingGraphic, setIsUploadingGraphic] = useState(false);
+  const [photoPickerTarget, setPhotoPickerTarget] = useState<'product' | 'logo' | null>(null);
+  const [refFilePickerOpen, setRefFilePickerOpen] = useState(false);
+  const [refPickerFilter, setRefPickerFilter] = useState<DriveMediaFilter>('all');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const brandGraphicInputRef = useRef<HTMLInputElement>(null);
 
   // PDF Brand & Style Guide intake state
   const [brandGuideDocuments, setBrandGuideDocuments] = useState<BrandGuideDocument[]>(
@@ -229,7 +253,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     isNewMode ? null : existingProject?.brandBible?.brandLogoUrl || null
   );
   const [isParsingLocalGuide, setIsParsingLocalGuide] = useState(false);
-  const [isOpeningPicker, setIsOpeningPicker] = useState(false);
   const [localGuideStatus, setLocalGuideStatus] = useState<string | null>(null);
   const [isDraggingGuidePdf, setIsDraggingGuidePdf] = useState(false);
   const guideFileInputRef = useRef<HTMLInputElement>(null);
@@ -282,6 +305,9 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       if (existingProject.brandBible?.brandLogoUrl !== undefined) {
         setExistingLogoUrl(existingProject.brandBible.brandLogoUrl || null);
       }
+      if (existingProject.brandBible?.brandGraphics) {
+        setExistingBrandGraphics(existingProject.brandBible.brandGraphics);
+      }
       if (existingProject.product?.photos) {
         setExistingPhotos(existingProject.product.photos);
       }
@@ -296,6 +322,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     existingProject?.brandGuideDocuments,
     existingProject?.extractedStyleGuide,
     existingProject?.brandBible?.brandLogoUrl,
+    existingProject?.brandBible?.brandGraphics,
     existingProject?.product?.photos,
   ]);
 
@@ -324,23 +351,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     } catch (err) {
       setDriveErrorMsg(
         err instanceof Error ? err.message : 'Could not sign in with Google.'
-      );
-    } finally {
-      setIsConnectingDrive(false);
-    }
-  };
-
-  const handleSandboxConnect = async () => {
-    setErrorMsg(null);
-    setDriveErrorMsg(null);
-    setIsConnectingDrive(true);
-    try {
-      const res = await signInWithSandboxMode();
-      setDriveToken(res.accessToken);
-      setDriveUserEmail(res.user.email || null);
-    } catch (err) {
-      setDriveErrorMsg(
-        err instanceof Error ? err.message : 'Could not enter sandbox mode.'
       );
     } finally {
       setIsConnectingDrive(false);
@@ -428,6 +438,36 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       }
     }
 
+    let nextBrandGraphics = existingBrandGraphics;
+    if (
+      (isNewMode || !existingProject) &&
+      Array.isArray(result.importedBrandGraphicsDataUrls) &&
+      result.importedBrandGraphicsDataUrls.length > 0
+    ) {
+      setStagedBrandGraphics((prev) => {
+        const existingCaptions = new Set(prev.map((p) => p.caption));
+        const additions = result
+          .importedBrandGraphicsDataUrls!.filter((img) => !existingCaptions.has(img.caption))
+          .map((img, idx) => ({
+            id: `intake-graphic-staged-${Date.now()}-${idx}`,
+            dataUrl: img.dataUrl,
+            caption: img.caption,
+          }));
+        return [...prev, ...additions];
+      });
+    } else if (
+      existingProject &&
+      Array.isArray(result.importedBrandGraphics) &&
+      result.importedBrandGraphics.length > 0
+    ) {
+      const seenUrls = new Set(existingBrandGraphics.map((g) => g.url));
+      const uniqueAdditions = result.importedBrandGraphics.filter((g) => !seenUrls.has(g.url));
+      if (uniqueAdditions.length > 0) {
+        nextBrandGraphics = [...existingBrandGraphics, ...uniqueAdditions];
+        setExistingBrandGraphics(nextBrandGraphics);
+      }
+    }
+
     let nextLogoUrl = existingLogoUrl;
     if ((isNewMode || !existingProject) && result.suggestedLogoDataUrl && !initialLogoDataUrl) {
       setInitialLogoDataUrl(result.suggestedLogoDataUrl);
@@ -447,6 +487,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       const mergedBrandBible = {
         ...existingProject.brandBible,
         brandLogoUrl: existingProject.brandBible.brandLogoUrl || nextLogoUrl || undefined,
+        brandGraphics: nextBrandGraphics,
         positioning:
           existingProject.brandBible.positioning ||
           result.styleGuide?.summary ||
@@ -479,6 +520,18 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
           result.styleGuide?.productVisualRules ||
           '',
       };
+
+      const lockedRefsPayload =
+        opts?.allFiles && opts.allFiles.length > 0
+          ? opts.allFiles.map((f) => ({
+              fileId: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              webViewLink: f.webViewLink,
+              folderUrl: f.folderUrl,
+              selected: opts.lockedIds ? Boolean(opts.lockedIds[f.id]) : true,
+            }))
+          : existingProject.lockedDriveReferences;
 
       await onUpdateProject({
         ...existingProject,
@@ -513,24 +566,15 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               googleDriveFolderUrl: opts.validUrls[0],
             }
           : {}),
-        ...(opts?.allFiles && opts.allFiles.length > 0
-          ? {
-              lockedDriveReferences: opts.allFiles.map((f) => ({
-                fileId: f.id,
-                name: f.name,
-                mimeType: f.mimeType,
-                webViewLink: f.webViewLink,
-                folderUrl: f.folderUrl,
-                selected: opts.lockedIds ? Boolean(opts.lockedIds[f.id]) : true,
-              })),
-            }
-          : {}),
+        lockedDriveReferences: lockedRefsPayload,
       });
     }
 
     const importedCount =
       (result.importedPhotos?.length || 0) +
-      (result.importedPhotoDataUrls?.length || 0);
+      (result.importedPhotoDataUrls?.length || 0) +
+      (result.importedBrandGraphics?.length || 0) +
+      (result.importedBrandGraphicsDataUrls?.length || 0);
     const pdfCount = result.extractedGraphicCount ?? 0;
     const summaryText = `Analyzed ${result.analyzedFiles.length} ${sourceLabel} file(s)${
       importedCount > 0
@@ -541,135 +585,59 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     return summaryText;
   };
 
-  const ensureDriveToken = async (): Promise<string> => {
-    if (driveToken && !isSandboxDriveToken(driveToken)) return driveToken;
-    const authRes = await signInWithGoogleDrive(false);
-    setDriveToken(authRes.accessToken);
-    setDriveUserEmail(authRes.user.email || null);
-    return authRes.accessToken;
-  };
-
-  const handlePickSaveFolderWithPicker = async () => {
-    setDriveErrorMsg(null);
-    setIsOpeningPicker(true);
-    try {
-      const token = await ensureDriveToken();
-      const picked = await openGooglePicker({
-        accessToken: token,
-        mode: 'folders',
-        multiSelect: false,
-        title: 'Select Save Destination Folder in Google Drive',
-      });
-      if (picked && picked.length > 0) {
-        const folder = picked[0];
-        handleSelectDestinationFolder({
-          id: folder.id,
-          name: folder.name,
-          url:
-            folder.webViewLink ||
-            `https://drive.google.com/drive/folders/${folder.id}`,
-        });
-      }
-    } catch (err) {
-      setDriveErrorMsg(
-        err instanceof Error ? err.message : 'Could not open Google Picker.'
-      );
-    } finally {
-      setIsOpeningPicker(false);
-    }
-  };
-
-  const handlePickSourceFolderWithPicker = async () => {
-    setDriveErrorMsg(null);
-    setIsOpeningPicker(true);
-    try {
-      const token = await ensureDriveToken();
-      const picked = await openGooglePicker({
-        accessToken: token,
-        mode: 'folders',
-        multiSelect: true,
-        title: 'Pick Source Folder(s) from Google Drive',
-      });
-      if (picked && picked.length > 0) {
-        const newUrls = picked.map(
-          (f) => f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`
-        );
-        const merged = Array.from(
-          new Set([...googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean), ...newUrls])
-        );
-        setGoogleDriveFolderUrls(merged.length > 0 ? merged : ['']);
-        setDriveStatusNote(`Added ${picked.length} source folder(s) via Google Picker.`);
-      }
-    } catch (err) {
-      setDriveErrorMsg(
-        err instanceof Error ? err.message : 'Could not open Google Picker.'
-      );
-    } finally {
-      setIsOpeningPicker(false);
-    }
-  };
-
-  const handlePickFilesWithPicker = async (autoParse: boolean) => {
+  const handleSelectReferenceDriveFiles = async (picked: DriveFileItem[]) => {
+    if (!picked || picked.length === 0) return;
     setDriveErrorMsg(null);
     setLocalGuideStatus(null);
-    setIsOpeningPicker(true);
+
+    const nextFilesMap = new Map<string, DriveFileItem>();
+    driveFiles.forEach((f) => nextFilesMap.set(f.id, f));
+    picked.forEach((f) => nextFilesMap.set(f.id, f));
+    const mergedFiles = Array.from(nextFilesMap.values());
+
+    const nextLocked: Record<string, boolean> = { ...lockedFileIds };
+    picked.forEach((f) => {
+      nextLocked[f.id] = true;
+    });
+
+    setDriveFiles(mergedFiles);
+    setLockedFileIds(nextLocked);
+
+    // Immediately lock & parse selected files and populate intake
+    let token = driveToken;
+    if (!token) {
+      const res = await signInWithGoogleDrive(true);
+      token = res.accessToken;
+      setDriveToken(token);
+      setDriveUserEmail(res.user.email || null);
+    }
+
+    setIsParsingDrive(true);
     try {
-      const token = await ensureDriveToken();
-      const picked = await openGooglePicker({
-        accessToken: token,
-        mode: 'files',
-        mediaFilter: 'pdf_and_docs',
-        multiSelect: true,
-        title: 'Pick PDF Brand Guides, Briefs & Assets from Google Drive',
+      const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
+      const selectedFiles = mergedFiles.filter((f) => Boolean(nextLocked[f.id]));
+      const result = await parseGoogleDriveFolder(
+        existingProject?.id || 'new',
+        validUrls,
+        picked,
+        token
+      );
+      const note = await applyParsedIntakeResult(result, 'Google Drive', {
+        validUrls: validUrls.length ? validUrls : undefined,
+        allFiles: selectedFiles,
+        lockedIds: nextLocked,
       });
-      if (!picked || picked.length === 0) return;
+      setDriveStatusNote(note);
+      setLocalGuideStatus(note);
 
-      const pickedDriveItems: DriveFileItem[] = picked.map((f) => ({
-        id: f.id,
-        name: f.name,
-        mimeType: f.mimeType,
-        webViewLink: f.webViewLink,
-      }));
-
-      setDriveFiles((prev) => {
-        const seen = new Set(prev.map((p) => p.id));
-        const additions = pickedDriveItems.filter((p) => !seen.has(p.id));
-        return [...prev, ...additions];
-      });
-      setLockedFileIds((prev) => {
-        const next = { ...prev };
-        pickedDriveItems.forEach((f) => {
-          next[f.id] = true;
-        });
-        return next;
-      });
-      if (autoParse) {
-        setIsParsingDrive(true);
-        try {
-          const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
-          const result = await parseGoogleDriveFolder(
-            existingProject?.id || 'new',
-            validUrls,
-            pickedDriveItems,
-            token
-          );
-          const note = await applyParsedIntakeResult(result, 'Google Picker', {
-            validUrls: validUrls.length ? validUrls : undefined,
-          });
-          setDriveStatusNote(note);
-          setLocalGuideStatus(note);
-        } finally {
-          setIsParsingDrive(false);
-        }
-      } else {
-        setDriveStatusNote(`Selected ${pickedDriveItems.length} file(s) from Google Picker.`);
+      if (existingProject && (destinationFolderId || validUrls.length > 0)) {
+        void triggerDriveAutoSave(existingProject.id);
       }
     } catch (err) {
-      setDriveErrorMsg(
-        err instanceof Error ? err.message : 'Could not pick files with Google Picker.'
-      );
+      const msg = err instanceof Error ? err.message : 'Could not read selected Drive files.';
+      setDriveErrorMsg(msg);
     } finally {
-      setIsOpeningPicker(false);
+      setIsParsingDrive(false);
     }
   };
 
@@ -721,7 +689,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     const selectedFiles = driveFiles.filter((f) => Boolean(lockedFileIds[f.id]));
 
     if (validUrls.length === 0 && selectedFiles.length === 0) {
-      setDriveErrorMsg('Enter at least one Google Drive folder URL or pick files via Google Picker first.');
+      setDriveErrorMsg('Enter at least one Google Drive folder URL or click "Browse & Pick Files" first.');
       return;
     }
 
@@ -732,7 +700,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
     try {
       let token = driveToken;
-      if (!token || isSandboxDriveToken(token)) {
+      if (!token) {
         const authRes = await signInWithGoogleDrive(true);
         token = authRes.accessToken;
         setDriveToken(token);
@@ -746,7 +714,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
       if (filesToAnalyze.length === 0) {
         setDriveErrorMsg(
-          'No files were found in the linked Google Drive folder(s). Verify the folder URL(s) or pick specific files with Google Picker.'
+          'No files were found in the linked Google Drive folder(s). Verify the folder URL(s) or browse Drive to pick files.'
         );
         return;
       }
@@ -760,10 +728,13 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
       const summaryNote = await applyParsedIntakeResult(result, 'Drive', {
         validUrls,
-        allFiles: selectedFiles,
+        allFiles: selectedFiles.length > 0 ? selectedFiles : filesToAnalyze,
         lockedIds: lockedFileIds,
       });
       setDriveStatusNote(summaryNote);
+      if (existingProject && (destinationFolderId || validUrls.length > 0)) {
+        void triggerDriveAutoSave(existingProject.id);
+      }
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Could not analyze Google Drive files.';
@@ -787,6 +758,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     setIsUploadingPhoto(true);
 
     try {
+      let runningExisting = [...existingPhotos];
       for (let i = 0; i < files.length; i++) {
         const dataUrl = await readAndOptimizeLocalImage(files[i], 1400);
         if (isNewMode || !existingProject) {
@@ -804,23 +776,27 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ dataUrl, prefix: 'product' }),
           });
-          const data = await resp.json();
-          if (!resp.ok) throw new Error(data.error || 'Could not upload photo.');
+          const data = await parseJsonResponse<{ url: string; error?: string }>(
+            resp,
+            'Could not upload photo.'
+          );
           const nextPhoto: ProductPhoto = {
             id: `photo-${Date.now()}-${i}`,
             url: data.url,
             caption: files[i].name,
           };
-          const nextPhotos = [...existingPhotos, nextPhoto];
-          setExistingPhotos(nextPhotos);
-          await onUpdateProject({
-            ...existingProject,
-            product: {
-              ...existingProject.product,
-              photos: nextPhotos,
-            },
-          });
+          runningExisting = [...runningExisting, nextPhoto];
+          setExistingPhotos(runningExisting);
         }
+      }
+      if (!isNewMode && existingProject && runningExisting.length > existingPhotos.length) {
+        await onUpdateProject({
+          ...existingProject,
+          product: {
+            ...existingProject.product,
+            photos: runningExisting,
+          },
+        });
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not add product photo.');
@@ -830,8 +806,115 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     }
   };
 
-  const handleDriveProductPhotosImported = async (assets: ImportedDriveAsset[]) => {
+  const handleBrandGraphicSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     setErrorMsg(null);
+    setIsUploadingGraphic(true);
+
+    try {
+      let runningExisting = [...existingBrandGraphics];
+      let nextLogo = existingLogoUrl;
+      for (let i = 0; i < files.length; i++) {
+        const dataUrl = await readAndOptimizeLocalImage(files[i], 1400);
+        if (isNewMode || !existingProject) {
+          setStagedBrandGraphics((prev) => [
+            ...prev,
+            {
+              id: `staged-graphic-${Date.now()}-${i}`,
+              dataUrl,
+              caption: files[i].name,
+            },
+          ]);
+          if (i === 0 && !initialLogoDataUrl) {
+            setInitialLogoDataUrl(dataUrl);
+          }
+        } else {
+          const resp = await fetch(`/api/projects/${existingProject.id}/assets`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataUrl, prefix: 'logo' }),
+          });
+          const data = await parseJsonResponse<{ url: string; error?: string }>(
+            resp,
+            'Could not upload brand graphic.'
+          );
+          const nextGraphic: ProductPhoto = {
+            id: `logo-${Date.now()}-${i}`,
+            url: data.url,
+            caption: files[i].name,
+          };
+          runningExisting = [...runningExisting, nextGraphic];
+          if (!nextLogo) nextLogo = data.url;
+        }
+      }
+      if (!isNewMode && existingProject && runningExisting.length > existingBrandGraphics.length) {
+        setExistingBrandGraphics(runningExisting);
+        setExistingLogoUrl(nextLogo);
+        await onUpdateProject({
+          ...existingProject,
+          brandBible: {
+            ...existingProject.brandBible,
+            brandLogoUrl: nextLogo,
+            brandLogoCaption:
+              existingProject.brandBible.brandLogoCaption || runningExisting[0]?.caption,
+            brandGraphics: runningExisting,
+          },
+        });
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not add brand logo or graphic.');
+    } finally {
+      setIsUploadingGraphic(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDriveAssetsImported = async (assets: ImportedDriveAsset[]) => {
+    setErrorMsg(null);
+    if (photoPickerTarget === 'logo') {
+      if (isNewMode || !existingProject) {
+        const additions = assets
+          .filter((a) => Boolean(a.dataUrl))
+          .map((a, idx) => ({
+            id: `drive-graphic-${Date.now()}-${idx}`,
+            dataUrl: a.dataUrl!,
+            caption: a.name,
+          }));
+        if (additions.length > 0) {
+          setStagedBrandGraphics((prev) => [...prev, ...additions]);
+          if (!initialLogoDataUrl) {
+            setInitialLogoDataUrl(additions[0].dataUrl);
+          }
+        }
+      } else {
+        const additions: ProductPhoto[] = assets
+          .filter((a) => Boolean(a.url))
+          .map((a, idx) => ({
+            id: `logo-drive-${Date.now()}-${idx}`,
+            url: a.url!,
+            caption: a.name,
+          }));
+        if (additions.length > 0) {
+          const nextGraphics = [...existingBrandGraphics, ...additions];
+          const nextLogo = existingLogoUrl || additions[0].url;
+          setExistingBrandGraphics(nextGraphics);
+          setExistingLogoUrl(nextLogo);
+          await onUpdateProject({
+            ...existingProject,
+            brandBible: {
+              ...existingProject.brandBible,
+              brandLogoUrl: nextLogo,
+              brandLogoCaption:
+                existingProject.brandBible.brandLogoCaption || additions[0].caption,
+              brandGraphics: nextGraphics,
+            },
+          });
+        }
+      }
+      return;
+    }
+
     if (isNewMode || !existingProject) {
       const additions = assets
         .filter((a) => Boolean(a.dataUrl))
@@ -885,7 +968,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
 
   const handleCreateDedicatedDriveFolder = async () => {
     let token = driveToken;
-    if (!token || isSandboxDriveToken(token)) {
+    if (!token) {
       try {
         const res = await signInWithGoogleDrive(false);
         token = res.accessToken;
@@ -932,7 +1015,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
     setDriveErrorMsg(null);
     let token = driveToken;
-    if (!token || isSandboxDriveToken(token)) {
+    if (!token) {
       try {
         const authRes = await signInWithGoogleDrive();
         token = authRes.accessToken;
@@ -1016,9 +1099,14 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             dataUrl: p.dataUrl,
             caption: p.caption,
           })),
+          initialBrandGraphicsDataUrls: stagedBrandGraphics.map((g) => ({
+            dataUrl: g.dataUrl,
+            caption: g.caption,
+          })),
           extractedStyleGuide,
           stagedGuidePdfs,
-          initialLogoDataUrl,
+          initialLogoDataUrl:
+            initialLogoDataUrl || stagedBrandGraphics[0]?.dataUrl || null,
           googleDriveFolderUrls: validUrls,
           googleDriveDestinationFolderId: destinationFolderId,
           googleDriveDestinationFolderUrl: destinationFolderUrl,
@@ -1046,7 +1134,8 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
           extractedStyleGuide,
           brandBible: {
             ...existingProject.brandBible,
-            brandLogoUrl: existingLogoUrl ?? existingProject.brandBible.brandLogoUrl,
+            brandLogoUrl: existingLogoUrl ?? existingBrandGraphics[0]?.url ?? existingProject.brandBible.brandLogoUrl,
+            brandGraphics: existingBrandGraphics,
           },
           googleDriveFolderUrls: validUrls,
           googleDriveFolderUrl: validUrls[0] || undefined,
@@ -1206,17 +1295,6 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                     )}
                     <span>{isConnectingDrive ? 'Signing in...' : 'Sign in with Google Drive'}</span>
                   </button>
-
-                  <button
-                    type="button"
-                    disabled={isConnectingDrive}
-                    onClick={() => void handleSandboxConnect()}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 rounded-lg cursor-pointer transition-colors shadow-sm"
-                    title="Bypass origin_mismatch & work account OAuth restrictions"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Connect Sandbox Mode (Bypass OAuth)</span>
-                  </button>
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5">
@@ -1274,24 +1352,11 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  disabled={isOpeningPicker}
-                  onClick={() => void handlePickSaveFolderWithPicker()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] disabled:opacity-50 rounded-lg cursor-pointer transition-colors shadow-sm"
-                >
-                  {isOpeningPicker ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
-                  ) : (
-                    <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
-                  )}
-                  Google Picker
-                </button>
-                <button
-                  type="button"
                   onClick={() => setDestinationPickerOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] rounded-lg cursor-pointer transition-colors shadow-sm"
                 >
                   <FolderSync className="w-3.5 h-3.5 text-[#C6202F]" />
-                  Browse Company Drive
+                  Browse Google Drive
                 </button>
                 <button
                   type="button"
@@ -1312,33 +1377,48 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             {/* Deliverables Checklist */}
             <div className="pt-3 border-t border-[#EAEAEF]">
               <div className="text-[11px] font-semibold text-[#3A3A44] uppercase tracking-wider mb-2">
-                Deliverables Automatically Saved &amp; Synced Here:
+                All Deliverables &amp; Reference Files Automatically Saved Here:
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">project.json</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Live pipeline state)</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">brand-bible.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Brand rules &amp; logos)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">shotlist.pdf</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Shots &amp; visuals)</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">creative-brief.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Concepts &amp; strategy)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">call-sheet.pdf</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Schedule &amp; lunch)</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">shotlist-storyboard.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Shots &amp; frames)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">master-book.pdf</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Deck / slideshow)</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">vo-script.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Voiceover &amp; timing)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">storyboard-frames/</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Visual frames)</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">call-sheet-shoot-plan.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Schedule &amp; crew)</span>
+                </div>
+                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">master-production-book.pdf</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Full deck / book)</span>
+                </div>
+                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">Reference Files/</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Locked docs, photos &amp; logos)</span>
+                </div>
+                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">Storyboards &amp; Frames/</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Generated frames + JSON)</span>
                 </div>
                 {existingProject && (
                   <button
@@ -1395,8 +1475,16 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
           </div>
 
           {driveErrorMsg && (
-            <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
-              {driveErrorMsg}
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23] flex flex-wrap items-center justify-between gap-2">
+              <span className="flex-1 min-w-[240px]">{driveErrorMsg}</span>
+              <button
+                type="button"
+                disabled={isConnectingDrive}
+                onClick={() => void handleConnectDrive(true)}
+                className="px-3 py-1.5 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 rounded-md cursor-pointer shrink-0"
+              >
+                {isConnectingDrive ? 'Connecting...' : 'Re-authorize Drive Read Access'}
+              </button>
             </div>
           )}
 
@@ -1416,21 +1504,15 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  disabled={isOpeningPicker || isParsingDrive}
-                  onClick={() => void handlePickFilesWithPicker(true)}
+                  disabled={isParsingDrive}
+                  onClick={() => {
+                    setRefPickerFilter('all');
+                    setRefFilePickerOpen(true);
+                  }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white hover:bg-[#FDF4F5] border border-[#D5D5DC] hover:border-[#C6202F] hover:text-[#C6202F] disabled:opacity-50 rounded-lg cursor-pointer transition-colors"
                 >
                   <FileText className="w-3.5 h-3.5 text-[#C6202F]" />
-                  Pick Files (Picker)
-                </button>
-                <button
-                  type="button"
-                  disabled={isOpeningPicker}
-                  onClick={() => void handlePickSourceFolderWithPicker()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-white hover:bg-[#F6F6F7] border border-[#D5D5DC] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors"
-                >
-                  <Folder className="w-3.5 h-3.5 text-[#C6202F]" />
-                  Pick Folder (Picker)
+                  Pick Reference Files from Drive
                 </button>
                 <button
                   type="button"
@@ -1438,7 +1520,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#111114] bg-[#F6F6F7] hover:bg-[#EAEAEF] border border-[#D5D5DC] rounded-lg cursor-pointer transition-colors"
                 >
                   <FolderSync className="w-3.5 h-3.5 text-[#C6202F]" />
-                  Browse Drive
+                  Browse Source Folders
                 </button>
                 <button
                   type="button"
@@ -1537,12 +1619,15 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  disabled={isOpeningPicker || isParsingDrive}
-                  onClick={() => void handlePickFilesWithPicker(true)}
+                  disabled={isParsingDrive}
+                  onClick={() => {
+                    setRefPickerFilter('pdf_and_docs');
+                    setRefFilePickerOpen(true);
+                  }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] disabled:opacity-50 rounded-lg cursor-pointer transition-colors"
                 >
                   <FolderSync className="w-3.5 h-3.5" />
-                  Pick PDFs (Picker)
+                  Pick PDFs from Drive
                 </button>
                 <button
                   type="button"
@@ -1746,149 +1831,268 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
             )}
           </div>
 
-          {/* 3. Product Photos & Extracted Graphics */}
-          <div className="pt-5 border-t border-[#EAEAEF] space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
-                  <ImageIcon className="w-4 h-4 text-[#C6202F]" />
-                  Product Photos &amp; Brand Graphics
-                  {displayedPhotos.length > 0 && (
-                    <span className="text-[11px] font-mono font-normal text-[#6E6E7A]">
-                      ({displayedPhotos.length})
-                    </span>
-                  )}
+          {/* 3. Product Photos (Multiple Angles) & Brand Graphics / Logos */}
+          <div className="pt-5 border-t border-[#EAEAEF] grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* 3A. Multiple Product Photos */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
+                    <ImageIcon className="w-4 h-4 text-[#C6202F]" />
+                    Product Photos (Multiple Angles)
+                    {displayedPhotos.length > 0 && (
+                      <span className="text-[11px] font-mono font-normal text-[#6E6E7A]">
+                        ({displayedPhotos.length})
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-[#5A5A66] mt-0.5">
+                    Add front, back, side, and in-hand angles of the product for consistent generation.
+                  </p>
                 </div>
-                <p className="text-[11px] text-[#5A5A66] mt-0.5">
-                  Upload local product photos, pick from Drive, or mark any imported graphic as your primary Brand Logo.
-                </p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setPhotoPickerTarget('product')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                  >
+                    <FolderSync className="w-3.5 h-3.5" />
+                    Pick from Drive
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isUploadingPhoto}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
+                  >
+                    {isUploadingPhoto ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
+                    )}
+                    {isUploadingPhoto ? 'Uploading...' : 'Upload Angles'}
+                  </button>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => void handlePhotoSelect(e)}
+                />
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPhotoPickerOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
-                >
-                  <FolderSync className="w-3.5 h-3.5" />
-                  Pick from Google Drive
-                </button>
-                <button
-                  type="button"
-                  disabled={isUploadingPhoto}
+
+              {displayedPhotos.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  {displayedPhotos.map((p, idx) => {
+                    const imgSrc = (p as ProductPhoto).url || (p as { dataUrl: string }).dataUrl;
+                    return (
+                      <div
+                        key={p.id || idx}
+                        className="bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg overflow-hidden flex flex-col aspect-square relative group"
+                      >
+                        <img
+                          src={imgSrc}
+                          alt={p.caption || `Product Angle ${idx + 1}`}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                        <span className="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/75 text-[10px] font-mono text-white">
+                          Angle {idx + 1}
+                        </span>
+                        {p.caption && (
+                          <div className="absolute bottom-0 inset-x-0 bg-black/75 px-2 py-1 text-[10px] text-white truncate">
+                            {p.caption}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isNewMode || !existingProject) {
+                              setStagedPhotos((prev) => prev.filter((_, i) => i !== idx));
+                            } else {
+                              const next = existingPhotos.filter((_, i) => i !== idx);
+                              setExistingPhotos(next);
+                              void onUpdateProject({
+                                ...existingProject,
+                                product: { ...existingProject.product, photos: next },
+                              });
+                            }
+                          }}
+                          className="absolute top-2 right-2 p-1.5 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded-md opacity-0 group-hover:opacity-100 cursor-pointer"
+                          title="Remove product photo"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
+                  className="border-2 border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 bg-[#FBFBFC] rounded-xl p-6 text-center cursor-pointer transition-colors"
                 >
-                  {isUploadingPhoto ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
-                  ) : (
-                    <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
-                  )}
-                  {isUploadingPhoto ? 'Uploading...' : 'Upload photos'}
-                </button>
-              </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => void handlePhotoSelect(e)}
-              />
+                  <ImageIcon className="w-7 h-7 text-[#8A8A96] mx-auto mb-1.5" />
+                  <div className="text-xs font-medium text-[#3A3A44]">
+                    Upload multiple product angles (PNG, JPG or WEBP)
+                  </div>
+                </div>
+              )}
             </div>
 
-            {displayedPhotos.length > 0 ? (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                {displayedPhotos.map((p, idx) => {
-                  const imgSrc = (p as ProductPhoto).url || (p as { dataUrl: string }).dataUrl;
-                  const isLogo =
-                    isNewMode || !existingProject
-                      ? initialLogoDataUrl === imgSrc
-                      : existingLogoUrl === imgSrc;
-                  return (
-                    <div
-                      key={p.id || idx}
-                      className={`bg-[#F6F6F7] border rounded-lg overflow-hidden flex flex-col aspect-square relative group ${
-                        isLogo ? 'border-[#C6202F] ring-2 ring-[#C6202F]/30' : 'border-[#E2E2E6]'
-                      }`}
-                    >
-                      <img
-                        src={imgSrc}
-                        alt={p.caption || `Product ${idx + 1}`}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isNewMode || !existingProject) {
-                            setInitialLogoDataUrl(isLogo ? null : imgSrc);
-                          } else {
-                            const nextLogo = isLogo ? null : imgSrc;
-                            setExistingLogoUrl(nextLogo);
-                            void onUpdateProject({
-                              ...existingProject,
-                              brandBible: {
-                                ...existingProject.brandBible,
-                                brandLogoUrl: nextLogo,
-                                brandLogoCaption: nextLogo ? p.caption || 'Brand Logo' : undefined,
-                              },
-                            });
-                          }
-                        }}
-                        className={`absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold cursor-pointer transition-all ${
-                          isLogo
-                            ? 'bg-[#C6202F] text-white shadow'
-                            : 'bg-black/75 text-white/90 hover:bg-[#C6202F] opacity-0 group-hover:opacity-100'
+            {/* 3B. Multiple Brand Logos & Graphics */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-[#111114] flex items-center gap-1.5">
+                    <Award className="w-4 h-4 text-[#C6202F]" />
+                    Brand Logos &amp; Graphics (Variations)
+                    {displayedBrandGraphics.length > 0 && (
+                      <span className="text-[11px] font-mono font-normal text-[#6E6E7A]">
+                        ({displayedBrandGraphics.length})
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-[#5A5A66] mt-0.5">
+                    Add horizontal, stacked, icon, dark/light logo variations and brand graphics.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setPhotoPickerTarget('logo')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] hover:bg-[#FCE8EA] rounded-lg cursor-pointer transition-colors"
+                  >
+                    <FolderSync className="w-3.5 h-3.5" />
+                    Pick from Drive
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isUploadingGraphic}
+                    onClick={() => brandGraphicInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#891A23] rounded-lg cursor-pointer"
+                  >
+                    {isUploadingGraphic ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C6202F]" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-[#C6202F]" />
+                    )}
+                    {isUploadingGraphic ? 'Uploading...' : 'Upload Logos'}
+                  </button>
+                </div>
+                <input
+                  ref={brandGraphicInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => void handleBrandGraphicSelect(e)}
+                />
+              </div>
+
+              {displayedBrandGraphics.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  {displayedBrandGraphics.map((g, idx) => {
+                    const imgSrc = (g as ProductPhoto).url || (g as { dataUrl: string }).dataUrl;
+                    const isPrimaryLogo =
+                      isNewMode || !existingProject
+                        ? initialLogoDataUrl === imgSrc || (!initialLogoDataUrl && idx === 0)
+                        : existingLogoUrl === imgSrc || (!existingLogoUrl && idx === 0);
+                    return (
+                      <div
+                        key={g.id || idx}
+                        className={`bg-white border rounded-lg overflow-hidden flex flex-col aspect-square relative group ${
+                          isPrimaryLogo ? 'border-[#C6202F] ring-2 ring-[#C6202F]/30' : 'border-[#E2E2E6]'
                         }`}
                       >
-                        <Award className="w-3 h-3" />
-                        {isLogo ? 'Brand Logo' : 'Set as Logo'}
-                      </button>
-                      {p.caption && (
-                        <div className="absolute bottom-0 inset-x-0 bg-black/75 px-2 py-1 text-[10px] text-white truncate">
-                          {p.caption}
+                        <div className="flex-1 p-2 flex items-center justify-center overflow-hidden bg-white">
+                          <img
+                            src={imgSrc}
+                            alt={g.caption || `Brand Graphic ${idx + 1}`}
+                            referrerPolicy="no-referrer"
+                            className="max-w-full max-h-full object-contain"
+                          />
                         </div>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isNewMode || !existingProject) {
-                            if (initialLogoDataUrl === imgSrc) setInitialLogoDataUrl(null);
-                            setStagedPhotos((prev) => prev.filter((_, i) => i !== idx));
-                          } else {
-                            const next = existingPhotos.filter((_, i) => i !== idx);
-                            setExistingPhotos(next);
-                            const clearedLogo = existingLogoUrl === imgSrc ? null : existingLogoUrl;
-                            if (existingLogoUrl === imgSrc) setExistingLogoUrl(null);
-                            void onUpdateProject({
-                              ...existingProject,
-                              product: { ...existingProject.product, photos: next },
-                              brandBible: {
-                                ...existingProject.brandBible,
-                                brandLogoUrl: clearedLogo,
-                              },
-                            });
-                          }
-                        }}
-                        className="absolute top-2 right-2 p-1.5 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded-md opacity-0 group-hover:opacity-100 cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 bg-[#FBFBFC] rounded-xl p-6 text-center cursor-pointer transition-colors"
-              >
-                <ImageIcon className="w-7 h-7 text-[#8A8A96] mx-auto mb-1.5" />
-                <div className="text-xs font-medium text-[#3A3A44]">
-                  Click to upload product photos (PNG, JPG or WEBP up to 10MB)
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isNewMode || !existingProject) {
+                              setInitialLogoDataUrl(imgSrc);
+                            } else {
+                              setExistingLogoUrl(imgSrc);
+                              void onUpdateProject({
+                                ...existingProject,
+                                brandBible: {
+                                  ...existingProject.brandBible,
+                                  brandLogoUrl: imgSrc,
+                                  brandLogoCaption: g.caption || 'Primary Brand Logo',
+                                  brandGraphics: existingBrandGraphics,
+                                },
+                              });
+                            }
+                          }}
+                          className={`absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold cursor-pointer transition-all ${
+                            isPrimaryLogo
+                              ? 'bg-[#C6202F] text-white shadow'
+                              : 'bg-black/75 text-white/90 hover:bg-[#C6202F] opacity-0 group-hover:opacity-100'
+                          }`}
+                        >
+                          <Award className="w-3 h-3" />
+                          {isPrimaryLogo ? 'Primary Logo' : 'Set Primary'}
+                        </button>
+                        {g.caption && (
+                          <div className="bg-black/75 px-2 py-1 text-[10px] text-white truncate">
+                            {g.caption}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isNewMode || !existingProject) {
+                              const nextStaged = stagedBrandGraphics.filter((_, i) => i !== idx);
+                              setStagedBrandGraphics(nextStaged);
+                              if (initialLogoDataUrl === imgSrc) {
+                                setInitialLogoDataUrl(nextStaged[0]?.dataUrl || null);
+                              }
+                            } else {
+                              const next = existingBrandGraphics.filter((_, i) => i !== idx);
+                              setExistingBrandGraphics(next);
+                              const nextLogo =
+                                existingLogoUrl === imgSrc ? next[0]?.url || null : existingLogoUrl;
+                              setExistingLogoUrl(nextLogo);
+                              void onUpdateProject({
+                                ...existingProject,
+                                brandBible: {
+                                  ...existingProject.brandBible,
+                                  brandLogoUrl: nextLogo,
+                                  brandGraphics: next,
+                                },
+                              });
+                            }
+                          }}
+                          className="absolute top-2 right-2 p-1.5 bg-black/80 text-white/85 hover:text-[#FCA5A5] rounded-md opacity-0 group-hover:opacity-100 cursor-pointer"
+                          title="Remove brand graphic"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
-            )}
+              ) : (
+                <div
+                  onClick={() => brandGraphicInputRef.current?.click()}
+                  className="border-2 border-dashed border-[#E2E2E6] hover:border-[#C6202F]/70 bg-[#FBFBFC] rounded-xl p-6 text-center cursor-pointer transition-colors"
+                >
+                  <Award className="w-7 h-7 text-[#8A8A96] mx-auto mb-1.5" />
+                  <div className="text-xs font-medium text-[#3A3A44]">
+                    Upload logo variations &amp; brand graphics (horizontal, stacked, badges)
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </section>
 
@@ -2082,16 +2286,41 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
       </form>
 
       <DriveAssetPickerModal
-        isOpen={photoPickerOpen}
+        isOpen={photoPickerTarget !== null}
         projectId={existingProject?.id || 'new'}
         initialFolderUrls={googleDriveFolderUrls}
         mediaFilter="image"
         multiple={true}
-        prefix="product"
-        title="Pick Product Photos from Google Drive"
-        subtitle="Select one or more product images from your linked Drive folders or paste any Drive file/folder URL."
-        onClose={() => setPhotoPickerOpen(false)}
-        onImported={handleDriveProductPhotosImported}
+        prefix={photoPickerTarget === 'logo' ? 'logo' : 'product'}
+        title={
+          photoPickerTarget === 'logo'
+            ? 'Pick Brand Logos & Graphics from Google Drive'
+            : 'Pick Product Photos from Google Drive'
+        }
+        subtitle={
+          photoPickerTarget === 'logo'
+            ? 'Select one or more brand logo variations or graphics from Google Drive.'
+            : 'Select one or more product angle photos from Google Drive.'
+        }
+        onClose={() => setPhotoPickerTarget(null)}
+        onImported={handleDriveAssetsImported}
+        onFoldersChange={(urls) => {
+          setGoogleDriveFolderUrls(urls.length > 0 ? urls : ['']);
+        }}
+      />
+
+      {/* Pick Reference Files Modal (Google Docs, Sheets, Slides, PDFs, Images) */}
+      <DriveAssetPickerModal
+        isOpen={refFilePickerOpen}
+        projectId={existingProject?.id || 'new'}
+        initialFolderUrls={googleDriveFolderUrls}
+        pickerMode="pick_reference_files"
+        mediaFilter={refPickerFilter}
+        multiple={true}
+        title="Pick Reference Docs, PDFs & Briefs from Google Drive"
+        subtitle="Select content briefs, call sheets, brand guides, or logo/product files to lock, save to Reference Files/, and auto-populate intake."
+        onClose={() => setRefFilePickerOpen(false)}
+        onSelectDriveFiles={handleSelectReferenceDriveFiles}
         onFoldersChange={(urls) => {
           setGoogleDriveFolderUrls(urls.length > 0 ? urls : ['']);
         }}
@@ -2103,7 +2332,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
         projectId={existingProject?.id || 'new'}
         pickerMode="select_destination_folder"
         title="Select Google Drive Save Destination"
-        subtitle="Browse My Drive, Shared Drives, or Shared with Me to select the folder where project files and generated PDFs will be stored."
+        subtitle="Browse My Drive, Shared Drives, or Shared with Me to select the folder where project files, Reference Files, and generated PDFs will be stored."
         onClose={() => setDestinationPickerOpen(false)}
         onSelectFolder={handleSelectDestinationFolder}
       />
