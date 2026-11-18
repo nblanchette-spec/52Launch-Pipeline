@@ -20,6 +20,7 @@ import {
   Coffee,
   Clock,
   RotateCcw,
+  Rocket,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -36,6 +37,7 @@ interface Step9ShootPlanProps {
   onGenerateShootPlan: () => Promise<void>;
   onApproveShootPlan: () => Promise<void>;
   onOpenMasterExport: () => void;
+  onOpenReadyToLaunch?: () => void;
 }
 
 export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
@@ -44,6 +46,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
   onGenerateShootPlan,
   onApproveShootPlan,
   onOpenMasterExport,
+  onOpenReadyToLaunch,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDownloadingCallSheet, setIsDownloadingCallSheet] = useState(false);
@@ -468,10 +471,22 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
             </button>
 
             {project.approvals.shootPlanApproved ? (
-              <span className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap">
-                <CheckCircle2 className="w-4 h-4" />
-                Shoot Plan Approved
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#15803D] rounded-lg whitespace-nowrap">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Shoot Plan Approved
+                </span>
+                {onOpenReadyToLaunch && (
+                  <button
+                    type="button"
+                    onClick={onOpenReadyToLaunch}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#111114] hover:bg-[#C6202F] brand-corner-sm transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Rocket className="w-3.5 h-3.5" />
+                    Ready to Launch
+                  </button>
+                )}
+              </div>
             ) : (
               <button
                 type="button"

@@ -1,6 +1,11 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { PipelineProject, ProjectSummary } from '../src/types/pipeline';
+import {
+  PipelineProject,
+  PipelineStepNumber,
+  ProjectSummary,
+  ProjectThumbnailItem,
+} from '../src/types/pipeline';
 
 const DATA_ROOT = path.resolve(process.cwd(), 'data');
 
@@ -434,6 +439,97 @@ export async function seedInitialProjectIfEmpty(): Promise<void> {
   await saveProject(starterProject);
 }
 
+function computeNextStep(proj: PipelineProject): {
+  stepNumber: PipelineStepNumber;
+  stepLabel: string;
+} {
+  const a = proj.approvals;
+  if (a.shootPlanApproved) return { stepNumber: 9, stepLabel: 'Shoot Plan Ready' };
+  if (a.voApproved) return { stepNumber: 9, stepLabel: 'Shoot Plan' };
+  if (a.videoPromptsApproved) return { stepNumber: 8, stepLabel: 'VO & Audio' };
+  if (a.storyboardApproved) return { stepNumber: 7, stepLabel: 'Video Studio' };
+  if (a.shotListApproved) return { stepNumber: 5, stepLabel: 'Storyboard Studio' };
+  if (a.briefApproved) return { stepNumber: 4, stepLabel: 'Shot List & Board' };
+  if (a.bibleApproved) return { stepNumber: 3, stepLabel: 'Creative Brief' };
+  if (a.intakeCompleted) return { stepNumber: 2, stepLabel: 'Brand Bible' };
+  return { stepNumber: 1, stepLabel: 'Project Intake' };
+}
+
+export function buildProjectSummary(proj: PipelineProject): ProjectSummary {
+  const shots = Array.isArray(proj.shots) ? proj.shots : [];
+  const photos = Array.isArray(proj.product?.photos) ? proj.product.photos : [];
+  const studioAssets = Array.isArray(proj.storyboardStudio?.assets)
+    ? proj.storyboardStudio.assets
+    : [];
+  const voLines = Array.isArray(proj.voScript) ? proj.voScript : [];
+
+  const thumbnailStrip: ProjectThumbnailItem[] = [];
+  const seenUrls = new Set<string>();
+  const pushThumb = (
+    url: string | null | undefined,
+    label: string,
+    kind: ProjectThumbnailItem['kind']
+  ) => {
+    if (!url || seenUrls.has(url) || thumbnailStrip.length >= 6) return;
+    seenUrls.add(url);
+    thumbnailStrip.push({ url, label, kind });
+  };
+
+  // Prioritize storyboard frames first so contact sheets show live production visuals
+  for (const shot of shots) {
+    if (shot.frameImageUrl) {
+      pushThumb(shot.frameImageUrl, shot.id, 'frame');
+    }
+  }
+  // Then include Continuity Studio contact/location/prop sheets
+  for (const asset of studioAssets) {
+    if (asset.imageUrl) {
+      pushThumb(asset.imageUrl, asset.name, 'asset');
+    }
+  }
+  // Then include product photos from Step 1 intake
+  for (let i = 0; i < photos.length; i++) {
+    const p = photos[i];
+    pushThumb(p.url, p.caption || `Product ${i + 1}`, 'product');
+  }
+  // Finally brand logo if nothing else filled all 6 slots
+  if (proj.brandBible?.brandLogoUrl) {
+    pushThumb(proj.brandBible.brandLogoUrl, 'Brand Logo', 'logo');
+  }
+
+  const next = computeNextStep(proj);
+  const framesReadyCount = shots.filter((s) => Boolean(s.frameImageUrl)).length;
+  const videosReadyCount = shots.filter((s) =>
+    Boolean(s.upscaledVideoUrl || s.videoUrl)
+  ).length;
+  const voReadyCount = voLines.filter((v) => Boolean(v.audioUrl)).length;
+
+  return {
+    id: proj.id,
+    client: proj.client,
+    productName: proj.product?.name || 'Untitled Product',
+    updatedAt: proj.updatedAt,
+    shotCount: shots.length,
+    framesReadyCount,
+    videosReadyCount,
+    voReadyCount,
+    totalVoCount: voLines.length,
+    coverImageUrl: thumbnailStrip[0]?.url || null,
+    brandLogoUrl: proj.brandBible?.brandLogoUrl || null,
+    thumbnailStrip,
+    paletteHexes: Array.isArray(proj.extractedStyleGuide?.paletteHexes)
+      ? proj.extractedStyleGuide.paletteHexes.slice(0, 5)
+      : [],
+    conceptTitle:
+      proj.creativeBrief?.recommendedConcept?.title ||
+      proj.product?.description?.slice(0, 90) ||
+      '',
+    nextStepNumber: next.stepNumber,
+    nextStepLabel: next.stepLabel,
+    approvals: proj.approvals,
+  };
+}
+
 export async function listProjects(): Promise<ProjectSummary[]> {
   await seedInitialProjectIfEmpty();
   const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
@@ -445,14 +541,7 @@ export async function listProjects(): Promise<ProjectSummary[]> {
     try {
       const raw = await fs.readFile(jsonPath, 'utf-8');
       const proj = JSON.parse(raw) as PipelineProject;
-      summaries.push({
-        id: proj.id,
-        client: proj.client,
-        productName: proj.product?.name || 'Untitled Product',
-        updatedAt: proj.updatedAt,
-        shotCount: Array.isArray(proj.shots) ? proj.shots.length : 0,
-        approvals: proj.approvals,
-      });
+      summaries.push(buildProjectSummary(proj));
     } catch {
       // Skip invalid folder
     }

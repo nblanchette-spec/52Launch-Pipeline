@@ -9,6 +9,8 @@ import {
   Printer,
   Layers,
   FileText,
+  LayoutGrid,
+  Rocket,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -20,8 +22,12 @@ interface PipelineHeaderProps {
   projects: ProjectSummary[];
   activeProject: PipelineProject | null;
   activeStep: PipelineStepNumber;
+  isWelcomeOpen: boolean;
+  isLaunchScreenOpen?: boolean;
   isNewProjectMode: boolean;
   isPrintableOpen: boolean;
+  onOpenWelcome: () => void;
+  onOpenReadyToLaunch?: () => void;
   onSelectProject: (id: string) => void;
   onStartNewProject: () => void;
   onSelectStep: (step: PipelineStepNumber) => void;
@@ -41,7 +47,7 @@ const STEPS: Array<{
   { num: 2, label: 'Brand Bible' },
   { num: 3, label: 'Creative Brief' },
   { num: 4, label: 'Shot List & Board' },
-  { num: 5, label: 'Storyboard Frames' },
+  { num: 5, label: 'Storyboard Studio' },
   { num: 6, label: 'Frame Suggestions' },
   { num: 7, label: 'Video Prompts & Video' },
   { num: 8, label: 'VO Script & Audio' },
@@ -52,8 +58,12 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   projects,
   activeProject,
   activeStep,
+  isWelcomeOpen,
+  isLaunchScreenOpen = false,
   isNewProjectMode,
   isPrintableOpen,
+  onOpenWelcome,
+  onOpenReadyToLaunch,
   onSelectProject,
   onStartNewProject,
   onSelectStep,
@@ -132,7 +142,12 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
       {/* Top Row: 52Launch Wordmark, Project Selector, Primary Actions */}
       <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-3">
         <div className="flex items-center gap-3.5 min-w-0">
-          <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={onOpenWelcome}
+            title="Return to Welcome & Saved Projects"
+            className="flex items-center gap-2.5 shrink-0 cursor-pointer hover:opacity-85 transition-opacity"
+          >
             <img
               src="/brand/wordmark-color.png"
               alt="fifty-two launch"
@@ -142,35 +157,48 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             <span className="hidden sm:inline-block text-xs font-semibold tracking-tight text-[#5A5A66] whitespace-nowrap font-display">
               Production Studio
             </span>
-          </div>
+          </button>
 
-          <span className="text-[#D0D0D6]" aria-hidden="true">
-            /
-          </span>
+          {!isWelcomeOpen && (
+            <>
+              <span className="text-[#D0D0D6]" aria-hidden="true">
+                /
+              </span>
 
-          {/* Server Project Picker */}
-          <div className="relative flex items-center">
-            <select
-              aria-label="Choose client project"
-              value={isNewProjectMode ? '__new__' : activeProject?.id || ''}
-              onChange={(e) => {
-                if (e.target.value === '__new__') {
-                  onStartNewProject();
-                } else {
-                  onSelectProject(e.target.value);
-                }
-              }}
-              className="appearance-none bg-[#F6F6F7] border border-[#D8D8DF] hover:border-[#891A23] text-[#111114] text-sm font-medium rounded-md pl-3 pr-8 py-1.5 focus:outline-none focus:border-[#C6202F] cursor-pointer max-w-[270px] truncate transition-colors"
-            >
-              {isNewProjectMode && <option value="__new__">New client project...</option>}
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.client} — {p.productName}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-3.5 h-3.5 text-[#5A5A66] pointer-events-none absolute right-2.5" />
-          </div>
+              <button
+                type="button"
+                onClick={onOpenWelcome}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#3A3A44] bg-white border border-[#D8D8DF] hover:border-[#891A23] hover:text-[#111114] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-[#891A23]" />
+                All projects
+              </button>
+
+              {/* Server Project Picker */}
+              <div className="relative flex items-center">
+                <select
+                  aria-label="Choose client project"
+                  value={isNewProjectMode ? '__new__' : activeProject?.id || ''}
+                  onChange={(e) => {
+                    if (e.target.value === '__new__') {
+                      onStartNewProject();
+                    } else {
+                      onSelectProject(e.target.value);
+                    }
+                  }}
+                  className="appearance-none bg-[#F6F6F7] border border-[#D8D8DF] hover:border-[#891A23] text-[#111114] text-sm font-medium rounded-md pl-3 pr-8 py-1.5 focus:outline-none focus:border-[#C6202F] cursor-pointer max-w-[270px] truncate transition-colors"
+                >
+                  {isNewProjectMode && <option value="__new__">New client project...</option>}
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.client} — {p.productName}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-[#5A5A66] pointer-events-none absolute right-2.5" />
+              </div>
+            </>
+          )}
 
           <button
             type="button"
@@ -183,7 +211,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {activeProject && activeProject.shots.length > 0 && (
+          {!isWelcomeOpen && activeProject && activeProject.shots.length > 0 && (
             <button
               type="button"
               onClick={onTogglePrintable}
@@ -221,7 +249,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             Import project backup
           </button>
 
-          {activeProject && !isNewProjectMode && (
+          {!isWelcomeOpen && activeProject && !isNewProjectMode && (
             <>
               <button
                 type="button"
@@ -256,14 +284,15 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
       </div>
 
       {/* Left-to-Right Gated 9-Step Workflow Bar */}
-      <nav
-        aria-label="Production workflow steps"
-        className="flex items-center gap-1.5 px-5 py-2 bg-[#F6F6F7] border-t border-[#E6E6EB] overflow-x-auto"
-      >
+      {!isWelcomeOpen && (
+        <nav
+          aria-label="Production workflow steps"
+          className="flex items-center gap-1.5 px-5 py-2 bg-[#F6F6F7] border-t border-[#E6E6EB] overflow-x-auto"
+        >
         {STEPS.map((st, idx) => {
           const enabled = isStepEnabled(st.num);
           const approved = isStepApproved(st.num);
-          const current = !isPrintableOpen && activeStep === st.num;
+          const current = !isPrintableOpen && !isLaunchScreenOpen && activeStep === st.num;
 
           return (
             <React.Fragment key={st.num}>
@@ -296,7 +325,37 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             </React.Fragment>
           );
         })}
+
+        {onOpenReadyToLaunch && (
+          <>
+            <span className="text-[#C8C8D2] text-xs select-none" aria-hidden="true">
+              →
+            </span>
+            <button
+              type="button"
+              disabled={!activeProject?.approvals.shootPlanApproved || isNewProjectMode}
+              onClick={() =>
+                activeProject?.approvals.shootPlanApproved && onOpenReadyToLaunch()
+              }
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                isLaunchScreenOpen
+                  ? 'bg-[#111114] text-white border-[#111114] font-semibold brand-corner-sm cursor-pointer shadow-xs'
+                  : activeProject?.approvals.shootPlanApproved && !isNewProjectMode
+                    ? 'bg-white text-[#891A23] border-[#EABAC0] hover:border-[#C6202F] rounded-md cursor-pointer font-semibold'
+                    : 'bg-[#EFEFF2] text-[#9A9AA6] border-[#E4E4EA] rounded-md cursor-not-allowed'
+              }`}
+            >
+              {!activeProject?.approvals.shootPlanApproved || isNewProjectMode ? (
+                <Lock className="w-3 h-3 text-[#A0A0AC] shrink-0" />
+              ) : (
+                <Rocket className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span>Launch</span>
+            </button>
+          </>
+        )}
       </nav>
+      )}
     </header>
   );
 };

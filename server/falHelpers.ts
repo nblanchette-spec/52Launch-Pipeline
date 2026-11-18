@@ -14,6 +14,7 @@ import {
   TOPAZ_UPSCALE_MODES,
   TopazUpscaleMode,
 } from '../src/utils/videoStudioCatalog';
+import { StoryboardImageModel } from '../src/types/pipeline';
 import { readAssetAsInlineData } from './projectStore';
 
 export interface StudioGenerateInput {
@@ -925,6 +926,92 @@ export function describeFalFailure(err: unknown): {
 
   return {
     status: status >= 400 && status < 600 ? status : 500,
-    message: rawMsg || 'Video generation failed on fal.ai.',
+    message: rawMsg || 'Generation failed on fal.ai.',
   };
 }
+
+export interface NanoBananaFalInput {
+  projectId: string;
+  model: StoryboardImageModel;
+  prompt: string;
+  aspectRatio?: '16:9' | '9:16' | '4:5' | '1:1' | '21:9' | '4:3' | '3:4';
+  resolution?: '1K' | '2K';
+  referenceImageUrls?: string[];
+}
+
+export async function generateNanoBananaImageViaFal(
+  params: NanoBananaFalInput
+): Promise<{
+  imageUrl: string;
+  endpointUsed: string;
+  uploadedRefCount: number;
+}> {
+  const uniqueRefs = Array.from(
+    new Set((params.referenceImageUrls || []).map((u) => u.trim()).filter(Boolean))
+  ).slice(0, 14);
+
+  const hostedRefs = (
+    await Promise.all(
+      uniqueRefs.map((refUrl) => uploadMediaRefToFal(params.projectId, refUrl))
+    )
+  ).filter((u): u is string => Boolean(u));
+
+  const isEdit = hostedRefs.length > 0;
+  const candidateEndpoints: string[] =
+    params.model === 'nano-banana-pro'
+      ? isEdit
+        ? ['fal-ai/nano-banana-pro/edit', 'fal-ai/nano-banana-2/edit', 'fal-ai/nano-banana/edit']
+        : ['fal-ai/nano-banana-pro', 'fal-ai/nano-banana-2', 'fal-ai/nano-banana']
+      : params.model === 'nano-banana'
+        ? isEdit
+          ? ['fal-ai/nano-banana/edit']
+          : ['fal-ai/nano-banana']
+        : isEdit
+          ? ['fal-ai/nano-banana-2/edit', 'fal-ai/nano-banana/edit']
+          : ['fal-ai/nano-banana-2', 'fal-ai/nano-banana'];
+
+  const ratio = params.aspectRatio || '16:9';
+  const resolution = params.resolution === '2K' ? '2K' : '1K';
+
+  let lastErr: unknown = null;
+  for (let i = 0; i < candidateEndpoints.length; i++) {
+    const endpointId = candidateEndpoints[i];
+    const supportsResolution =
+      endpointId.includes('nano-banana-2') || endpointId.includes('nano-banana-pro');
+    const input: Record<string, unknown> = {
+      prompt: params.prompt.trim(),
+      aspect_ratio: ratio,
+      output_format: 'png',
+      num_images: 1,
+      ...(supportsResolution ? { resolution } : {}),
+      ...(isEdit ? { image_urls: hostedRefs } : {}),
+    };
+
+    try {
+      const result = await fal.subscribe(endpointId, { input, logs: false });
+      const data = result.data as {
+        images?: Array<{ url?: string }>;
+        image?: { url?: string };
+      };
+      const imageUrl = data?.images?.[0]?.url || data?.image?.url;
+      if (!imageUrl) {
+        throw new Error('fal.ai Nano Banana completed without returning an image.');
+      }
+      return {
+        imageUrl,
+        endpointUsed: endpointId,
+        uploadedRefCount: hostedRefs.length,
+      };
+    } catch (err) {
+      lastErr = err;
+      const status = (err as { status?: number })?.status;
+      if ((status === 404 || status === 422) && i < candidateEndpoints.length - 1) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr || new Error('Nano Banana generation failed on fal.ai.');
+}
+

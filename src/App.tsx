@@ -7,6 +7,8 @@ import {
   ProjectSummary,
 } from './types/pipeline';
 import { PipelineHeader } from './components/pipeline/PipelineHeader';
+import { WelcomeHome } from './components/pipeline/WelcomeHome';
+import { ReadyToLaunchView } from './components/pipeline/ReadyToLaunchView';
 import { Step1NewProject } from './components/pipeline/Step1NewProject';
 import { Step2BrandBible } from './components/pipeline/Step2BrandBible';
 import { Step3CreativeBrief } from './components/pipeline/Step3CreativeBrief';
@@ -50,6 +52,9 @@ export default function App() {
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
   const [activeProject, setActiveProject] = useState<PipelineProject | null>(null);
   const [activeStep, setActiveStep] = useState<PipelineStepNumber>(1);
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [showLaunchScreen, setShowLaunchScreen] = useState(false);
+  const [launchPlayAnimation, setLaunchPlayAnimation] = useState(true);
   const [isNewProjectMode, setIsNewProjectMode] = useState(false);
   const [isPrintableOpen, setIsPrintableOpen] = useState(false);
   const [isMasterExportOpen, setIsMasterExportOpen] = useState(false);
@@ -119,12 +124,54 @@ export default function App() {
     }, 1800);
   };
 
-  const refreshProjectList = async (selectId?: string) => {
+  const isStepUnlockedForProject = (
+    proj: PipelineProject,
+    step: PipelineStepNumber
+  ): boolean => {
+    if (step === 1) return true;
+    const a = proj.approvals;
+    switch (step) {
+      case 2:
+        return a.intakeCompleted;
+      case 3:
+        return a.bibleApproved;
+      case 4:
+        return a.briefApproved;
+      case 5:
+      case 6:
+      case 7:
+        return a.shotListApproved;
+      case 8:
+        return a.videoPromptsApproved;
+      case 9:
+        return a.voApproved;
+      default:
+        return false;
+    }
+  };
+
+  const getFurthestUnlockedStep = (proj: PipelineProject): PipelineStepNumber => {
+    if (proj.approvals.voApproved) return 9;
+    if (proj.approvals.videoPromptsApproved) return 8;
+    if (proj.approvals.storyboardApproved) return 7;
+    if (proj.approvals.shotListApproved) return 5;
+    if (proj.approvals.briefApproved) return 4;
+    if (proj.approvals.bibleApproved) return 3;
+    if (proj.approvals.intakeCompleted) return 2;
+    return 1;
+  };
+
+  const fetchProjectSummariesOnly = async (): Promise<ProjectSummary[]> => {
     const resp = await fetch('/api/projects');
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not load projects.');
     const list: ProjectSummary[] = data.projects || [];
     setProjectSummaries(list);
+    return list;
+  };
+
+  const refreshProjectList = async (selectId?: string) => {
+    const list = await fetchProjectSummariesOnly();
 
     const targetId = selectId || activeProject?.id || list[0]?.id;
     if (targetId) {
@@ -135,40 +182,61 @@ export default function App() {
     }
   };
 
-  const loadSingleProject = async (id: string) => {
+  const loadSingleProject = async (
+    id: string,
+    requestedStep?: PipelineStepNumber
+  ) => {
     const resp = await fetch(`/api/projects/${id}`);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Could not load project.');
     const proj: PipelineProject = data.project;
     setActiveProject(proj);
+    setShowWelcome(false);
     setIsNewProjectMode(false);
     setIsPrintableOpen(false);
 
-    // Jump to the furthest unlocked active step cleanly
-    if (proj.approvals.voApproved) {
+    if (requestedStep && isStepUnlockedForProject(proj, requestedStep)) {
+      setShowLaunchScreen(false);
+      setActiveStep(requestedStep);
+    } else if (proj.approvals.shootPlanApproved) {
       setActiveStep(9);
-    } else if (proj.approvals.videoPromptsApproved) {
-      setActiveStep(8);
-    } else if (proj.approvals.storyboardApproved) {
-      setActiveStep(7);
-    } else if (proj.approvals.shotListApproved) {
-      setActiveStep(5);
-    } else if (proj.approvals.briefApproved) {
-      setActiveStep(4);
-    } else if (proj.approvals.bibleApproved) {
-      setActiveStep(3);
-    } else if (proj.approvals.intakeCompleted) {
-      setActiveStep(2);
+      setLaunchPlayAnimation(false);
+      setShowLaunchScreen(true);
     } else {
-      setActiveStep(1);
+      setShowLaunchScreen(false);
+      setActiveStep(getFurthestUnlockedStep(proj));
     }
+  };
+
+  const handleOpenWelcome = () => {
+    setShowWelcome(true);
+    setShowLaunchScreen(false);
+    setIsNewProjectMode(false);
+    setIsPrintableOpen(false);
+    void fetchProjectSummariesOnly().catch(() => undefined);
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+    const resp = await fetch(`/api/projects/${projectId}`, {
+      method: 'DELETE',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showPipelineNotice(data.error || 'Could not delete project.');
+      return;
+    }
+    if (activeProject?.id === projectId) {
+      setActiveProject(null);
+    }
+    await fetchProjectSummariesOnly();
+    showPipelineNotice('Project removed from studio.');
   };
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        await refreshProjectList();
+        await fetchProjectSummariesOnly();
       } catch (err) {
         if (mounted) {
           showPipelineNotice(
@@ -219,6 +287,7 @@ export default function App() {
     if (!resp.ok) throw new Error(data.error || 'Could not create project.');
     const created: PipelineProject = data.project;
     setActiveProject(created);
+    setShowWelcome(false);
     setIsNewProjectMode(false);
     setActiveStep(2);
     await refreshProjectList(created.id);
@@ -600,21 +669,38 @@ export default function App() {
         projects={projectSummaries}
         activeProject={activeProject}
         activeStep={activeStep}
+        isWelcomeOpen={showWelcome}
+        isLaunchScreenOpen={showLaunchScreen}
         isNewProjectMode={isNewProjectMode}
         isPrintableOpen={isPrintableOpen}
+        onOpenWelcome={handleOpenWelcome}
+        onOpenReadyToLaunch={() => {
+          setShowWelcome(false);
+          setIsNewProjectMode(false);
+          setIsPrintableOpen(false);
+          setLaunchPlayAnimation(true);
+          setShowLaunchScreen(true);
+        }}
         onSelectProject={(id) => {
           void loadSingleProject(id);
         }}
         onStartNewProject={() => {
+          setShowWelcome(false);
+          setShowLaunchScreen(false);
           setIsNewProjectMode(true);
           setIsPrintableOpen(false);
           setActiveStep(1);
         }}
         onSelectStep={(step) => {
+          setShowWelcome(false);
+          setShowLaunchScreen(false);
           setIsPrintableOpen(false);
           setActiveStep(step);
         }}
-        onTogglePrintable={() => setIsPrintableOpen((v) => !v)}
+        onTogglePrintable={() => {
+          setShowLaunchScreen(false);
+          setIsPrintableOpen((v) => !v);
+        }}
         onOpenMasterExport={() => setIsMasterExportOpen(true)}
         onDownloadBackup={handleDownloadBackup}
         onImportBackup={(f) => void handleImportBackup(f)}
@@ -633,10 +719,42 @@ export default function App() {
             <Loader2 className="w-5 h-5 animate-spin text-[#C6202F]" />
             Loading studio projects...
           </div>
+        ) : showWelcome ? (
+          <WelcomeHome
+            projects={projectSummaries}
+            onOpenProject={(id, step) => {
+              void loadSingleProject(id, step);
+            }}
+            onStartNewProject={() => {
+              setShowWelcome(false);
+              setShowLaunchScreen(false);
+              setIsNewProjectMode(true);
+              setIsPrintableOpen(false);
+              setActiveStep(1);
+            }}
+            onImportBackup={(f) => void handleImportBackup(f)}
+            onDeleteProject={handleDeleteProject}
+          />
         ) : isPrintableOpen && activeProject ? (
           <PrintableStoryboardView
             project={activeProject}
             onBack={() => setIsPrintableOpen(false)}
+          />
+        ) : showLaunchScreen && activeProject ? (
+          <ReadyToLaunchView
+            project={activeProject}
+            playAnimationOnMount={launchPlayAnimation}
+            onOpenMasterExport={() => setIsMasterExportOpen(true)}
+            onOpenPrintableStoryboard={() => {
+              setShowLaunchScreen(false);
+              setIsPrintableOpen(true);
+            }}
+            onDownloadBackup={handleDownloadBackup}
+            onBackToShootPlan={() => {
+              setShowLaunchScreen(false);
+              setActiveStep(9);
+            }}
+            onOpenWelcome={handleOpenWelcome}
           />
         ) : isNewProjectMode || activeStep === 1 || !activeProject ? (
           <Step1NewProject
@@ -772,13 +890,19 @@ export default function App() {
             onUpdateProject={handleUpdatePipelineProject}
             onGenerateShootPlan={handleGenerateShootPlan}
             onOpenMasterExport={() => setIsMasterExportOpen(true)}
+            onOpenReadyToLaunch={() => {
+              setLaunchPlayAnimation(true);
+              setShowLaunchScreen(true);
+            }}
             onApproveShootPlan={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
                 approvals: { ...activeProject.approvals, shootPlanApproved: true },
               });
+              setLaunchPlayAnimation(true);
+              setShowLaunchScreen(true);
               showPipelineNotice(
-                'Shoot Plan approved! Production pipeline complete.'
+                'Shoot Plan approved! Preparing Ready to Launch handoff.'
               );
             }}
           />

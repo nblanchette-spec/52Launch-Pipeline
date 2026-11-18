@@ -24,6 +24,10 @@ import {
   PipelineShot,
   ShootPlan,
   ShotClipHistoryItem,
+  StoryboardImageModel,
+  StoryboardStudioAsset,
+  StoryboardStudioState,
+  StoryboardStylePreset,
   UpscaleDetails,
   VideoModelOption,
   VoScriptLine,
@@ -34,6 +38,7 @@ import {
   buildFalVideoRequest,
   buildTopazUpscaleRequest,
   describeFalFailure,
+  generateNanoBananaImageViaFal,
   uploadMediaRefToFal,
 } from './falHelpers';
 import {
@@ -4064,6 +4069,587 @@ Return JSON with:
             ? err.message
             : 'Could not import assets from Google Drive.',
       });
+    }
+  });
+
+  // STORYBOARD STUDIO HELPER FUNCTIONS (Fal Nano Banana multi-reference workflow)
+  const STYLE_PROMPT_MAP: Record<StoryboardStylePreset, string> = {
+    sketch:
+      'clean hand-drawn graphite pencil and fine ink storyboard sketch artwork on smooth matte paper, crisp gestural linework, tonal hatching shadows',
+    '3d_animation':
+      'stylized theatrical 3D animated film keyframe, sculptural volumetric lighting, rich tactile shaders, crisp cinematic depth of field',
+    charcoal:
+      'dramatic monochrome tonal charcoal drawing on textured paper, rich chiaroscuro shadow masses, bold expressive strokes, luminous highlights',
+    claymation:
+      'handcrafted stop-motion claymation miniature film aesthetic, sculpted matte polymer/clay surfaces with subtle tactile tooling, miniature practical lighting',
+    concept_sketch:
+      'high-end cinema production concept illustration, painterly atmospheric color washes over expressive ink linework, dramatic light shafts',
+    realistic:
+      'photorealistic live-action commercial film still captured on cinema primes, natural skin and material realism, authentic atmospheric lighting',
+  };
+
+  const ensureStudioState = (project: PipelineProject): StoryboardStudioState => {
+    if (project.storyboardStudio) return project.storyboardStudio;
+    return {
+      style: 'sketch',
+      customStyleNote: '',
+      model: 'nano-banana-2',
+      aspectRatio: '16:9',
+      resolution: '1K',
+      assets: (project.brandBible?.characters || []).map((c, idx) => ({
+        id: `asset-char-${c.id || idx}`,
+        category: 'character',
+        name: c.name,
+        description: c.fixedDescriptor,
+        sheetType: 'contact_sheet',
+        imageUrl: null,
+        locked: true,
+        linkedShotIds: [],
+      })),
+      hasSeededAssets: false,
+    };
+  };
+
+  // STEP 5A: Auto-extract Characters, Locations, and Props from Brand Bible + Shot List
+  router.post('/pipeline/storyboard-studio/seed-assets', async (req, res) => {
+    try {
+      const { projectId } = req.body as { projectId: string };
+      const project = await getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found.' });
+
+      const ai = getGeminiClient();
+      const prompt = `You are a Continuity Supervisor preparing Storyboard Studio reference sheets for "${project.client} — ${project.product.name}".
+Analyze the Brand Bible, Creative Brief, and Ordered Shot List to identify distinct recurring visual assets so we can generate consistent reference sheets BEFORE drawing the storyboard frames:
+1. characters: distinct on-screen people (keep exact names & fixed visual descriptors from the Brand Bible if present, plus any additional characters appearing in shots).
+2. locations: distinct environments/settings (e.g., "Concrete Stadium Track at Dawn", "Modern Kitchen Counter"). Include architectural cues, time of day, and lighting direction, with NO people mentioned inside the location description.
+3. props: key hero product unit ("${project.product.name}") plus essential handheld props/wardrobe props across shots. Mark "isRealProduct": true for the real product so we anchor it to uploaded product photos.
+
+For EVERY item return "linkedShotIds" matching shot IDs (e.g. ["S01", "S02"]) where that character/location/prop appears.
+
+BRAND BIBLE:
+- Characters: ${JSON.stringify(project.brandBible.characters)}
+- Visual Style: ${JSON.stringify(project.brandBible.visualStyle)}
+- Product Rules: ${project.brandBible.productRules}
+- Product Description: ${project.product.description}
+
+SHOT LIST:
+${project.shots
+  .map(
+    (s) =>
+      `- ${s.id} (ProductInFrame: ${s.productInFrame ? 'YES' : 'NO'}): ${s.scene} | Prompt: ${s.framePrompt}`
+  )
+  .join('\n')}`;
+
+      const response = await withGeminiRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                characters: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING },
+                      description: { type: Type.STRING },
+                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    },
+                    required: ['name', 'description', 'linkedShotIds'],
+                  },
+                },
+                locations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING },
+                      description: { type: Type.STRING },
+                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    },
+                    required: ['name', 'description', 'linkedShotIds'],
+                  },
+                },
+                props: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING },
+                      description: { type: Type.STRING },
+                      isRealProduct: { type: Type.BOOLEAN },
+                      linkedShotIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    },
+                    required: ['name', 'description', 'isRealProduct', 'linkedShotIds'],
+                  },
+                },
+              },
+              required: ['characters', 'locations', 'props'],
+            },
+          },
+        })
+      );
+
+      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+        characters?: Array<{ name: string; description: string; linkedShotIds?: string[] }>;
+        locations?: Array<{ name: string; description: string; linkedShotIds?: string[] }>;
+        props?: Array<{
+          name: string;
+          description: string;
+          isRealProduct?: boolean;
+          linkedShotIds?: string[];
+        }>;
+      };
+
+      const prevStudio = ensureStudioState(project);
+      // Preserve any existing assets that already have generated images so we never lose work
+      const existingWithImages = prevStudio.assets.filter((a) => Boolean(a.imageUrl));
+      const existingByKey = new Map(
+        existingWithImages.map((a) => [`${a.category}:${a.name.toLowerCase().trim()}`, a])
+      );
+
+      const mergedAssets: StoryboardStudioAsset[] = [...existingWithImages];
+      const pushIfMissing = (candidate: StoryboardStudioAsset) => {
+        const key = `${candidate.category}:${candidate.name.toLowerCase().trim()}`;
+        if (!existingByKey.has(key)) {
+          existingByKey.set(key, candidate);
+          mergedAssets.push(candidate);
+        }
+      };
+
+      (parsed.characters || []).forEach((c, idx) => {
+        pushIfMissing({
+          id: `asset-char-${Date.now()}-${idx}`,
+          category: 'character',
+          name: c.name,
+          description: c.description,
+          sheetType: 'contact_sheet',
+          imageUrl: null,
+          locked: true,
+          linkedShotIds: Array.isArray(c.linkedShotIds) ? c.linkedShotIds : [],
+        });
+      });
+
+      (parsed.locations || []).forEach((l, idx) => {
+        pushIfMissing({
+          id: `asset-loc-${Date.now()}-${idx}`,
+          category: 'location',
+          name: l.name,
+          description: l.description,
+          sheetType: 'multi_angle',
+          imageUrl: null,
+          locked: true,
+          linkedShotIds: Array.isArray(l.linkedShotIds) ? l.linkedShotIds : [],
+        });
+      });
+
+      (parsed.props || []).forEach((p, idx) => {
+        pushIfMissing({
+          id: `asset-prop-${Date.now()}-${idx}`,
+          category: 'prop',
+          name: p.name,
+          description: p.description,
+          sheetType: 'prop_study',
+          imageUrl: null,
+          locked: true,
+          useRealProductPhoto: Boolean(p.isRealProduct),
+          linkedShotIds: Array.isArray(p.linkedShotIds) ? p.linkedShotIds : [],
+        });
+      });
+
+      const nextStudio: StoryboardStudioState = {
+        ...prevStudio,
+        assets: mergedAssets,
+        hasSeededAssets: true,
+      };
+
+      const saved = await saveProject({
+        ...project,
+        storyboardStudio: nextStudio,
+      });
+
+      res.json({ project: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: formatGeminiError(err, 'Could not extract Storyboard Studio assets.'),
+      });
+    }
+  });
+
+  // STEP 5B: Generate Character Contact Sheet / Location Multi-Angle Sheet / Prop Sheet via Fal Nano Banana
+  router.post('/pipeline/storyboard-studio/generate-asset', async (req, res) => {
+    const {
+      projectId,
+      assetId,
+      styleOverride,
+      modelOverride,
+      resolutionOverride,
+      customStyleNoteOverride,
+    } = req.body as {
+      projectId: string;
+      assetId: string;
+      styleOverride?: StoryboardStylePreset;
+      modelOverride?: StoryboardImageModel;
+      resolutionOverride?: '1K' | '2K';
+      customStyleNoteOverride?: string;
+    };
+
+    const project = await getProject(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found.' });
+
+    const studio = ensureStudioState(project);
+    const asset = studio.assets.find((a) => a.id === assetId);
+    if (!asset) return res.status(404).json({ error: 'Asset card not found.' });
+
+    const falKey = process.env.FAL_KEY;
+    if (!falKey || falKey === 'MY_FAL_KEY') {
+      return res.status(400).json({
+        error: 'Add FAL_KEY in Settings > Secrets to generate Storyboard Studio sheets via Fal Nano Banana.',
+      });
+    }
+
+    const activeStyle = styleOverride || studio.style || 'sketch';
+    const activeModel = modelOverride || studio.model || 'nano-banana-2';
+    const activeRes = resolutionOverride || studio.resolution || '1K';
+    const styleNote =
+      customStyleNoteOverride !== undefined
+        ? customStyleNoteOverride
+        : studio.customStyleNote || '';
+    const styleDirective = STYLE_PROMPT_MAP[activeStyle] || STYLE_PROMPT_MAP.sketch;
+
+    const paletteNote = [
+      project.brandBible?.visualStyle?.palette,
+      project.extractedStyleGuide?.paletteHexes?.length
+        ? `Brand Hex Colors: ${project.extractedStyleGuide.paletteHexes.join(', ')}`
+        : '',
+      project.brandBible?.visualStyle?.lighting
+        ? `Lighting: ${project.brandBible.visualStyle.lighting}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('. ');
+
+    let sheetPrompt = '';
+    let sheetAspect: '16:9' | '4:3' | '1:1' = '16:9';
+    const referenceImageUrls: string[] = [];
+
+    if (asset.category === 'character') {
+      sheetAspect = '16:9';
+      sheetPrompt = `Create a clean 2x2 production CHARACTER CONTACT SHEET grid on a neutral studio background in the style of ${styleDirective}.
+Subject: "${asset.name}".
+Character Details (keep identity, face, hair, clothing 100% consistent across all 4 views): ${asset.description}.
+Panel Layout (4 clean views):
+- Top-Left: Full-body front-facing turnaround pose
+- Top-Right: Three-quarter action stance turnaround
+- Bottom-Left: Clean side profile turnaround
+- Bottom-Right: Close-up facial expression & wardrobe texture study
+Style Notes: ${paletteNote}. ${styleNote}`.trim();
+    } else if (asset.category === 'location') {
+      sheetAspect = '16:9';
+      sheetPrompt = `Create a clean 2x2 production LOCATION MULTI-ANGLE REFERENCE SHEET of an EMPTY set (no people in any panel) in the style of ${styleDirective}.
+Location: "${asset.name}".
+Architecture, Time of Day & Lighting Details (keep architecture and light direction 100% consistent across all 4 angles): ${asset.description}.
+Panel Layout (4 camera angles of the same empty location):
+- Top-Left: Wide establishing master shot showing overall spatial layout
+- Top-Right: Reverse 180-degree counter-angle shot
+- Bottom-Left: Low-angle side perspective showing depth and foreground elements
+- Bottom-Right: Architectural surface & atmospheric lighting detail view
+Style Notes: ${paletteNote}. ${styleNote}`.trim();
+    } else {
+      sheetAspect = '1:1';
+      if (asset.useRealProductPhoto && project.product.photos.length > 0) {
+        project.product.photos.slice(0, 3).forEach((p) => {
+          if (p.url) referenceImageUrls.push(p.url);
+        });
+        if (project.brandBible?.brandLogoUrl) {
+          referenceImageUrls.push(project.brandBible.brandLogoUrl);
+        }
+      }
+      sheetPrompt = `Create a clean 2x2 production PROP & PRODUCT REFERENCE SHEET on a neutral background in the style of ${styleDirective}.
+Object: "${asset.name}".
+Details: ${asset.description}.
+${
+  referenceImageUrls.length > 0
+    ? `CRITICAL FIDELITY: Match the exact physical shape, proportions, surface finish, buttons/ports, and branding visible in the attached reference product photo(s).`
+    : ''
+}
+Panel Layout (4 views of the exact same object): front hero view, 3/4 isometric angle, side profile thickness view, macro material detail.
+Style Notes: ${paletteNote}. ${styleNote}`.trim();
+    }
+
+    try {
+      fal.config({ credentials: falKey });
+      const generated = await generateNanoBananaImageViaFal({
+        projectId: project.id,
+        model: activeModel,
+        prompt: sheetPrompt,
+        aspectRatio: sheetAspect,
+        resolution: activeRes,
+        referenceImageUrls,
+      });
+
+      const savedImg = await saveBinaryAssetFromUrl(
+        project.id,
+        generated.imageUrl,
+        `sb-${asset.category}`,
+        'png'
+      );
+
+      const updatedAssets = studio.assets.map((a) =>
+        a.id === asset.id ? { ...a, imageUrl: savedImg.url, locked: true } : a
+      );
+
+      const saved = await saveProject({
+        ...project,
+        storyboardStudio: {
+          ...studio,
+          style: activeStyle,
+          model: activeModel,
+          resolution: activeRes,
+          customStyleNote: styleNote,
+          assets: updatedAssets,
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: `Storyboard Asset (${asset.category})`,
+            model: generated.endpointUsed,
+            prompt: sheetPrompt.slice(0, 240),
+            seed: null,
+            status: 'success',
+            notes: `Style: ${activeStyle}, Refs: ${generated.uploadedRefCount}`,
+          },
+          ...project.generationLog,
+        ],
+      });
+
+      res.json({
+        project: saved,
+        asset: updatedAssets.find((a) => a.id === asset.id),
+        endpointUsed: generated.endpointUsed,
+      });
+    } catch (err) {
+      const failure = describeFalFailure(err);
+      res.status(failure.status).json({ error: failure.message });
+    }
+  });
+
+  // STEP 5C: Generate Storyboard Frame via Fal Nano Banana using Locked Assets + Real Product Photos
+  router.post('/pipeline/storyboard-studio/generate-frame', async (req, res) => {
+    const {
+      projectId,
+      shotId,
+      framePromptOverride,
+      assetIdsOverride,
+      includeRealProductPhotos,
+      includePrevShotFrame,
+    } = req.body as {
+      projectId: string;
+      shotId: string;
+      framePromptOverride?: string;
+      assetIdsOverride?: string[];
+      includeRealProductPhotos?: boolean;
+      includePrevShotFrame?: boolean;
+    };
+
+    const project = await getProject(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found.' });
+
+    const shotIdx = project.shots.findIndex((s) => s.id === shotId);
+    if (shotIdx === -1) return res.status(404).json({ error: `Shot ${shotId} not found.` });
+    const shot = project.shots[shotIdx];
+
+    const falKey = process.env.FAL_KEY;
+    if (!falKey || falKey === 'MY_FAL_KEY') {
+      return res.status(400).json({
+        error: 'Add FAL_KEY in Settings > Secrets to generate storyboard frames via Fal Nano Banana.',
+      });
+    }
+
+    const studio = ensureStudioState(project);
+    const activeStyle = studio.style || 'sketch';
+    const styleDirective = STYLE_PROMPT_MAP[activeStyle] || STYLE_PROMPT_MAP.sketch;
+
+    // Select reference sheets: either explicit override IDs or locked assets (prioritizing shot-linked ones)
+    const assetsWithImg = studio.assets.filter((a) => Boolean(a.imageUrl));
+    const chosenAssets = Array.isArray(assetIdsOverride)
+      ? assetsWithImg.filter((a) => assetIdsOverride.includes(a.id))
+      : assetsWithImg.filter((a) => a.locked);
+
+    // Order linked assets first so key cast/location sheets stay within max 14 slots
+    chosenAssets.sort((a, b) => {
+      const aLinked = (a.linkedShotIds || []).includes(shot.id) ? 0 : 1;
+      const bLinked = (b.linkedShotIds || []).includes(shot.id) ? 0 : 1;
+      return aLinked - bLinked;
+    });
+
+    const referenceImageUrls: string[] = [];
+    const refNotes: string[] = [];
+
+    // 1. Anchor Real Product Photos whenever product is in frame (or requested)
+    const useProduct =
+      includeRealProductPhotos !== undefined
+        ? includeRealProductPhotos
+        : shot.productInFrame;
+    if (useProduct && project.product.photos.length > 0) {
+      project.product.photos.slice(0, 3).forEach((p, idx) => {
+        if (p.url) {
+          referenceImageUrls.push(p.url);
+          refNotes.push(
+            `Reference Image #${referenceImageUrls.length} (REAL PRODUCT PHOTO ${idx + 1}): "${project.product.name}"${p.caption ? ` (${p.caption})` : ''} — preserve the exact physical silhouette, ring/port geometry, proportions, and surface finish.`
+          );
+        }
+      });
+      if (project.brandBible?.brandLogoUrl) {
+        referenceImageUrls.push(project.brandBible.brandLogoUrl);
+        refNotes.push(
+          `Reference Image #${referenceImageUrls.length} (BRAND LOGO): preserve exact logo mark proportions where branding appears.`
+        );
+      }
+    }
+
+    // 2. Attach Continuity Asset Sheets (Characters Contact Sheets, Location Multi-Angle Shots, Prop Sheets)
+    for (const asset of chosenAssets) {
+      if (!asset.imageUrl || referenceImageUrls.length >= 13) break;
+      referenceImageUrls.push(asset.imageUrl);
+      const roleLabel =
+        asset.category === 'character'
+          ? 'CHARACTER CONTACT SHEET'
+          : asset.category === 'location'
+            ? 'LOCATION MULTI-ANGLE SHEET'
+            : 'PROP REFERENCE SHEET';
+      refNotes.push(
+        `Reference Image #${referenceImageUrls.length} (${roleLabel} — "${asset.name}"): ${asset.description}`
+      );
+    }
+
+    // 3. Optional previous frame continuity anchor
+    if (includePrevShotFrame) {
+      const chainShot =
+        shot.chainFrom && shot.chainFrom !== 'none'
+          ? project.shots.find((s) => s.id === shot.chainFrom)
+          : shotIdx > 0
+            ? project.shots[shotIdx - 1]
+            : undefined;
+      if (chainShot?.frameImageUrl && referenceImageUrls.length < 14) {
+        referenceImageUrls.push(chainShot.frameImageUrl);
+        refNotes.push(
+          `Reference Image #${referenceImageUrls.length} (PREVIOUS SHOT ${chainShot.id} CONTINUITY): match lighting mood, talent position, and spatial continuity.`
+        );
+      }
+    }
+
+    const basePrompt = (framePromptOverride ?? shot.framePrompt ?? shot.scene ?? '').trim();
+    const cleanedPrompt = basePrompt.replace(
+      /\[PRODUCT PLACEHOLDER:[^\]]*\]/gi,
+      `${project.product.name} matching the attached real product reference photo(s)`
+    );
+
+    const paletteAndStyle = [
+      project.brandBible?.visualStyle?.palette
+        ? `Color Palette: ${project.brandBible.visualStyle.palette}`
+        : '',
+      project.extractedStyleGuide?.paletteHexes?.length
+        ? `Hex Swatches: ${project.extractedStyleGuide.paletteHexes.join(', ')}`
+        : '',
+      project.brandBible?.visualStyle?.lighting
+        ? `Lighting: ${project.brandBible.visualStyle.lighting}`
+        : '',
+      project.brandBible?.visualStyle?.lensAndFraming
+        ? `Camera/Lens: ${project.brandBible.visualStyle.lensAndFraming}`
+        : '',
+      project.brandBible?.productRules && useProduct
+        ? `Product Rules: ${project.brandBible.productRules}`
+        : '',
+      studio.customStyleNote ? `Style Note: ${studio.customStyleNote}` : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    const fullPrompt = `Generate a single clean, borderless cinema storyboard frame for Shot ${shot.id} in the visual style of: ${styleDirective}.
+
+Scene Action: ${shot.scene}
+Composition & Blocking: ${cleanedPrompt}
+Visual Direction: ${paletteAndStyle || 'Cohesive commercial cinematography'}
+${
+  refNotes.length > 0
+    ? `\nATTACHED CONSISTENCY REFERENCES (follow strictly):\n${refNotes.join('\n')}`
+    : ''
+}
+
+Output strictly a single full-bleed frame with zero borders, no split grid panels, no text overlays, no shot labels, and no watermarks.`;
+
+    try {
+      fal.config({ credentials: falKey });
+      const generated = await generateNanoBananaImageViaFal({
+        projectId: project.id,
+        model: studio.model || 'nano-banana-2',
+        prompt: fullPrompt,
+        aspectRatio: studio.aspectRatio || '16:9',
+        resolution: studio.resolution || '1K',
+        referenceImageUrls,
+      });
+
+      const savedFrame = await saveBinaryAssetFromUrl(
+        project.id,
+        generated.imageUrl,
+        `frame-${shot.id.toLowerCase()}`,
+        'png'
+      );
+
+      const nextShots = project.shots.map((s) =>
+        s.id === shot.id
+          ? {
+              ...s,
+              framePrompt: framePromptOverride ?? s.framePrompt,
+              frameImageUrl: savedFrame.url,
+              status: 'Frame Uploaded' as const,
+              frameCheck: null,
+              productFrameApproved: false,
+            }
+          : s
+      );
+
+      const saved = await saveProject({
+        ...project,
+        shots: nextShots,
+        approvals: {
+          ...project.approvals,
+          storyboardApproved: false,
+          videoPromptsApproved: false,
+          voApproved: false,
+          shootPlanApproved: false,
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Storyboard Frame',
+            shotId: shot.id,
+            model: generated.endpointUsed,
+            prompt: fullPrompt.slice(0, 240),
+            seed: null,
+            status: 'success',
+            notes: `Style: ${activeStyle}, Refs: ${generated.uploadedRefCount}`,
+          },
+          ...project.generationLog,
+        ],
+      });
+
+      res.json({
+        project: saved,
+        shot: saved.shots.find((s) => s.id === shot.id),
+        endpointUsed: generated.endpointUsed,
+        refCount: generated.uploadedRefCount,
+      });
+    } catch (err) {
+      const failure = describeFalFailure(err);
+      res.status(failure.status).json({ error: failure.message });
     }
   });
 

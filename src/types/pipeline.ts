@@ -316,6 +316,43 @@ export interface ExtractedStyleGuide {
   sourceFileNames: string[];
 }
 
+export type StoryboardStylePreset =
+  | 'sketch'
+  | '3d_animation'
+  | 'charcoal'
+  | 'claymation'
+  | 'concept_sketch'
+  | 'realistic';
+
+export type StoryboardImageModel =
+  | 'nano-banana-2'
+  | 'nano-banana-pro'
+  | 'nano-banana';
+
+export type StoryboardAssetCategory = 'character' | 'location' | 'prop';
+
+export interface StoryboardStudioAsset {
+  id: string;
+  category: StoryboardAssetCategory;
+  name: string;
+  description: string;
+  sheetType: 'contact_sheet' | 'multi_angle' | 'prop_study';
+  imageUrl: string | null;
+  locked: boolean;
+  useRealProductPhoto?: boolean;
+  linkedShotIds?: string[];
+}
+
+export interface StoryboardStudioState {
+  style: StoryboardStylePreset;
+  customStyleNote?: string;
+  model: StoryboardImageModel;
+  aspectRatio: '16:9' | '9:16' | '4:5' | '1:1' | '21:9';
+  resolution: '1K' | '2K';
+  assets: StoryboardStudioAsset[];
+  hasSeededAssets?: boolean;
+}
+
 export interface PipelineProject {
   id: string;
   createdAt: string;
@@ -330,6 +367,7 @@ export interface PipelineProject {
   shots: PipelineShot[];
   shotListHasGenerated: boolean;
   shotListManuallyEdited: boolean;
+  storyboardStudio?: StoryboardStudioState;
   voScript: VoScriptLine[];
   voHasGenerated?: boolean;
   voManuallyEdited?: boolean;
@@ -358,11 +396,28 @@ export interface PipelineProject {
   generationLog: GenerationLogEntry[];
 }
 
+export interface ProjectThumbnailItem {
+  url: string;
+  label: string;
+  kind: 'frame' | 'product' | 'asset' | 'logo';
+}
+
 export interface ProjectSummary {
   id: string;
   client: string;
   productName: string;
   updatedAt: string;
   shotCount: number;
+  framesReadyCount: number;
+  videosReadyCount: number;
+  voReadyCount: number;
+  totalVoCount: number;
+  coverImageUrl: string | null;
+  brandLogoUrl: string | null;
+  thumbnailStrip: ProjectThumbnailItem[];
+  paletteHexes: string[];
+  conceptTitle: string;
+  nextStepNumber: PipelineStepNumber;
+  nextStepLabel: string;
   approvals: ApprovalState;
 }
