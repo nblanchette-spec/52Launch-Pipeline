@@ -1,11 +1,11 @@
 import fs from 'fs/promises';
 import path from 'path';
-import {
+import type {
   PipelineProject,
   PipelineStepNumber,
   ProjectSummary,
   ProjectThumbnailItem,
-} from '../src/types/pipeline';
+} from '../src/types/pipeline.ts';
 
 const DATA_ROOT = path.resolve(process.cwd(), 'data');
 

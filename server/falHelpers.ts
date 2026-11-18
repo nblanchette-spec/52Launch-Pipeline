@@ -4,18 +4,18 @@ import {
   getStudioModel,
   keyframeFrameIndex,
   resolveStudioResolution,
-  StudioAspectRatio,
-  StudioModelId,
-  StudioQualityTier,
-  StudioReferenceTask,
-  StudioResolution,
-  StudioTimelineKeyframe,
-  StudioWorkflowMode,
+  type StudioAspectRatio,
+  type StudioModelId,
+  type StudioQualityTier,
+  type StudioReferenceTask,
+  type StudioResolution,
+  type StudioTimelineKeyframe,
+  type StudioWorkflowMode,
   TOPAZ_UPSCALE_MODES,
-  TopazUpscaleMode,
-} from '../src/utils/videoStudioCatalog';
-import { StoryboardImageModel } from '../src/types/pipeline';
-import { readAssetAsInlineData } from './projectStore';
+  type TopazUpscaleMode,
+} from '../src/utils/videoStudioCatalog.ts';
+import type { StoryboardImageModel } from '../src/types/pipeline.ts';
+import { readAssetAsInlineData } from './projectStore.ts';
 
 export interface StudioGenerateInput {
   projectId: string;

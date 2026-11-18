@@ -14,8 +14,8 @@ import {
   saveBufferAsset,
   saveDataUrlAsset,
   saveProject,
-} from './projectStore';
-import {
+} from './projectStore.ts';
+import type {
   BrandGuideDocument,
   ExternalUpscaleItem,
   ExtractedStyleGuide,
@@ -32,38 +32,38 @@ import {
   VideoModelOption,
   VoScriptLine,
   VoStudioSettings,
-} from '../src/types/pipeline';
-import { extractImagesFromPdfBuffer } from './pdfAssetExtractor';
+} from '../src/types/pipeline.ts';
+import { extractImagesFromPdfBuffer } from './pdfAssetExtractor.ts';
 import {
   buildFalVideoRequest,
   buildTopazUpscaleRequest,
   describeFalFailure,
   generateNanoBananaImageViaFal,
   uploadMediaRefToFal,
-} from './falHelpers';
+} from './falHelpers.ts';
 import {
-  GeminiTtsModel,
+  type GeminiTtsModel,
   synthesizeWithGeminiTTS,
   VALID_GEMINI_VOICES,
-} from './voxcraftTts';
+} from './voxcraftTts.ts';
 import {
   downloadAndExtractDriveFiles,
   downloadDriveBinaryAsset,
   DriveAuthError,
-  DriveFileDescriptor,
+  type DriveFileDescriptor,
   syncProjectAssetsToDrive,
-} from './driveHelpers';
+} from './driveHelpers.ts';
 import {
   FLUX3_ENDPOINTS,
-  StudioAspectRatio,
-  StudioModelId,
-  StudioQualityTier,
-  StudioReferenceTask,
-  StudioResolution,
-  StudioTimelineKeyframe,
-  StudioWorkflowMode,
-  TopazUpscaleMode,
-} from '../src/utils/videoStudioCatalog';
+  type StudioAspectRatio,
+  type StudioModelId,
+  type StudioQualityTier,
+  type StudioReferenceTask,
+  type StudioResolution,
+  type StudioTimelineKeyframe,
+  type StudioWorkflowMode,
+  type TopazUpscaleMode,
+} from '../src/utils/videoStudioCatalog.ts';
 
 const GEMINI_MODEL = 'gemini-3.8-flash';
 

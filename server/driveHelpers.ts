@@ -1,8 +1,8 @@
 import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
-import { PipelineProject } from '../src/types/pipeline';
-import { readAssetAsInlineData } from './projectStore';
-import { extractImagesFromPdfBuffer } from './pdfAssetExtractor';
+import type { PipelineProject } from '../src/types/pipeline.ts';
+import { readAssetAsInlineData } from './projectStore.ts';
+import { extractImagesFromPdfBuffer } from './pdfAssetExtractor.ts';
 
 export interface DriveFileDescriptor {
   id: string;
