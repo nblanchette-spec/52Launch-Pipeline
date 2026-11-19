@@ -1014,7 +1014,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const triggerDriveAutoSave = async (projectId: string) => {
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
     setDriveErrorMsg(null);
-    let token = driveToken;
+    let token = driveToken || (await getGoogleDriveAccessToken());
     if (!token) {
       try {
         const authRes = await signInWithGoogleDrive();

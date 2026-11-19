@@ -98,12 +98,33 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
       prompt: forceConsent ? 'consent' : 'select_account',
     });
 
-    const result = await signInWithPopup(auth, provider);
+    let result;
+    try {
+      result = await signInWithPopup(auth, provider);
+    } catch {
+      provider.setCustomParameters({ prompt: 'consent' });
+      result = await signInWithPopup(auth, provider);
+    }
+
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    const accessToken = credential?.accessToken;
+    const tokenResponse = (result as unknown as { _tokenResponse?: { oauthAccessToken?: string } })._tokenResponse;
+    let accessToken = credential?.accessToken || tokenResponse?.oauthAccessToken;
 
     if (!accessToken) {
-      throw new Error('Failed to get Google Drive access token from sign-in.');
+      provider.setCustomParameters({ prompt: 'consent' });
+      const retryResult = await signInWithPopup(auth, provider);
+      const retryCredential = GoogleAuthProvider.credentialFromResult(retryResult);
+      const retryTokenResponse = (retryResult as unknown as { _tokenResponse?: { oauthAccessToken?: string } })._tokenResponse;
+      accessToken = retryCredential?.accessToken || retryTokenResponse?.oauthAccessToken || undefined;
+      if (retryResult.user) result = retryResult;
+    }
+
+    if (!accessToken) {
+      accessToken = cachedAccessToken || undefined;
+    }
+
+    if (!accessToken) {
+      throw new Error('Could not obtain Google Drive access token. Please ensure Google Drive permissions are allowed and try again.');
     }
 
     const userInfo = mapFirebaseUser(result.user);
