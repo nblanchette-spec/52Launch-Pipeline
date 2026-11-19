@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
+import path from 'path';
 import type { PipelineProject } from '../src/types/pipeline.ts';
 import { readAssetAsInlineData } from './projectStore.ts';
 import { extractImagesFromPdfBuffer } from './pdfAssetExtractor.ts';
@@ -1337,190 +1338,172 @@ export async function syncProjectAssetsToDrive(
 
   const uploadedFiles: string[] = [];
 
-  // 1. Project JSON backup
+  // Ensure pipeline folder structure
+  const intakeFolderId = await ensureSubfolder(accessToken, folderId, '01-Intake');
+  const brandBibleFolderId = await ensureSubfolder(accessToken, folderId, '02-BrandBible');
+  const briefFolderId = await ensureSubfolder(accessToken, folderId, '03-CreativeBrief');
+  const shotlistFolderId = await ensureSubfolder(accessToken, folderId, '04-ShotList');
+  const storyboardFolderId = await ensureSubfolder(accessToken, folderId, '05-Storyboard');
+  const continuityFolderId = await ensureSubfolder(accessToken, folderId, '06-Continuity');
+  const videoStudioFolderId = await ensureSubfolder(accessToken, folderId, '07-VideoStudio');
+  const voiceoverFolderId = await ensureSubfolder(accessToken, folderId, '08-Voiceover');
+  const shootPlanFolderId = await ensureSubfolder(accessToken, folderId, '09-ShootPlan');
+  const masterPdfsFolderId = await ensureSubfolder(accessToken, folderId, 'MasterPDFs');
+  const assetsFolderId = await ensureSubfolder(accessToken, folderId, 'Assets');
+
+  // 1. Project JSON backup in Assets/
   const jsonBuffer = Buffer.from(JSON.stringify(project, null, 2), 'utf-8');
   uploadedFiles.push(
-    await upsertDriveFile(accessToken, folderId, `${slug}-project.json`, 'application/json', jsonBuffer)
+    `Assets/${await upsertDriveFile(accessToken, assetsFolderId, `${slug}-project.json`, 'application/json', jsonBuffer)}`
   );
 
-  // 2. Fallback server deliverable PDFs only when caller did not opt into client-formatted PDF sync
+  // 2. Deliverable PDFs into MasterPDFs/ and respective stage folders
   if (!options?.skipPdfGeneration) {
     if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
       const biblePdf = generateBrandBiblePdfBuffer(project);
-      uploadedFiles.push(
-        await upsertDriveFile(accessToken, folderId, `${slug}-brand-bible.pdf`, 'application/pdf', biblePdf)
-      );
+      const name = `${slug}-brand-bible.pdf`;
+      await upsertDriveFile(accessToken, brandBibleFolderId, name, 'application/pdf', biblePdf);
+      uploadedFiles.push(`02-BrandBible/${name}`);
+      await upsertDriveFile(accessToken, masterPdfsFolderId, name, 'application/pdf', biblePdf);
+      uploadedFiles.push(`MasterPDFs/${name}`);
     }
     if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
       const briefPdf = generateCreativeBriefPdfBuffer(project);
-      uploadedFiles.push(
-        await upsertDriveFile(accessToken, folderId, `${slug}-creative-brief.pdf`, 'application/pdf', briefPdf)
-      );
+      const name = `${slug}-creative-brief.pdf`;
+      await upsertDriveFile(accessToken, briefFolderId, name, 'application/pdf', briefPdf);
+      uploadedFiles.push(`03-CreativeBrief/${name}`);
+      await upsertDriveFile(accessToken, masterPdfsFolderId, name, 'application/pdf', briefPdf);
+      uploadedFiles.push(`MasterPDFs/${name}`);
     }
     const shotlistPdf = generateShotListPdfBuffer(project);
-    uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-shotlist-storyboard.pdf`, 'application/pdf', shotlistPdf)
-    );
+    const shotlistName = `${slug}-shotlist-storyboard.pdf`;
+    await upsertDriveFile(accessToken, shotlistFolderId, shotlistName, 'application/pdf', shotlistPdf);
+    uploadedFiles.push(`04-ShotList/${shotlistName}`);
+    await upsertDriveFile(accessToken, masterPdfsFolderId, shotlistName, 'application/pdf', shotlistPdf);
+    uploadedFiles.push(`MasterPDFs/${shotlistName}`);
+
     if ((project.voScript || []).length > 0) {
       const voPdf = generateVoScriptPdfBuffer(project);
-      uploadedFiles.push(
-        await upsertDriveFile(accessToken, folderId, `${slug}-vo-script.pdf`, 'application/pdf', voPdf)
-      );
+      const voName = `${slug}-vo-script.pdf`;
+      await upsertDriveFile(accessToken, voiceoverFolderId, voName, 'application/pdf', voPdf);
+      uploadedFiles.push(`08-Voiceover/${voName}`);
+      await upsertDriveFile(accessToken, masterPdfsFolderId, voName, 'application/pdf', voPdf);
+      uploadedFiles.push(`MasterPDFs/${voName}`);
     }
     if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
       const callSheetPdf = generateShootPlanPdfBuffer(project);
-      uploadedFiles.push(
-        await upsertDriveFile(accessToken, folderId, `${slug}-shoot-plan-call-sheet.pdf`, 'application/pdf', callSheetPdf)
-      );
+      const callSheetName = `${slug}-shoot-plan-call-sheet.pdf`;
+      await upsertDriveFile(accessToken, shootPlanFolderId, callSheetName, 'application/pdf', callSheetPdf);
+      uploadedFiles.push(`09-ShootPlan/${callSheetName}`);
+      await upsertDriveFile(accessToken, masterPdfsFolderId, callSheetName, 'application/pdf', callSheetPdf);
+      uploadedFiles.push(`MasterPDFs/${callSheetName}`);
     }
     const masterPdf = generateMasterProductionPdfBuffer(project);
-    uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-master-production-book.pdf`, 'application/pdf', masterPdf)
-    );
+    const masterName = `${slug}-master-production-book.pdf`;
+    await upsertDriveFile(accessToken, masterPdfsFolderId, masterName, 'application/pdf', masterPdf);
+    uploadedFiles.push(`MasterPDFs/${masterName}`);
   }
 
-  // 3. Archive Locked Drive Reference Files + Uploaded Product Photos, Brand Graphics & Style Guide PDFs into Reference Files/
-  const selectedRefs = (project.lockedDriveReferences || []).filter((r) => r.selected);
+  // 3. Product Photos into 01-Intake/
   const productPhotos = project.product?.photos || [];
+  for (let i = 0; i < productPhotos.length; i++) {
+    const photo = productPhotos[i];
+    if (!photo.url) continue;
+    const inline = await readAssetAsInlineData(project.id, photo.url);
+    if (!inline) continue;
+    const ext = inline.mimeType.includes('jpeg') ? 'jpg' : inline.mimeType.includes('webp') ? 'webp' : 'png';
+    const safeCap = (photo.caption || `angle-${i + 1}`).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    const fname = `product-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
+    await upsertDriveFile(accessToken, intakeFolderId, fname, inline.mimeType, Buffer.from(inline.data, 'base64'));
+    uploadedFiles.push(`01-Intake/${fname}`);
+  }
+
+  // 4. Brand Logo & Brand Graphics into 02-BrandBible/
+  const brandLogoUrl = project.brandBible?.brandLogoUrl;
   const brandGraphicsList = [
     ...(project.brandBible?.brandGraphics || []),
-    ...(project.brandBible?.brandLogoUrl &&
-    !(project.brandBible.brandGraphics || []).some((g) => g.url === project.brandBible.brandLogoUrl)
-      ? [
-          {
-            id: 'primary-logo',
-            url: project.brandBible.brandLogoUrl,
-            caption: project.brandBible.brandLogoCaption || 'primary-brand-logo',
-          },
-        ]
+    ...(brandLogoUrl && !(project.brandBible?.brandGraphics || []).some((g) => g.url === brandLogoUrl)
+      ? [{ id: 'primary-logo', url: brandLogoUrl, caption: project.brandBible?.brandLogoCaption || 'primary-brand-logo' }]
       : []),
   ];
+
+  for (let i = 0; i < brandGraphicsList.length; i++) {
+    const graphic = brandGraphicsList[i];
+    if (!graphic.url) continue;
+    const inline = await readAssetAsInlineData(project.id, graphic.url);
+    if (!inline) continue;
+    const ext = inline.mimeType.includes('jpeg') ? 'jpg' : inline.mimeType.includes('webp') ? 'webp' : 'png';
+    const safeCap = (graphic.caption || `graphic-${i + 1}`).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    const fname = `brand-graphic-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
+    await upsertDriveFile(accessToken, brandBibleFolderId, fname, inline.mimeType, Buffer.from(inline.data, 'base64'));
+    uploadedFiles.push(`02-BrandBible/${fname}`);
+  }
+
+  // 5. Brand Guide PDFs into 02-BrandBible/
   const guideDocs = project.brandGuideDocuments || [];
+  for (const doc of guideDocs) {
+    if (!doc.url) continue;
+    const inline = await readAssetAsInlineData(project.id, doc.url);
+    if (!inline) continue;
+    const fname = doc.name.toLowerCase().endsWith('.pdf') ? doc.name : `${doc.name}.pdf`;
+    await upsertDriveFile(accessToken, brandBibleFolderId, fname, 'application/pdf', Buffer.from(inline.data, 'base64'));
+    uploadedFiles.push(`02-BrandBible/${fname}`);
+  }
 
-  if (
-    selectedRefs.length > 0 ||
-    productPhotos.length > 0 ||
-    brandGraphicsList.length > 0 ||
-    guideDocs.length > 0
-  ) {
-    const refFolderId = await ensureSubfolder(accessToken, folderId, 'Reference Files');
-
-    for (const ref of selectedRefs) {
-      try {
-        const savedName = await copyOrExportLockedRefToFolder(accessToken, refFolderId, ref);
-        if (savedName) uploadedFiles.push(savedName);
-      } catch {
-        // Non-fatal: continue archiving remaining references
-      }
-    }
-
-    for (let i = 0; i < productPhotos.length; i++) {
-      const photo = productPhotos[i];
-      if (!photo.url) continue;
-      const inline = await readAssetAsInlineData(project.id, photo.url);
-      if (!inline) continue;
-      const ext = inline.mimeType.includes('jpeg')
-        ? 'jpg'
-        : inline.mimeType.includes('webp')
-          ? 'webp'
-          : 'png';
-      const safeCap = (photo.caption || `angle-${i + 1}`)
-        .replace(/[^a-zA-Z0-9._-]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 40);
-      const fname = `product-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
-      await upsertDriveFile(
-        accessToken,
-        refFolderId,
-        fname,
-        inline.mimeType,
-        Buffer.from(inline.data, 'base64')
-      );
-      uploadedFiles.push(`Reference Files/${fname}`);
-    }
-
-    for (let i = 0; i < brandGraphicsList.length; i++) {
-      const graphic = brandGraphicsList[i];
-      if (!graphic.url) continue;
-      const inline = await readAssetAsInlineData(project.id, graphic.url);
-      if (!inline) continue;
-      const ext = inline.mimeType.includes('jpeg')
-        ? 'jpg'
-        : inline.mimeType.includes('webp')
-          ? 'webp'
-          : 'png';
-      const safeCap = (graphic.caption || `graphic-${i + 1}`)
-        .replace(/[^a-zA-Z0-9._-]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 40);
-      const fname = `brand-graphic-${String(i + 1).padStart(2, '0')}-${safeCap}.${ext}`;
-      await upsertDriveFile(
-        accessToken,
-        refFolderId,
-        fname,
-        inline.mimeType,
-        Buffer.from(inline.data, 'base64')
-      );
-      uploadedFiles.push(`Reference Files/${fname}`);
-    }
-
-    for (const doc of guideDocs) {
-      if (!doc.url) continue;
-      const inline = await readAssetAsInlineData(project.id, doc.url);
-      if (!inline) continue;
-      const fname = doc.name.toLowerCase().endsWith('.pdf') ? doc.name : `${doc.name}.pdf`;
-      await upsertDriveFile(
-        accessToken,
-        refFolderId,
-        fname,
-        'application/pdf',
-        Buffer.from(inline.data, 'base64')
-      );
-      uploadedFiles.push(`Reference Files/${fname}`);
+  // 6. Selected Locked References into 06-Continuity/
+  const selectedRefs = (project.lockedDriveReferences || []).filter((r) => r.selected);
+  for (const ref of selectedRefs) {
+    try {
+      const savedName = await copyOrExportLockedRefToFolder(accessToken, continuityFolderId, ref);
+      if (savedName) uploadedFiles.push(`06-Continuity/${path.basename(savedName)}`);
+    } catch {
+      // non-fatal
     }
   }
 
-  // 4. Storyboard Continuity Sheets & Generated Frames
-  const sbAssetsWithImages = (project.storyboardStudio?.assets || []).filter((a) =>
-    Boolean(a.imageUrl)
-  );
+  // 7. Storyboard Assets & Generated Frames into 05-Storyboard/
+  const sbAssetsWithImages = (project.storyboardStudio?.assets || []).filter((a) => Boolean(a.imageUrl));
   const shotsWithFrames = (project.shots || []).filter((s) => Boolean(s.frameImageUrl));
 
-  if (sbAssetsWithImages.length > 0 || shotsWithFrames.length > 0) {
-    const framesFolderId = await ensureSubfolder(accessToken, folderId, 'Storyboards & Frames');
+  for (const asset of sbAssetsWithImages) {
+    if (!asset.imageUrl) continue;
+    const inline = await readAssetAsInlineData(project.id, asset.imageUrl);
+    if (!inline) continue;
+    const ext = inline.mimeType.includes('jpeg') ? 'jpg' : 'png';
+    const safeName = (asset.name || asset.id).replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 40);
+    const fname = `sheet-${asset.category}-${safeName}.${ext}`;
+    await upsertDriveFile(accessToken, storyboardFolderId, fname, inline.mimeType, Buffer.from(inline.data, 'base64'));
+    uploadedFiles.push(`05-Storyboard/${fname}`);
+  }
 
-    for (const asset of sbAssetsWithImages) {
-      if (!asset.imageUrl) continue;
-      const inline = await readAssetAsInlineData(project.id, asset.imageUrl);
-      if (!inline) continue;
-      const ext = inline.mimeType.includes('jpeg') ? 'jpg' : 'png';
-      const safeName = (asset.name || asset.id)
-        .replace(/[^a-zA-Z0-9._-]+/g, '-')
-        .slice(0, 40);
-      const fname = `sheet-${asset.category}-${safeName}.${ext}`;
-      await upsertDriveFile(
-        accessToken,
-        framesFolderId,
-        fname,
-        inline.mimeType,
-        Buffer.from(inline.data, 'base64')
-      );
-      uploadedFiles.push(`Storyboards & Frames/${fname}`);
+  for (const shot of shotsWithFrames) {
+    if (!shot.frameImageUrl) continue;
+    const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
+    if (!inline) continue;
+    const ext = inline.mimeType.includes('jpeg') ? 'jpg' : inline.mimeType.includes('webp') ? 'webp' : 'png';
+    const frameBuf = Buffer.from(inline.data, 'base64');
+    const fname = `${shot.id}-storyboard-frame.${ext}`;
+    await upsertDriveFile(accessToken, storyboardFolderId, fname, inline.mimeType, frameBuf);
+    uploadedFiles.push(`05-Storyboard/${fname}`);
+  }
+
+  // 8. Video Studio clips into 07-VideoStudio/
+  for (const shot of project.shots || []) {
+    if (shot.videoUrl && shot.videoUrl.startsWith('data:')) {
+      const inline = await readAssetAsInlineData(project.id, shot.videoUrl);
+      if (inline) {
+        const fname = `${shot.id}-video-clip.mp4`;
+        await upsertDriveFile(accessToken, videoStudioFolderId, fname, inline.mimeType || 'video/mp4', Buffer.from(inline.data, 'base64'));
+        uploadedFiles.push(`07-VideoStudio/${fname}`);
+      }
     }
-
-    for (const shot of shotsWithFrames) {
-      if (!shot.frameImageUrl) continue;
-      const inline = await readAssetAsInlineData(project.id, shot.frameImageUrl);
-      if (!inline) continue;
-      const ext = inline.mimeType.includes('jpeg')
-        ? 'jpg'
-        : inline.mimeType.includes('webp')
-          ? 'webp'
-          : 'png';
-      const frameBuf = Buffer.from(inline.data, 'base64');
-      const fname = `${shot.id}-storyboard-frame.${ext}`;
-      await upsertDriveFile(accessToken, framesFolderId, fname, inline.mimeType, frameBuf);
-      uploadedFiles.push(`Storyboards & Frames/${fname}`);
+    if (shot.upscaledVideoUrl && shot.upscaledVideoUrl.startsWith('data:')) {
+      const inline = await readAssetAsInlineData(project.id, shot.upscaledVideoUrl);
+      if (inline) {
+        const fname = `${shot.id}-upscaled-1080p.mp4`;
+        await upsertDriveFile(accessToken, videoStudioFolderId, fname, inline.mimeType || 'video/mp4', Buffer.from(inline.data, 'base64'));
+        uploadedFiles.push(`07-VideoStudio/${fname}`);
+      }
     }
   }
 
