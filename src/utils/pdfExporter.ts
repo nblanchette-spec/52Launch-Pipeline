@@ -4752,11 +4752,44 @@ function writeShootPlanSlides(deck: SlideDeckWriter, project: PipelineProject): 
 }
 
 // ============================================================================
-// PUBLIC EXPORT FUNCTIONS
+// PUBLIC EXPORT & DRIVE SYNC FUNCTIONS
 // ============================================================================
 
-export async function downloadStoryboardPdf(project: PipelineProject): Promise<void> {
-  const brand = await load52LaunchBrandAssets();
+async function writeSectionById(
+  writer: PdfWriter,
+  project: PipelineProject,
+  sectionId: MasterPdfSectionId
+): Promise<void> {
+  switch (sectionId) {
+    case 'brandBible':
+      await writeBrandBibleSection(writer, project);
+      break;
+    case 'creativeBrief':
+      writeCreativeBriefSection(writer, project);
+      break;
+    case 'shotListAndStoryboard':
+      await writeStoryboardSection(writer, project);
+      break;
+    case 'frameSuggestions':
+      await writeFrameSuggestionsSection(writer, project);
+      break;
+    case 'videoPromptsAndVideo':
+      await writeVideoPromptsSection(writer, project);
+      break;
+    case 'voScript':
+      writeVoScriptSection(writer, project);
+      break;
+    case 'shootPlan':
+      writeShootPlanSection(writer, project);
+      break;
+  }
+}
+
+export async function buildStoryboardPdfBlob(
+  project: PipelineProject,
+  preloadedBrand?: BrandLogoAssets
+): Promise<{ filename: string; blob: Blob }> {
+  const brand = preloadedBrand || (await load52LaunchBrandAssets());
   const writer = new PdfWriter('Storyboard & Shot List', project);
   const totalSec = project.shots.reduce((s, x) => s + (Number(x.durationSec) || 0), 0);
   writer.drawCoverHeader(
@@ -4770,17 +4803,26 @@ export async function downloadStoryboardPdf(project: PipelineProject): Promise<v
   );
   await writeStoryboardSection(writer, project);
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
-  const filename = `${slug}-storyboard.pdf`;
-  const blob = writer.toBlob();
-  triggerBlobDownload(blob, filename);
-  void maybeAutoSavePdfToDrive(project, filename, blob);
+  return {
+    filename: `${slug}-storyboard.pdf`,
+    blob: writer.toBlob(),
+  };
 }
 
-export async function downloadCallSheetPdf(
+export async function downloadStoryboardPdf(
+  project: PipelineProject
+): Promise<DriveSaveResult> {
+  const { filename, blob } = await buildStoryboardPdfBlob(project);
+  triggerBlobDownload(blob, filename);
+  return await maybeAutoSavePdfToDrive(project, filename, blob);
+}
+
+export async function buildCallSheetPdfBlob(
   project: PipelineProject,
-  plan?: ShootPlan
-): Promise<void> {
-  const brand = await load52LaunchBrandAssets();
+  plan?: ShootPlan,
+  preloadedBrand?: BrandLogoAssets
+): Promise<{ filename: string; blob: Blob }> {
+  const brand = preloadedBrand || (await load52LaunchBrandAssets());
   const activePlan = plan || project.shootPlan;
   const liveHybrid = project.shots.filter((s) => s.route !== 'ai_video').length;
   const writer = new PdfWriter('Call Sheet & Shoot Plan', project);
@@ -4795,19 +4837,26 @@ export async function downloadCallSheetPdf(
   );
   writeShootPlanSection(writer, project, activePlan);
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
-  const filename = `${slug}-call-sheet.pdf`;
-  const blob = writer.toBlob();
-  triggerBlobDownload(blob, filename);
-  void maybeAutoSavePdfToDrive(project, filename, blob);
+  return {
+    filename: `${slug}-call-sheet.pdf`,
+    blob: writer.toBlob(),
+  };
 }
 
-export async function downloadMasterSlideshowPdf(
+export async function downloadCallSheetPdf(
   project: PipelineProject,
-  sections: MasterPdfSectionId[]
+  plan?: ShootPlan
 ): Promise<DriveSaveResult> {
-  if (sections.length === 0) {
-    return { attempted: false, success: false };
-  }
+  const { filename, blob } = await buildCallSheetPdfBlob(project, plan);
+  triggerBlobDownload(blob, filename);
+  return await maybeAutoSavePdfToDrive(project, filename, blob);
+}
+
+export async function buildMasterSlideshowPdfBlob(
+  project: PipelineProject,
+  sections: MasterPdfSectionId[],
+  preloadedBrand?: BrandLogoAssets
+): Promise<{ filename: string; blob: Blob }> {
   const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
   const deck = new SlideDeckWriter(project);
 
@@ -4815,7 +4864,7 @@ export async function downloadMasterSlideshowPdf(
   const brandGraphicsList = getAllBrandGraphics(project);
   const primaryLogoUrl = brandGraphicsList[0]?.url || project.brandBible?.brandLogoUrl;
   const [brand, logoImg, ...prodImgs] = await Promise.all([
-    load52LaunchBrandAssets(),
+    preloadedBrand ? Promise.resolve(preloadedBrand) : load52LaunchBrandAssets(),
     loadImageForPdf(primaryLogoUrl),
     ...project.product.photos.slice(0, 4).map((p) => loadImageForPdf(p.url)),
   ]);
@@ -4853,10 +4902,108 @@ export async function downloadMasterSlideshowPdf(
     }
   }
 
-  const filename = `${slug}-presentation-slideshow-16x9.pdf`;
-  const blob = deck.toBlob();
+  return {
+    filename: `${slug}-presentation-slideshow-16x9.pdf`,
+    blob: deck.toBlob(),
+  };
+}
+
+export async function downloadMasterSlideshowPdf(
+  project: PipelineProject,
+  sections: MasterPdfSectionId[]
+): Promise<DriveSaveResult> {
+  if (sections.length === 0) {
+    return { attempted: false, success: false };
+  }
+  const { filename, blob } = await buildMasterSlideshowPdfBlob(project, sections);
   triggerBlobDownload(blob, filename);
   return await maybeAutoSavePdfToDrive(project, filename, blob);
+}
+
+export async function buildMasterCombinedPdfBlob(
+  project: PipelineProject,
+  sections: MasterPdfSectionId[],
+  preloadedBrand?: BrandLogoAssets
+): Promise<{ filename: string; blob: Blob }> {
+  const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
+  const brand = preloadedBrand || (await load52LaunchBrandAssets());
+  const writer = new PdfWriter('Master Production Book', project);
+  const totalSec = project.shots.reduce((s, x) => s + (Number(x.durationSec) || 0), 0);
+  writer.drawCoverHeader(
+    `Master Production Book (${sections.length} deliverables)`,
+    [
+      `${project.shots.length} Shots · ${totalSec}s`,
+      `${project.voScript.length} VO Lines`,
+      new Date().toLocaleDateString(),
+    ],
+    brand.badgeBurgundy
+  );
+
+  writer.drawKpiRow([
+    { label: 'Shots & Runtime', value: `${project.shots.length} Shots · ${totalSec}s`, accent: 'amber' },
+    { label: 'VO Lines', value: `${project.voScript.length} Lines`, accent: 'indigo' },
+    { label: 'Shoot Days', value: `${project.shootPlan?.shootDays.length ?? 0} Day(s)`, accent: 'emerald' },
+    { label: 'Included Sections', value: `${sections.length} Deliverables`, accent: 'slate' },
+  ]);
+
+  if (project.product.description) {
+    writer.drawCalloutCard({
+      title: 'Product Overview',
+      tone: 'neutral',
+      bodyLines: [{ text: project.product.description }],
+    });
+  }
+
+  writer.addSubHeading('Included Production Packet Contents');
+  writer.drawTable(
+    [
+      { label: '#', width: 12, align: 'center' },
+      { label: 'Deliverable Section', width: 64 },
+      { label: 'Summary Status', width: 106 },
+    ],
+    sections.map((id, idx) => {
+      const meta = MASTER_PDF_SECTIONS.find((m) => m.id === id);
+      return [
+        String(idx + 1).padStart(2, '0'),
+        meta?.label || id,
+        meta ? meta.getStatus(project).detail : '',
+      ];
+    })
+  );
+
+  for (let i = 0; i < sections.length; i++) {
+    writer.newPage();
+    await writeSectionById(writer, project, sections[i]);
+  }
+
+  return {
+    filename: `${slug}-master-production-book.pdf`,
+    blob: writer.toBlob(),
+  };
+}
+
+export async function buildSingleSectionPdfBlob(
+  project: PipelineProject,
+  sectionId: MasterPdfSectionId,
+  preloadedBrand?: BrandLogoAssets
+): Promise<{ filename: string; blob: Blob }> {
+  const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
+  const brand = preloadedBrand || (await load52LaunchBrandAssets());
+  const meta = MASTER_PDF_SECTIONS.find((m) => m.id === sectionId);
+  const writer = new PdfWriter(meta?.label || sectionId, project);
+  writer.drawCoverHeader(
+    meta?.label || sectionId,
+    [
+      new Date().toLocaleDateString(),
+      `${project.shots.length} Shots`,
+    ],
+    brand.badgeBurgundy
+  );
+  await writeSectionById(writer, project, sectionId);
+  return {
+    filename: `${slug}-${meta?.filenameSuffix || sectionId}.pdf`,
+    blob: writer.toBlob(),
+  };
 }
 
 export async function downloadMasterPdf(
@@ -4871,10 +5018,8 @@ export async function downloadMasterPdf(
     };
   }
 
-  const slug = slugifyFilePart(`${project.client}-${project.product.name}`);
-
   if (mode === 'slideshow') {
-    const filename = `${slug}-presentation-slideshow-16x9.pdf`;
+    const filename = `${slugifyFilePart(`${project.client}-${project.product.name}`)}-presentation-slideshow-16x9.pdf`;
     const driveSave = await downloadMasterSlideshowPdf(project, sections);
     return {
       downloadedFiles: [filename],
@@ -4884,87 +5029,8 @@ export async function downloadMasterPdf(
 
   const brand = await load52LaunchBrandAssets();
 
-  const writeSectionById = async (
-    writer: PdfWriter,
-    sectionId: MasterPdfSectionId
-  ): Promise<void> => {
-    switch (sectionId) {
-      case 'brandBible':
-        await writeBrandBibleSection(writer, project);
-        break;
-      case 'creativeBrief':
-        writeCreativeBriefSection(writer, project);
-        break;
-      case 'shotListAndStoryboard':
-        await writeStoryboardSection(writer, project);
-        break;
-      case 'frameSuggestions':
-        await writeFrameSuggestionsSection(writer, project);
-        break;
-      case 'videoPromptsAndVideo':
-        await writeVideoPromptsSection(writer, project);
-        break;
-      case 'voScript':
-        writeVoScriptSection(writer, project);
-        break;
-      case 'shootPlan':
-        writeShootPlanSection(writer, project);
-        break;
-    }
-  };
-
   if (mode === 'combined') {
-    const writer = new PdfWriter('Master Production Book', project);
-    const totalSec = project.shots.reduce((s, x) => s + (Number(x.durationSec) || 0), 0);
-    writer.drawCoverHeader(
-      `Master Production Book (${sections.length} deliverables)`,
-      [
-        `${project.shots.length} Shots · ${totalSec}s`,
-        `${project.voScript.length} VO Lines`,
-        new Date().toLocaleDateString(),
-      ],
-      brand.badgeBurgundy
-    );
-
-    writer.drawKpiRow([
-      { label: 'Shots & Runtime', value: `${project.shots.length} Shots · ${totalSec}s`, accent: 'amber' },
-      { label: 'VO Lines', value: `${project.voScript.length} Lines`, accent: 'indigo' },
-      { label: 'Shoot Days', value: `${project.shootPlan?.shootDays.length ?? 0} Day(s)`, accent: 'emerald' },
-      { label: 'Included Sections', value: `${sections.length} Deliverables`, accent: 'slate' },
-    ]);
-
-    if (project.product.description) {
-      writer.drawCalloutCard({
-        title: 'Product Overview',
-        tone: 'neutral',
-        bodyLines: [{ text: project.product.description }],
-      });
-    }
-
-    writer.addSubHeading('Included Production Packet Contents');
-    writer.drawTable(
-      [
-        { label: '#', width: 12, align: 'center' },
-        { label: 'Deliverable Section', width: 64 },
-        { label: 'Summary Status', width: 106 },
-      ],
-      sections.map((id, idx) => {
-        const meta = MASTER_PDF_SECTIONS.find((m) => m.id === id);
-        return [
-          String(idx + 1).padStart(2, '0'),
-          meta?.label || id,
-          meta ? meta.getStatus(project).detail : '',
-        ];
-      })
-    );
-
-    for (let i = 0; i < sections.length; i++) {
-      writer.newPage();
-      await writeSectionById(writer, sections[i]);
-    }
-
-    const filename = `${slug}-master-production-book.pdf`;
-    const blob = writer.toBlob();
+    const { filename, blob } = await buildMasterCombinedPdfBlob(project, sections, brand);
     triggerBlobDownload(blob, filename);
     const driveSave = await maybeAutoSavePdfToDrive(project, filename, blob);
     return {
@@ -4978,19 +5044,7 @@ export async function downloadMasterPdf(
 
   for (let i = 0; i < sections.length; i++) {
     const sectionId = sections[i];
-    const meta = MASTER_PDF_SECTIONS.find((m) => m.id === sectionId);
-    const writer = new PdfWriter(meta?.label || sectionId, project);
-    writer.drawCoverHeader(
-      meta?.label || sectionId,
-      [
-        new Date().toLocaleDateString(),
-        `${project.shots.length} Shots`,
-      ],
-      brand.badgeBurgundy
-    );
-    await writeSectionById(writer, sectionId);
-    const filename = `${slug}-${meta?.filenameSuffix || sectionId}.pdf`;
-    const blob = writer.toBlob();
+    const { filename, blob } = await buildSingleSectionPdfBlob(project, sectionId, brand);
     triggerBlobDownload(blob, filename);
     const driveSave = await maybeAutoSavePdfToDrive(project, filename, blob);
     driveResults.push(driveSave);
@@ -5004,4 +5058,120 @@ export async function downloadMasterPdf(
     downloadedFiles,
     driveStatus: summarizeDriveStatus(driveResults),
   };
+}
+
+/**
+ * Generates and uploads the exact same richly formatted client PDF deliverables
+ * (individual sections + Master Book + 16:9 Slideshow) directly to Google Drive,
+ * ensuring Google Drive files match local computer PDFs identically.
+ */
+export async function syncAllFormattedPdfsToDrive(
+  project: PipelineProject,
+  options?: {
+    accessToken?: string;
+    onProgress?: (label: string) => void;
+  }
+): Promise<{
+  uploadedFiles: string[];
+  backupFolderId?: string;
+  backupFolderUrl?: string;
+  errors: string[];
+}> {
+  const token = options?.accessToken || (await getGoogleDriveAccessToken());
+  if (!token) {
+    throw new Error('Google Drive is not connected or your Drive session expired.');
+  }
+
+  const brand = await load52LaunchBrandAssets();
+  const readySections: MasterPdfSectionId[] = [];
+  if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
+    readySections.push('brandBible');
+  }
+  if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
+    readySections.push('creativeBrief');
+  }
+  if ((project.shots || []).length > 0) {
+    readySections.push('shotListAndStoryboard');
+  }
+  if ((project.shots || []).some((s) => Boolean(s.frameCheck))) {
+    readySections.push('frameSuggestions');
+  }
+  if ((project.shots || []).some((s) => s.route !== 'live')) {
+    readySections.push('videoPromptsAndVideo');
+  }
+  if ((project.voScript || []).length > 0) {
+    readySections.push('voScript');
+  }
+  if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
+    readySections.push('shootPlan');
+  }
+
+  const tasks: Array<{
+    label: string;
+    build: () => Promise<{ filename: string; blob: Blob }>;
+  }> = [];
+
+  for (const secId of readySections) {
+    const meta = MASTER_PDF_SECTIONS.find((m) => m.id === secId);
+    tasks.push({
+      label: meta?.label || secId,
+      build: () => buildSingleSectionPdfBlob(project, secId, brand),
+    });
+  }
+
+  if ((project.shots || []).length > 0) {
+    tasks.push({
+      label: 'Printable Storyboard',
+      build: () => buildStoryboardPdfBlob(project, brand),
+    });
+  }
+
+  if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
+    tasks.push({
+      label: 'Call Sheet',
+      build: () => buildCallSheetPdfBlob(project, project.shootPlan, brand),
+    });
+  }
+
+  const bookSections =
+    readySections.length > 0 ? readySections : MASTER_PDF_SECTIONS.map((s) => s.id);
+  tasks.push({
+    label: 'Master Production Book',
+    build: () => buildMasterCombinedPdfBlob(project, bookSections, brand),
+  });
+  tasks.push({
+    label: '16:9 Presentation Slideshow',
+    build: () => buildMasterSlideshowPdfBlob(project, bookSections, brand),
+  });
+
+  const uploadedFiles: string[] = [];
+  const errors: string[] = [];
+  let backupFolderId: string | undefined;
+  let backupFolderUrl: string | undefined;
+
+  for (const task of tasks) {
+    try {
+      options?.onProgress?.(`Formatting & uploading ${task.label} PDF...`);
+      const { filename, blob } = await task.build();
+      const uploaded = await uploadPdfToDriveServer({
+        projectId: project.id,
+        filename,
+        pdfBlob: blob,
+        destinationFolderId:
+          project.googleDriveDestinationFolderId || project.googleDriveBackupFolderId,
+        destinationFolderUrl:
+          project.googleDriveDestinationFolderUrl || project.googleDriveBackupFolderUrl,
+        accessToken: token,
+      });
+      uploadedFiles.push(uploaded.filename || filename);
+      if (uploaded.backupFolderId) backupFolderId = uploaded.backupFolderId;
+      if (uploaded.backupFolderUrl) backupFolderUrl = uploaded.backupFolderUrl;
+    } catch (err) {
+      errors.push(
+        `${task.label}: ${err instanceof Error ? err.message : 'Upload failed'}`
+      );
+    }
+  }
+
+  return { uploadedFiles, backupFolderId, backupFolderUrl, errors };
 }

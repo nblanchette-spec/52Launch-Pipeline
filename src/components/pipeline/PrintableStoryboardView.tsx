@@ -1,7 +1,16 @@
 import React, { useState } from 'react';
-import { Download, Loader2, ArrowLeft, Image as ImageIcon, Package } from 'lucide-react';
+import {
+  Download,
+  Loader2,
+  ArrowLeft,
+  Image as ImageIcon,
+  Package,
+  CheckCircle2,
+  AlertTriangle,
+  ExternalLink,
+} from 'lucide-react';
 import { PipelineProject, ShotRoute } from '../../types/pipeline';
-import { downloadStoryboardPdf } from '../../utils/pdfExporter';
+import { downloadStoryboardPdf, DriveSaveResult } from '../../utils/pdfExporter';
 
 interface PrintableStoryboardViewProps {
   project: PipelineProject;
@@ -30,6 +39,7 @@ export const PrintableStoryboardView: React.FC<PrintableStoryboardViewProps> = (
 }) => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [driveSaveResult, setDriveSaveResult] = useState<DriveSaveResult | null>(null);
 
   const totalSec = project.shots.reduce(
     (sum, s) => sum + (Number(s.durationSec) || 0),
@@ -38,9 +48,11 @@ export const PrintableStoryboardView: React.FC<PrintableStoryboardViewProps> = (
 
   const handleDownloadPdf = async () => {
     setDownloadError(null);
+    setDriveSaveResult(null);
     setIsDownloading(true);
     try {
-      await downloadStoryboardPdf(project);
+      const res = await downloadStoryboardPdf(project);
+      setDriveSaveResult(res);
     } catch (err) {
       setDownloadError(
         err instanceof Error ? err.message : 'Could not generate storyboard PDF.'
@@ -95,6 +107,40 @@ export const PrintableStoryboardView: React.FC<PrintableStoryboardViewProps> = (
       {downloadError && (
         <div className="no-print p-3 rounded-md bg-[#FDF2F3] border border-[#C6202F]/50 text-xs text-[#891A23]">
           {downloadError}
+        </div>
+      )}
+
+      {driveSaveResult && driveSaveResult.attempted && (
+        <div
+          className={`no-print p-3 rounded-md border text-xs flex items-center justify-between gap-3 ${
+            driveSaveResult.success
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : 'bg-amber-50 border-amber-300 text-amber-950'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {driveSaveResult.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            )}
+            <span>
+              {driveSaveResult.success
+                ? 'Saved formatted Storyboard PDF to Google Drive.'
+                : `PDF downloaded locally, but couldn’t save to Drive: ${driveSaveResult.error || 'Unknown error'}`}
+            </span>
+          </div>
+          {driveSaveResult.success && driveSaveResult.backupFolderUrl && (
+            <a
+              href={driveSaveResult.backupFolderUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-semibold underline hover:no-underline shrink-0"
+            >
+              Open on Drive
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
         </div>
       )}
 

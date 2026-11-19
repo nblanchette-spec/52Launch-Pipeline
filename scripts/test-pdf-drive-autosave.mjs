@@ -45,7 +45,17 @@ if (typeof globalThis.FileReader === 'undefined') {
 }
 
 // Import pdfExporter and googleDriveSync after browser globals are established
-const { downloadMasterPdf, summarizeDriveStatus } = await import('../src/utils/pdfExporter.ts');
+const {
+  downloadMasterPdf,
+  downloadStoryboardPdf,
+  downloadCallSheetPdf,
+  syncAllFormattedPdfsToDrive,
+  buildMasterCombinedPdfBlob,
+  buildMasterSlideshowPdfBlob,
+  buildStoryboardPdfBlob,
+  buildCallSheetPdfBlob,
+  summarizeDriveStatus,
+} = await import('../src/utils/pdfExporter.ts');
 const { setCachedGoogleDriveAccessToken, clearGoogleDriveToken } = await import('../src/utils/googleDriveSync.ts');
 
 // Self-contained synthetic project fixture - completely independent of data/ directory
@@ -186,21 +196,33 @@ const SYNTHETIC_PROJECT = {
     model: 'gemini-3.8-flash-lite-tts',
   },
   shootPlan: {
+    hasGenerated: true,
+    manuallyEdited: false,
     shootDays: [
       {
-        dayNumber: 1,
-        date: '2026-11-20',
+        id: 'day-1',
+        dayLabel: 'Shoot Day 1',
         callTime: '08:00 AM',
+        breakfastTime: '08:30 AM',
+        lunchTime: '12:30 PM - 01:30 PM',
+        wrapTime: '05:30 PM',
         location: 'Studio Stage 4',
-        notes: 'Tabletop lighting setup and macro lens tests.',
-        blocks: [],
+        setups: [
+          {
+            setupName: 'Setup A — Tabletop Hero Reveal',
+            lightingNotes: 'Overhead softbox + crisp rim key',
+            shotIds: ['shot-1'],
+            estimatedMinutes: 60,
+          },
+        ],
+        scheduleBreakdown: [],
       },
     ],
-    crew: [
-      { role: 'Director', name: 'Jordan Vance', contact: 'jordan@example.com' },
-      { role: 'DP', name: 'Morgan Lee', contact: 'morgan@example.com' },
-    ],
+    crew: ['Director — Jordan Vance', 'DP — Morgan Lee'],
     equipment: ['Arri Alexa 35', 'Master Anamorphic 35mm', 'Motorized Turntable'],
+    propsAndUnits: [{ item: 'Aero Rig Pro Hero Unit', quantity: '2', suppliedBy: 'Client' }],
+    clientQuestions: ['Confirm stage parking pass count'],
+    risks: ['High gloss aluminum reflections under overhead softbox'],
   },
   googleDriveDestinationFolderId: 'dest-folder-abc',
   googleDriveDestinationFolderUrl: 'https://drive.google.com/drive/folders/dest-folder-abc',
@@ -449,6 +471,98 @@ async function main() {
     failSummary.message,
     'PDF downloaded locally, but couldn’t save to Drive: Destination folder is in Trash.'
   );
+
+  // 7. Test downloadStoryboardPdf, downloadCallSheetPdf, and syncAllFormattedPdfsToDrive binary parity
+  console.log('\nTesting downloadStoryboardPdf, downloadCallSheetPdf & syncAllFormattedPdfsToDrive parity...');
+  setCachedGoogleDriveAccessToken('valid-mock-drive-token');
+  const uploadedPayloads = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const urlStr = String(url);
+    if (urlStr.includes('/api/pipeline/drive-upload-pdf')) {
+      const parsedBody = opts?.body ? JSON.parse(opts.body) : {};
+      const b64 = String(parsedBody.pdfBase64 || '').replace(/^data:[^,]*;base64,/, '');
+      const buf = Buffer.from(b64, 'base64');
+      assert.equal(
+        buf.subarray(0, 5).toString('utf8'),
+        '%PDF-',
+        `Uploaded PDF ${parsedBody.filename} must start with %PDF- magic bytes`
+      );
+      uploadedPayloads.push({
+        filename: parsedBody.filename,
+        byteLength: buf.byteLength,
+      });
+      return createJsonResponse({
+        success: true,
+        backupFolderId: 'dest-folder-abc',
+        backupFolderUrl: 'https://drive.google.com/drive/folders/dest-folder-abc',
+        filename: parsedBody.filename,
+      }, 200);
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  };
+
+  try {
+    const sbRes = await downloadStoryboardPdf(SYNTHETIC_PROJECT);
+    assert.equal(sbRes.attempted, true);
+    assert.equal(sbRes.success, true);
+
+    const csRes = await downloadCallSheetPdf(SYNTHETIC_PROJECT, SYNTHETIC_PROJECT.shootPlan);
+    assert.equal(csRes.attempted, true);
+    assert.equal(csRes.success, true);
+
+    const localSbBlob = await buildStoryboardPdfBlob(SYNTHETIC_PROJECT);
+    const localCsBlob = await buildCallSheetPdfBlob(SYNTHETIC_PROJECT, SYNTHETIC_PROJECT.shootPlan);
+    const localBookBlob = await buildMasterCombinedPdfBlob(SYNTHETIC_PROJECT, [
+      'brandBible',
+      'creativeBrief',
+      'shotListAndStoryboard',
+      'voScript',
+      'shootPlan',
+    ]);
+    const localDeckBlob = await buildMasterSlideshowPdfBlob(SYNTHETIC_PROJECT, [
+      'brandBible',
+      'creativeBrief',
+      'shotListAndStoryboard',
+      'voScript',
+      'shootPlan',
+    ]);
+
+    uploadedPayloads.length = 0;
+    const syncRes = await syncAllFormattedPdfsToDrive(SYNTHETIC_PROJECT, {
+      accessToken: 'valid-mock-drive-token',
+    });
+    assert.equal(syncRes.errors.length, 0, `syncAllFormattedPdfsToDrive had errors: ${syncRes.errors.join('; ')}`);
+    assert.ok(
+      syncRes.uploadedFiles.some((f) => f.endsWith('-master-production-book.pdf')),
+      'Must sync formatted Master Production Book PDF'
+    );
+    assert.ok(
+      syncRes.uploadedFiles.some((f) => f.endsWith('-presentation-slideshow-16x9.pdf')),
+      'Must sync formatted 16:9 Presentation Slideshow PDF'
+    );
+    assert.ok(
+      syncRes.uploadedFiles.some((f) => f.endsWith('-storyboard.pdf')),
+      'Must sync formatted Storyboard PDF'
+    );
+    assert.ok(
+      syncRes.uploadedFiles.some((f) => f.endsWith('-call-sheet.pdf')),
+      'Must sync formatted Call Sheet PDF'
+    );
+
+    const driveSb = uploadedPayloads.find((p) => p.filename === localSbBlob.filename);
+    const driveCs = uploadedPayloads.find((p) => p.filename === localCsBlob.filename);
+    const driveBook = uploadedPayloads.find((p) => p.filename === localBookBlob.filename);
+    const driveDeck = uploadedPayloads.find((p) => p.filename === localDeckBlob.filename);
+    assert.ok(driveSb && driveSb.byteLength === localSbBlob.blob.size, 'Drive Storyboard byte size must match local formatted Storyboard');
+    assert.ok(driveCs && driveCs.byteLength === localCsBlob.blob.size, 'Drive Call Sheet byte size must match local formatted Call Sheet');
+    assert.ok(driveBook && driveBook.byteLength > 1000 && Math.abs(driveBook.byteLength - localBookBlob.blob.size) < 512, 'Drive Master Book must be full formatted PDF matching local build');
+    assert.ok(driveDeck && driveDeck.byteLength > 1000 && Math.abs(driveDeck.byteLength - localDeckBlob.blob.size) < 512, 'Drive 16:9 Deck must be full formatted PDF matching local build');
+    console.log(`   -> Verified ${syncRes.uploadedFiles.length} formatted PDFs synced identically to Drive`);
+  } finally {
+    globalThis.fetch = origFetch;
+    clearGoogleDriveToken();
+  }
 
   console.log('\nALL PDF EXPORT & DRIVE AUTOSAVE TESTS PASSED SUCCESSFULLY!\n');
 }

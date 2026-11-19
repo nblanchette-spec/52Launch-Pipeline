@@ -10,6 +10,7 @@ import {
   ArrowRight,
   Sparkles,
   FolderSync,
+  Eye,
 } from 'lucide-react';
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
@@ -23,6 +24,7 @@ interface Step6FrameCheckProps {
   onRunFrameCheck: (shotId: string) => Promise<void>;
   onApproveStoryboard: () => Promise<void>;
   onGoToVideoStep: () => void;
+  onPreviewPdf?: () => void;
 }
 
 export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
@@ -31,6 +33,7 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
   onRunFrameCheck,
   onApproveStoryboard,
   onGoToVideoStep,
+  onPreviewPdf,
 }) => {
   const [checkingShotId, setCheckingShotId] = useState<string | null>(null);
   const [isCheckingAll, setIsCheckingAll] = useState(false);
@@ -178,6 +181,17 @@ export const Step6FrameCheck: React.FC<Step6FrameCheckProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {onPreviewPdf && project.shots.length > 0 && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview PDF
+            </button>
+          )}
+
           <button
             type="button"
             disabled={isCheckingAll || Boolean(checkingShotId)}

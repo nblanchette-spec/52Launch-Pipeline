@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   CheckCircle2,
   Download,
+  ExternalLink,
+  Eye,
   FileText,
   LayoutGrid,
   Loader2,
@@ -14,13 +16,14 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { PipelineProject } from '../../types/pipeline';
-import { downloadCallSheetPdf } from '../../utils/pdfExporter';
+import { downloadCallSheetPdf, DriveSaveResult } from '../../utils/pdfExporter';
 
 interface ReadyToLaunchViewProps {
   project: PipelineProject;
   playAnimationOnMount?: boolean;
   onOpenMasterExport: () => void;
   onOpenPrintableStoryboard: () => void;
+  onOpenPrintableCallSheet?: () => void;
   onDownloadBackup: () => void;
   onBackToShootPlan: () => void;
   onOpenWelcome: () => void;
@@ -172,6 +175,7 @@ export const ReadyToLaunchView: React.FC<ReadyToLaunchViewProps> = ({
   playAnimationOnMount = true,
   onOpenMasterExport,
   onOpenPrintableStoryboard,
+  onOpenPrintableCallSheet,
   onDownloadBackup,
   onBackToShootPlan,
   onOpenWelcome,
@@ -184,6 +188,7 @@ export const ReadyToLaunchView: React.FC<ReadyToLaunchViewProps> = ({
   const [isBlasting, setIsBlasting] = useState(false);
   const [isDownloadingCallSheet, setIsDownloadingCallSheet] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [callSheetDriveStatus, setCallSheetDriveStatus] = useState<DriveSaveResult | null>(null);
 
   const runLaunchSequence = () => {
     if (prefersReducedMotion) {
@@ -245,9 +250,11 @@ export const ReadyToLaunchView: React.FC<ReadyToLaunchViewProps> = ({
 
   const handleQuickDownloadCallSheet = async () => {
     setDownloadError(null);
+    setCallSheetDriveStatus(null);
     setIsDownloadingCallSheet(true);
     try {
-      await downloadCallSheetPdf(project, project.shootPlan);
+      const res = await downloadCallSheetPdf(project, project.shootPlan);
+      setCallSheetDriveStatus(res);
     } catch (err) {
       setDownloadError(
         err instanceof Error ? err.message : 'Could not download Call Sheet PDF.'
@@ -521,6 +528,17 @@ export const ReadyToLaunchView: React.FC<ReadyToLaunchViewProps> = ({
                       {isDownloadingCallSheet ? 'Exporting Call Sheet...' : 'Download Call Sheet PDF'}
                     </button>
 
+                    {onOpenPrintableCallSheet && (
+                      <button
+                        type="button"
+                        onClick={onOpenPrintableCallSheet}
+                        className="inline-flex items-center gap-1.5 px-4 py-3 text-sm font-medium text-[#111114] bg-[#F6F6F7] hover:bg-[#EFEFF2] border border-[#D8D8DF] rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <Eye className="w-4 h-4 text-[#891A23]" />
+                        Preview Call Sheet
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={onOpenPrintableStoryboard}
@@ -542,6 +560,33 @@ export const ReadyToLaunchView: React.FC<ReadyToLaunchViewProps> = ({
 
                   {downloadError && (
                     <p className="text-xs text-[#C6202F] font-medium">{downloadError}</p>
+                  )}
+
+                  {callSheetDriveStatus && callSheetDriveStatus.attempted && (
+                    <div
+                      className={`p-2.5 rounded-md border text-xs flex items-center justify-between gap-2 ${
+                        callSheetDriveStatus.success
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          : 'bg-amber-50 border-amber-300 text-amber-950'
+                      }`}
+                    >
+                      <span>
+                        {callSheetDriveStatus.success
+                          ? 'Call Sheet PDF saved to Google Drive.'
+                          : `Call Sheet downloaded locally, but couldn’t save to Drive: ${callSheetDriveStatus.error || 'Unknown error'}`}
+                      </span>
+                      {callSheetDriveStatus.success && callSheetDriveStatus.backupFolderUrl && (
+                        <a
+                          href={callSheetDriveStatus.backupFolderUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 font-semibold underline hover:no-underline shrink-0"
+                        >
+                          Open on Drive
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                    </div>
                   )}
                 </div>
 

@@ -15,6 +15,7 @@ import {
   Palette,
   ExternalLink,
   Award,
+  Eye,
 } from 'lucide-react';
 import { BrandBible, PipelineProject, ProductPhoto } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
@@ -34,6 +35,7 @@ interface Step2BrandBibleProps {
   onGenerateBible: () => Promise<void>;
   onApproveBible: () => Promise<void>;
   onGoToBrief: () => void;
+  onPreviewPdf?: () => void;
 }
 
 export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
@@ -42,6 +44,7 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
   onGenerateBible,
   onApproveBible,
   onGoToBrief,
+  onPreviewPdf,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
@@ -276,6 +279,17 @@ export const Step2BrandBible: React.FC<Step2BrandBibleProps> = ({
                 ? 'Re-run Brand Bible'
                 : 'Generate Brand Bible'}
           </button>
+
+          {onPreviewPdf && (bible.hasGenerated || bible.positioning.trim()) && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview PDF
+            </button>
+          )}
 
           {project.approvals.bibleApproved ? (
             <button

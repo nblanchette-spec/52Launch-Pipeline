@@ -23,6 +23,7 @@ import {
   Rocket,
   ChevronUp,
   ChevronDown,
+  ExternalLink,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -31,7 +32,7 @@ import {
   ShootScheduleBlock,
 } from '../../types/pipeline';
 import { PrintableCallSheetView } from './PrintableCallSheetView';
-import { downloadCallSheetPdf } from '../../utils/pdfExporter';
+import { downloadCallSheetPdf, DriveSaveResult } from '../../utils/pdfExporter';
 
 interface Step9ShootPlanProps {
   project: PipelineProject;
@@ -55,12 +56,15 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
   const [isPrintableOpen, setIsPrintableOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [callSheetDriveStatus, setCallSheetDriveStatus] = useState<DriveSaveResult | null>(null);
 
   const handleQuickDownloadCallSheet = async () => {
     setErrorMsg(null);
+    setCallSheetDriveStatus(null);
     setIsDownloadingCallSheet(true);
     try {
-      await downloadCallSheetPdf(project, project.shootPlan);
+      const res = await downloadCallSheetPdf(project, project.shootPlan);
+      setCallSheetDriveStatus(res);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'Could not download Call Sheet PDF.'
@@ -655,6 +659,33 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
         {errorMsg && (
           <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23]">
             {errorMsg}
+          </div>
+        )}
+
+        {callSheetDriveStatus && callSheetDriveStatus.attempted && (
+          <div
+            className={`p-3 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+              callSheetDriveStatus.success
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-amber-50 border-amber-300 text-amber-950'
+            }`}
+          >
+            <span>
+              {callSheetDriveStatus.success
+                ? 'Call Sheet PDF saved to Google Drive.'
+                : `Call Sheet downloaded locally, but couldn’t save to Drive: ${callSheetDriveStatus.error || 'Unknown error'}`}
+            </span>
+            {callSheetDriveStatus.success && callSheetDriveStatus.backupFolderUrl && (
+              <a
+                href={callSheetDriveStatus.backupFolderUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-semibold underline hover:no-underline shrink-0"
+              >
+                Open on Drive
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         )}
 

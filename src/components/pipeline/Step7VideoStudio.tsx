@@ -11,10 +11,14 @@ import {
   AlertTriangle,
   ArrowUpRight,
   UploadCloud,
+  Eye,
+  Grid2x2,
+  Scissors,
 } from 'lucide-react';
 import { PipelineProject, PipelineShot } from '../../types/pipeline';
 import { VideoStudioModal } from './VideoStudioModal';
 import { TopazUpscaleModal } from './TopazUpscaleModal';
+import { GridSplitTray } from './GridSplitTray';
 
 interface Step7VideoStudioProps {
   project: PipelineProject;
@@ -26,6 +30,7 @@ interface Step7VideoStudioProps {
     chainedLastFrameDataUrl?: string
   ) => Promise<void>;
   onApproveVideoStep: () => Promise<void>;
+  onPreviewPdf?: () => void;
 }
 
 function formatShotModelLabel(model: PipelineShot['model']): string {
@@ -92,6 +97,7 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
   onGenerateVideoPrompts,
   onGenerateSingleVideo,
   onApproveVideoStep,
+  onPreviewPdf,
 }) => {
   const [isWritingPrompts, setIsWritingPrompts] = useState(false);
   const [writingShotId, setWritingShotId] = useState<string | null>(null);
@@ -104,6 +110,9 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
   const [studioChainedFrame, setStudioChainedFrame] = useState<string | undefined>(
     undefined
   );
+  const [expandedSplitShotIds, setExpandedSplitShotIds] = useState<
+    Record<string, boolean>
+  >({});
 
   // Topaz Upscale modal state: `null` closed, `undefined` external upload, string = shot.id
   const [upscaleTarget, setUpscaleTarget] = useState<string | null | undefined>(
@@ -242,6 +251,17 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {onPreviewPdf && aiHybridShots.length > 0 && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview PDF
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => openUpscaleModalForShot(null)}
@@ -395,6 +415,12 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                       </span>
                     </>
                   )}
+                  {shot.isGridMode && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FDF2F3] border border-[#EABAC0] text-[#891A23] font-mono font-semibold text-[11px]">
+                      <Grid2x2 className="w-3 h-3" />
+                      2x2 Grid
+                    </span>
+                  )}
                   {shot.upscaledVideoUrl && (
                     <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-800 font-mono font-semibold text-[11px]">
                       {shot.upscaledResolution || '4K / Upscaled'}
@@ -437,6 +463,25 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                     )}
                     Write video prompt
                   </button>
+
+                  {shot.videoUrl &&
+                    !shot.isGridMode &&
+                    !(shot.gridSplitClips?.length) &&
+                    !expandedSplitShotIds[shot.id] && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedSplitShotIds((prev) => ({
+                            ...prev,
+                            [shot.id]: true,
+                          }))
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#24242B] bg-[#F6F6F7] border border-[#E2E2E6] hover:border-[#C6202F] rounded-lg cursor-pointer"
+                      >
+                        <Scissors className="w-3.5 h-3.5 text-[#C6202F]" />
+                        2x2 Split
+                      </button>
+                    )}
 
                   {shot.videoUrl && (
                     <button
@@ -629,6 +674,23 @@ export const Step7VideoStudio: React.FC<Step7VideoStudioProps> = ({
                   </div>
                 </div>
               </div>
+
+              {shot.videoUrl &&
+                (shot.isGridMode ||
+                  Boolean(shot.gridSplitClips?.length) ||
+                  expandedSplitShotIds[shot.id]) && (
+                  <div className="px-5 pb-5">
+                    <GridSplitTray
+                      projectId={project.id}
+                      shotId={shot.id}
+                      sourceVideoUrl={shot.videoUrl}
+                      isGridMode={shot.isGridMode}
+                      splitClips={shot.gridSplitClips}
+                      compact
+                      onProjectUpdated={onProjectUpdated}
+                    />
+                  </div>
+                )}
             </div>
           );
         })}

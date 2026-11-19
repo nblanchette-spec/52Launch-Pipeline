@@ -112,6 +112,22 @@ export interface FrameCheckResult {
   checkedAt: string;
 }
 
+export type GridQuadrantKey =
+  | 'top_left'
+  | 'top_right'
+  | 'bottom_left'
+  | 'bottom_right';
+
+export interface GridSplitClip {
+  quadrant: GridQuadrantKey;
+  label: string;
+  videoUrl: string;
+  upscaledVideoUrl?: string | null;
+  upscaledResolution?: string | null;
+  upscaleDetails?: UpscaleDetails | null;
+  createdAt: string;
+}
+
 export interface ShotClipHistoryItem {
   id: string;
   videoUrl: string;
@@ -145,6 +161,10 @@ export interface ShotClipHistoryItem {
   draftCacheUrl?: string | null;
   upscaledVideoUrl?: string | null;
   upscaledResolution?: string | null;
+  isGridMode?: boolean;
+  gridFrameInputs?: string[];
+  gridShotPrompts?: string[];
+  gridSplitClips?: GridSplitClip[];
 }
 
 export interface PipelineShot {
@@ -173,6 +193,10 @@ export interface PipelineShot {
   upscaledResolution?: string | null;
   upscaleDetails?: UpscaleDetails | null;
   videoHistory?: ShotClipHistoryItem[];
+  isGridMode?: boolean;
+  gridFrameInputs?: string[];
+  gridShotPrompts?: string[];
+  gridSplitClips?: GridSplitClip[];
   status: ShotStatus;
 }
 

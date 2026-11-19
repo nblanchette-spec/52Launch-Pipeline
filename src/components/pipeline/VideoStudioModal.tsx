@@ -40,9 +40,13 @@ import {
   FolderSync,
   RotateCcw,
   ClipboardPaste,
+  Grid2x2,
+  Lock,
+  Scissors,
 } from 'lucide-react';
 import { parseJsonResponse } from '../../utils/safeFetch';
 import {
+  GridSplitClip,
   PipelineProject,
   PipelineShot,
   ShotClipHistoryItem,
@@ -68,6 +72,14 @@ import {
   StudioTimelineKeyframe,
   StudioWorkflowMode,
 } from '../../utils/videoStudioCatalog';
+import {
+  appendGridBorderLockDirective,
+  format2x2GridPrompt,
+  GRID_QUADRANTS,
+  resolveGridModeConfig,
+  stitch2x2GridCanvas,
+} from '../../utils/gridModeUtils';
+import { GridSplitTray } from './GridSplitTray';
 import { TopazUpscaleModal } from './TopazUpscaleModal';
 
 interface VideoStudioModalProps {
@@ -192,6 +204,20 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const [referenceTask, setReferenceTask] = useState<StudioReferenceTask>('reference');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // 2x2 Multi-Shot Grid Mode state
+  const [isGridMode, setIsGridMode] = useState(false);
+  const [gridInputTab, setGridInputTab] = useState<'frames' | 'prompts'>('frames');
+  const [gridFrames, setGridFrames] = useState<
+    [string | null, string | null, string | null, string | null]
+  >([null, null, null, null]);
+  const [gridShotPrompts, setGridShotPrompts] = useState<
+    [string, string, string, string]
+  >(['', '', '', '']);
+  const [isStitchingGrid, setIsStitchingGrid] = useState(false);
+  const [gridUpgradeNotice, setGridUpgradeNotice] = useState<string | null>(null);
+  const [gridPasteIndex, setGridPasteIndex] = useState<number | null>(null);
+  const [showSplitTrayManual, setShowSplitTrayManual] = useState(false);
+
   // Stage player state
   const videoRef = useRef<HTMLVideoElement>(null);
   const [previewVersion, setPreviewVersion] = useState<'original' | 'upscaled'>('original');
@@ -213,6 +239,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     | { kind: 'start' }
     | { kind: 'end' }
     | { kind: 'keyframe'; keyframeId: string }
+    | { kind: 'grid_quadrant'; quadrantIndex: number }
     | { kind: 'ref_image' }
     | { kind: 'element' }
     | { kind: 'source_video' }
@@ -235,6 +262,8 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const refAudioInputRef = useRef<HTMLInputElement>(null);
   const keyframeInputRef = useRef<HTMLInputElement>(null);
   const keyframeTargetIdRef = useRef<string | null>(null);
+  const gridQuadInputRef = useRef<HTMLInputElement>(null);
+  const gridQuadTargetIdxRef = useRef<number>(0);
 
   const parentShot =
     shot?.chainFrom && shot.chainFrom !== 'none'
@@ -344,6 +373,22 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     setReferenceVideos(clip.referenceVideos || []);
     setReferenceAudioUrl(clip.referenceAudioUrl ?? null);
     setReferenceTask((clip.referenceTask as StudioReferenceTask) || 'reference');
+    const clipGrid = Boolean(clip.isGridMode || clip.gridSplitClips?.length);
+    setIsGridMode(clipGrid);
+    setShowSplitTrayManual(Boolean(clip.gridSplitClips?.length));
+    setGridFrames([
+      clip.gridFrameInputs?.[0] || null,
+      clip.gridFrameInputs?.[1] || null,
+      clip.gridFrameInputs?.[2] || null,
+      clip.gridFrameInputs?.[3] || null,
+    ]);
+    setGridShotPrompts([
+      clip.gridShotPrompts?.[0] || '',
+      clip.gridShotPrompts?.[1] || '',
+      clip.gridShotPrompts?.[2] || '',
+      clip.gridShotPrompts?.[3] || '',
+    ]);
+    setGridUpgradeNotice(null);
     setPreviewVersion(clip.upscaledVideoUrl ? 'upscaled' : 'original');
     setIsPlaying(false);
     setCurrentTime(0);
@@ -399,11 +444,27 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
       setReferenceVideos([]);
       setReferenceAudioUrl(null);
       setReferenceTask('reference');
+      setIsGridMode(Boolean(shot.isGridMode || shot.gridSplitClips?.length));
+      setShowSplitTrayManual(Boolean(shot.gridSplitClips?.length));
+      setGridFrames([
+        shot.gridFrameInputs?.[0] || null,
+        shot.gridFrameInputs?.[1] || null,
+        shot.gridFrameInputs?.[2] || null,
+        shot.gridFrameInputs?.[3] || null,
+      ]);
+      setGridShotPrompts([
+        shot.gridShotPrompts?.[0] || '',
+        shot.gridShotPrompts?.[1] || '',
+        shot.gridShotPrompts?.[2] || '',
+        shot.gridShotPrompts?.[3] || '',
+      ]);
+      setGridUpgradeNotice(null);
       setPreviewVersion(shot.upscaledVideoUrl ? 'upscaled' : 'original');
     }
 
     setUpscaleModalOpen(false);
     setDrivePickerTarget(null);
+    setGridPasteIndex(null);
     setErrorMsg(null);
     setIsPlaying(false);
     setCurrentTime(0);
@@ -422,18 +483,32 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     model.workflowModes.includes(m.id)
   );
   const availableAspectRatios = getStudioAvailableAspectRatios(modelId, workflowMode);
-  const availableResolutions = getStudioAvailableResolutions(modelId, workflowMode);
-  const effectiveResolution = resolveStudioResolution({
-    modelId,
-    qualityTier,
-    workflowMode,
-    resolution,
-  });
+  const gridResolved = isGridMode
+    ? resolveGridModeConfig({
+        modelId,
+        workflowMode,
+        requestedResolution: resolution,
+      })
+    : null;
+  const availableResolutions = gridResolved
+    ? gridResolved.allowedResolutions
+    : getStudioAvailableResolutions(modelId, workflowMode);
+  const effectiveResolution = gridResolved
+    ? gridResolved.resolvedResolution
+    : resolveStudioResolution({
+        modelId,
+        qualityTier,
+        workflowMode,
+        resolution,
+      });
+  const effectiveQualityTierForEstimate: StudioQualityTier = isGridMode
+    ? 'final'
+    : qualityTier;
   const estimatedCost = estimateStudioCostUsd({
     modelId,
-    qualityTier,
+    qualityTier: effectiveQualityTierForEstimate,
     workflowMode,
-    resolution,
+    resolution: effectiveResolution,
     duration,
     nativeAudio,
   });
@@ -441,30 +516,119 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
   const supportsDraftTier =
     model.family === 'seedance' || model.supportsDraftEnhance;
 
+  const handleToggleGridMode = async (enable: boolean) => {
+    setErrorMsg(null);
+    setGridUpgradeNotice(null);
+    setIsGridMode(enable);
+    if (!enable) {
+      return;
+    }
+
+    const hasAnyFrame = gridFrames.some(Boolean);
+    const preferredMode: StudioWorkflowMode = hasAnyFrame
+      ? 'image_to_video'
+      : workflowMode === 'image_to_video' && startFrameUrl
+        ? 'image_to_video'
+        : 'text_to_video';
+
+    const cfg = resolveGridModeConfig({
+      modelId,
+      workflowMode: preferredMode,
+      requestedResolution: resolution,
+    });
+
+    if (cfg.upgradedFromModel) {
+      setModelId(cfg.modelId);
+      setDuration(clampStudioDuration(cfg.modelId, duration));
+      setGridUpgradeNotice(
+        `Switched from ${getStudioModel(cfg.upgradedFromModel).label} (720p cap) to ${getStudioModel(cfg.modelId).label} to enforce ${cfg.resolvedResolution} Grid Mode output.`
+      );
+    }
+
+    const targetSpec = getStudioModel(cfg.modelId);
+    const nextMode = targetSpec.workflowModes.includes(preferredMode)
+      ? preferredMode
+      : targetSpec.workflowModes.includes('image_to_video')
+        ? 'image_to_video'
+        : targetSpec.workflowModes[0];
+
+    setWorkflowMode(nextMode);
+    setAspectRatio('16:9');
+    setQualityTier('final');
+    setResolution(cfg.resolvedResolution);
+
+    if (!hasAnyFrame && gridShotPrompts.every((p) => !p.trim())) {
+      const seedPrompt = (shot.videoPrompt || shot.scene || '').trim();
+      if (seedPrompt) {
+        setGridShotPrompts([seedPrompt, '', '', '']);
+      }
+    }
+  };
+
   const handleModelSelect = (nextId: StudioModelId) => {
-    const spec = getStudioModel(nextId);
-    const nextDuration = clampStudioDuration(nextId, duration);
+    const requestedCfg = isGridMode
+      ? resolveGridModeConfig({
+          modelId: nextId,
+          workflowMode,
+          requestedResolution: resolution,
+        })
+      : null;
+    const resolvedId = requestedCfg ? requestedCfg.modelId : nextId;
+    if (requestedCfg?.upgradedFromModel) {
+      setGridUpgradeNotice(
+        `${getStudioModel(requestedCfg.upgradedFromModel).label} caps at 720p; using ${getStudioModel(resolvedId).label} (${requestedCfg.resolvedResolution}) for 2x2 Grid Mode.`
+      );
+    } else {
+      setGridUpgradeNotice(null);
+    }
+    const spec = getStudioModel(resolvedId);
+    const nextDuration = clampStudioDuration(resolvedId, duration);
     const nextMode = spec.workflowModes.includes(workflowMode)
       ? workflowMode
       : spec.workflowModes[0];
-    const nextAspectList = getStudioAvailableAspectRatios(nextId, nextMode);
-    const nextAspect = nextAspectList.includes(aspectRatio)
-      ? aspectRatio
-      : nextAspectList.includes('16:9')
-        ? '16:9'
-        : nextAspectList[0];
-    const nextResolutions = getStudioAvailableResolutions(nextId, nextMode);
-    setModelId(nextId);
+    const nextAspectList = getStudioAvailableAspectRatios(resolvedId, nextMode);
+    const nextAspect = isGridMode
+      ? '16:9'
+      : nextAspectList.includes(aspectRatio)
+        ? aspectRatio
+        : nextAspectList.includes('16:9')
+          ? '16:9'
+          : nextAspectList[0];
+    const nextResolutions = getStudioAvailableResolutions(resolvedId, nextMode);
+    setModelId(resolvedId);
     setDuration(nextDuration);
     setWorkflowMode(nextMode);
     setAspectRatio(nextAspect);
-    setQualityTier('draft');
-    setResolution(nextResolutions[0]);
+    if (isGridMode) {
+      setQualityTier('final');
+      setResolution(
+        resolveGridModeConfig({
+          modelId: resolvedId,
+          workflowMode: nextMode,
+          requestedResolution: resolution,
+        }).resolvedResolution
+      );
+    } else {
+      setQualityTier('draft');
+      setResolution(nextResolutions[0]);
+    }
   };
 
   const handleModeSelect = (nextMode: StudioWorkflowMode) => {
     setWorkflowMode(nextMode);
     const nextAspectList = getStudioAvailableAspectRatios(modelId, nextMode);
+    if (isGridMode) {
+      setAspectRatio('16:9');
+      setQualityTier('final');
+      setResolution(
+        resolveGridModeConfig({
+          modelId,
+          workflowMode: nextMode,
+          requestedResolution: resolution,
+        }).resolvedResolution
+      );
+      return;
+    }
     if (!nextAspectList.includes(aspectRatio)) {
       setAspectRatio(nextAspectList.includes('16:9') ? '16:9' : nextAspectList[0]);
     }
@@ -688,6 +852,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
         );
         break;
       }
+      case 'grid_quadrant': {
+        const qUrl = assets[0].url || urls[0];
+        void updateGridQuadrantFrame(drivePickerTarget.quadrantIndex, qUrl);
+        break;
+      }
       case 'ref_image': {
         const maxAllowed =
           model.family === 'flux-3'
@@ -721,10 +890,170 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     }
   };
 
+  const restitchAndApplyGridCanvas = async (
+    nextFrames: [string | null, string | null, string | null, string | null]
+  ) => {
+    const hasAny = nextFrames.some(Boolean);
+    if (!hasAny) {
+      setStartFrameUrl(null);
+      if (isGridMode && model.workflowModes.includes('text_to_video')) {
+        setWorkflowMode('text_to_video');
+      }
+      return;
+    }
+    setIsStitchingGrid(true);
+    setErrorMsg(null);
+    try {
+      const compositeDataUrl = await stitch2x2GridCanvas(nextFrames);
+      setStartFrameUrl(compositeDataUrl);
+      if (model.workflowModes.includes('image_to_video')) {
+        setWorkflowMode('image_to_video');
+      } else if (model.workflowModes.includes('reference_to_video')) {
+        setWorkflowMode('reference_to_video');
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'Could not stitch 2x2 grid canvas.'
+      );
+    } finally {
+      setIsStitchingGrid(false);
+    }
+  };
+
+  const updateGridQuadrantFrame = async (
+    index: number,
+    imageUrl: string | null
+  ) => {
+    const next: [string | null, string | null, string | null, string | null] = [
+      ...gridFrames,
+    ] as [string | null, string | null, string | null, string | null];
+    next[index] = imageUrl;
+    setGridFrames(next);
+    await restitchAndApplyGridCanvas(next);
+  };
+
+  const handleGridQuadrantFileUpload = async (
+    index: number,
+    files: File[]
+  ) => {
+    const imageFiles = files.filter((f) => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    setErrorMsg(null);
+    try {
+      const next: [string | null, string | null, string | null, string | null] = [
+        ...gridFrames,
+      ] as [string | null, string | null, string | null, string | null];
+      for (let offset = 0; offset < imageFiles.length && index + offset < 4; offset++) {
+        next[index + offset] = await readAndOptimizeLocalImage(
+          imageFiles[offset],
+          1400
+        );
+      }
+      setGridFrames(next);
+      await restitchAndApplyGridCanvas(next);
+    } catch {
+      setErrorMsg('Could not load that quadrant image.');
+    }
+  };
+
+  const handleGridQuadrantPasteButton = async (index: number) => {
+    setErrorMsg(null);
+    setGridPasteIndex(null);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const ext = imgType.split('/')[1]?.split('+')[0] || 'png';
+            const file = new File([blob], `pasted-grid-${index}.${ext}`, {
+              type: imgType,
+            });
+            await handleGridQuadrantFileUpload(index, [file]);
+            return;
+          }
+        }
+        setErrorMsg(
+          'Clipboard does not contain an image. Copy an image first and paste.'
+        );
+        return;
+      }
+    } catch {
+      // Clipboard API fallback hint
+    }
+    setGridPasteIndex(index);
+  };
+
+  const handleGridShotPromptChange = (index: number, value: string) => {
+    const next: [string, string, string, string] = [...gridShotPrompts] as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    next[index] = value;
+    setGridShotPrompts(next);
+    setPrompt(
+      format2x2GridPrompt({
+        quadrantPrompts: next,
+        hasStitchedImage: gridFrames.some(Boolean),
+      })
+    );
+  };
+
+  const handleFillGridFromProjectShots = (target: 'frames' | 'prompts') => {
+    if (target === 'frames') {
+      const shotImgs = project.shots
+        .filter((s) => Boolean(s.frameImageUrl))
+        .slice(0, 4)
+        .map((s) => s.frameImageUrl as string);
+      const next: [string | null, string | null, string | null, string | null] =
+        [
+          shotImgs[0] || gridFrames[0],
+          shotImgs[1] || gridFrames[1],
+          shotImgs[2] || gridFrames[2],
+          shotImgs[3] || gridFrames[3],
+        ];
+      setGridFrames(next);
+      void restitchAndApplyGridCanvas(next);
+    } else {
+      const candidatePrompts = project.shots
+        .filter((s) => s.route !== 'live')
+        .slice(0, 4)
+        .map((s) => (s.videoPrompt || s.scene || '').trim());
+      const next: [string, string, string, string] = [
+        candidatePrompts[0] || gridShotPrompts[0],
+        candidatePrompts[1] || gridShotPrompts[1],
+        candidatePrompts[2] || gridShotPrompts[2],
+        candidatePrompts[3] || gridShotPrompts[3],
+      ];
+      setGridShotPrompts(next);
+      setPrompt(
+        format2x2GridPrompt({
+          quadrantPrompts: next,
+          hasStitchedImage: gridFrames.some(Boolean),
+        })
+      );
+    }
+  };
+
   const handleGenerate = async () => {
     setErrorMsg(null);
     setIsGenerating(true);
     try {
+      const submissionPrompt = isGridMode
+        ? appendGridBorderLockDirective(
+            prompt.trim() ||
+              format2x2GridPrompt({
+                quadrantPrompts: gridShotPrompts,
+                hasStitchedImage: gridFrames.some(Boolean),
+              })
+          )
+        : prompt;
+
       const resp = await fetch('/api/pipeline/studio-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -733,11 +1062,15 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           shotId: shot.id,
           modelId,
           workflowMode,
-          prompt,
+          prompt: submissionPrompt,
           negativePrompt,
-          aspectRatio,
+          aspectRatio: isGridMode ? '16:9' : aspectRatio,
           duration,
-          qualityTier: supportsDraftTier ? qualityTier : 'draft',
+          qualityTier: isGridMode
+            ? 'final'
+            : supportsDraftTier
+              ? qualityTier
+              : 'draft',
           resolution: effectiveResolution,
           nativeAudio,
           safetyTolerance,
@@ -752,6 +1085,11 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
           referenceVideos,
           referenceAudioUrl,
           referenceTask,
+          isGridMode,
+          gridFrameInputs: isGridMode
+            ? gridFrames.map((f) => f || '')
+            : undefined,
+          gridShotPrompts: isGridMode ? gridShotPrompts : undefined,
         }),
       });
       const data = await parseJsonResponse<{ project: PipelineProject; clipId?: string }>(
@@ -842,7 +1180,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     setCurrentTime(next);
   };
 
-  const busy = isGenerating || isEnhancing || isUploadingMedia;
+  const busy = isGenerating || isEnhancing || isUploadingMedia || isStitchingGrid;
 
   const clipGallery = getClipGalleryForShot(shot);
   const activeClip =
@@ -855,6 +1193,16 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
     activeClip?.upscaledResolution ??
     (!activeClip || activeClip.videoUrl === shot.videoUrl ? shot.upscaledResolution : null);
   const activeClipOrigUrl = activeClip?.videoUrl || shot.videoUrl;
+  const activeClipSplitClips: GridSplitClip[] | undefined =
+    activeClip?.gridSplitClips ??
+    (!activeClip || activeClip.videoUrl === shot.videoUrl
+      ? shot.gridSplitClips
+      : undefined);
+  const activeClipIsGrid = Boolean(
+    activeClip?.isGridMode ||
+      (!activeClip && shot.isGridMode) ||
+      activeClipSplitClips?.length
+  );
 
   const activeStageVideoUrl =
     previewVersion === 'upscaled' && activeClipUpscaledUrl
@@ -1008,6 +1356,308 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                 </div>
               </div>
             )}
+
+            {/* 2x2 Multi-Shot Grid Mode Toggle & Builder */}
+            <div className="space-y-2.5 p-3 rounded-xl bg-white border border-[#E2E2E6]">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Grid2x2 className="w-4 h-4 text-[#C6202F] shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-[#111114] leading-tight">
+                      2x2 Multi-Shot Grid Mode
+                    </div>
+                    <div className="text-[10px] text-[#5A5A66] leading-tight">
+                      4 simultaneous shots per 1080p/4K render
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1 p-0.5 bg-[#F6F6F7] rounded-lg border border-[#E2E2E6] shrink-0 text-[11px]">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleToggleGridMode(false)}
+                    className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                      !isGridMode
+                        ? 'bg-[#111114] text-white font-semibold'
+                        : 'text-[#5A5A66] hover:text-[#111114]'
+                    }`}
+                  >
+                    Single Shot
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleToggleGridMode(true)}
+                    className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                      isGridMode
+                        ? 'bg-[#C6202F] text-white font-semibold'
+                        : 'text-[#5A5A66] hover:text-[#111114]'
+                    }`}
+                  >
+                    2x2 Grid
+                  </button>
+                </div>
+              </div>
+
+              {gridUpgradeNotice && (
+                <div className="px-2.5 py-1.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] text-[10px] text-[#891A23]">
+                  {gridUpgradeNotice}
+                </div>
+              )}
+
+              {isGridMode && (
+                <div className="space-y-3 pt-1 border-t border-[#E2E2E6]">
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-[#F6F6F7] rounded-lg border border-[#E2E2E6] text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setGridInputTab('frames')}
+                      className={`py-1.5 px-2 rounded-md font-medium cursor-pointer flex items-center justify-center gap-1.5 ${
+                        gridInputTab === 'frames'
+                          ? 'bg-white text-[#111114] font-semibold shadow-xs border border-[#E2E2E6]'
+                          : 'text-[#5A5A66] hover:text-[#111114]'
+                      }`}
+                    >
+                      <ImageIcon className="w-3.5 h-3.5 text-[#C6202F]" />
+                      4 Still Frames
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGridInputTab('prompts')}
+                      className={`py-1.5 px-2 rounded-md font-medium cursor-pointer flex items-center justify-center gap-1.5 ${
+                        gridInputTab === 'prompts'
+                          ? 'bg-white text-[#111114] font-semibold shadow-xs border border-[#E2E2E6]'
+                          : 'text-[#5A5A66] hover:text-[#111114]'
+                      }`}
+                    >
+                      <TypeIcon className="w-3.5 h-3.5 text-[#C6202F]" />
+                      4 Shot Prompts
+                    </button>
+                  </div>
+
+                  <input
+                    ref={gridQuadInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files || []);
+                      if (files.length) {
+                        void handleGridQuadrantFileUpload(
+                          gridQuadTargetIdxRef.current,
+                          files
+                        );
+                      }
+                      e.target.value = '';
+                    }}
+                  />
+
+                  {gridInputTab === 'frames' ? (
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
+                        <span className="text-[#5A5A66]">
+                          Auto-stitches onto a 1920x1080 16:9 canvas
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {project.shots.some((s) => Boolean(s.frameImageUrl)) && (
+                            <button
+                              type="button"
+                              onClick={() => handleFillGridFromProjectShots('frames')}
+                              className="text-[#891A23] hover:text-[#C6202F] font-medium cursor-pointer"
+                            >
+                              Fill from Shots
+                            </button>
+                          )}
+                          {gridFrames.some(Boolean) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setGridFrames([null, null, null, null]);
+                                void restitchAndApplyGridCanvas([
+                                  null,
+                                  null,
+                                  null,
+                                  null,
+                                ]);
+                              }}
+                              className="text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                            >
+                              Clear Grid
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        {GRID_QUADRANTS.map((q) => {
+                          const frameUrl = gridFrames[q.index];
+                          return (
+                            <div
+                              key={q.key}
+                              tabIndex={0}
+                              onPaste={(e) => {
+                                const imgFile = extractImageFileFromClipboardEvent(e);
+                                if (!imgFile) return;
+                                e.preventDefault();
+                                setGridPasteIndex(null);
+                                void handleGridQuadrantFileUpload(q.index, [imgFile]);
+                              }}
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                const files = Array.from(
+                                  e.dataTransfer.files || []
+                                ).filter((f) => f.type.startsWith('image/'));
+                                if (files.length) {
+                                  void handleGridQuadrantFileUpload(q.index, files);
+                                }
+                              }}
+                              className="rounded-lg border border-[#D8D8DF] focus:outline-none focus:border-[#C6202F] bg-[#F6F6F7] overflow-hidden flex flex-col"
+                            >
+                              <div className="px-2 py-1 bg-white border-b border-[#E2E2E6] flex items-center justify-between gap-1 text-[10px]">
+                                <span className="font-mono font-semibold text-[#111114]">
+                                  {q.label}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleGridQuadrantPasteButton(q.index)
+                                    }
+                                    title="Paste image from clipboard"
+                                    className="p-0.5 text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                                  >
+                                    <ClipboardPaste className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDrivePickerTarget({
+                                        kind: 'grid_quadrant',
+                                        quadrantIndex: q.index,
+                                      })
+                                    }
+                                    title="Pick from Google Drive"
+                                    className="p-0.5 text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                                  >
+                                    <FolderSync className="w-3 h-3" />
+                                  </button>
+                                  {frameUrl && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void updateGridQuadrantFrame(q.index, null)
+                                      }
+                                      title={`Clear ${q.label}`}
+                                      className="p-0.5 text-[#5A5A66] hover:text-[#C6202F] cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  gridQuadTargetIdxRef.current = q.index;
+                                  gridQuadInputRef.current?.click();
+                                }}
+                                className="aspect-video w-full flex items-center justify-center bg-[#18181D] cursor-pointer relative overflow-hidden"
+                              >
+                                {frameUrl ? (
+                                  <img
+                                    src={frameUrl}
+                                    alt={q.label}
+                                    referrerPolicy="no-referrer"
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="text-center px-2 text-[10px] text-[#A0A0AC]">
+                                    <UploadCloud className="w-3.5 h-3.5 mx-auto mb-0.5 text-[#F39CA4]" />
+                                    <span>Drop / Browse / Paste</span>
+                                  </div>
+                                )}
+                              </button>
+
+                              {gridPasteIndex === q.index && (
+                                <div className="px-2 py-1 bg-[#FDF4F5] text-[9px] text-[#891A23]">
+                                  Press Ctrl+V / Cmd+V now
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {isStitchingGrid && (
+                        <div className="flex items-center gap-1.5 text-[11px] text-[#891A23]">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          Stitching 1920x1080 2x2 Grid Canvas...
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-[#5A5A66]">
+                          Describe each quadrant — compiles into a 2x2 storyboard prompt
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleFillGridFromProjectShots('prompts')}
+                            className="text-[#891A23] hover:text-[#C6202F] font-medium cursor-pointer"
+                          >
+                            Fill from 4 Shots
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const synced = format2x2GridPrompt({
+                                quadrantPrompts: gridShotPrompts,
+                                hasStitchedImage: gridFrames.some(Boolean),
+                              });
+                              setPrompt(synced);
+                            }}
+                            className="text-[#24242B] hover:text-[#C6202F] font-medium cursor-pointer"
+                          >
+                            Sync Prompt
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-2">
+                        {GRID_QUADRANTS.map((q) => (
+                          <div key={q.key} className="space-y-0.5">
+                            <label className="text-[10px] font-mono font-semibold text-[#5A5A66] block">
+                              {q.shortLabel} ({q.label})
+                            </label>
+                            <textarea
+                              rows={2}
+                              value={gridShotPrompts[q.index]}
+                              disabled={busy}
+                              onChange={(e) =>
+                                handleGridShotPromptChange(q.index, e.target.value)
+                              }
+                              placeholder={`Describe action & camera in ${q.label} quadrant...`}
+                              className="w-full bg-[#F6F6F7] border border-[#D8D8DF] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F]"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="px-2.5 py-1.5 rounded-lg bg-[#F6F6F7] border border-[#E2E2E6] flex items-center gap-2 text-[10px] text-[#3A3A44]">
+                    <Lock className="w-3 h-3 text-[#C6202F] shrink-0" />
+                    <span>
+                      Enforces <strong className="font-mono">{effectiveResolution}</strong> · 16:9 · Locked divider borders &amp; 4-quadrant simultaneous animation
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Dynamic Workflow Mode Tabs */}
             <div className="space-y-1.5">
@@ -2106,16 +2756,18 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
             {/* Prompt & Motion Direction */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66]">
                   {workflowMode === 'video_reframe'
                     ? 'Reframe Guidance (Optional)'
-                    : 'Prompt & Motion Direction'}
+                    : isGridMode
+                      ? '2x2 Grid Motion Prompt (Border-Lock Auto-Appended)'
+                      : 'Prompt & Motion Direction'}
                 </label>
                 <button
                   type="button"
                   onClick={() => void handleCopyPrompt()}
-                  className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#C6202F] cursor-pointer"
+                  className="inline-flex items-center gap-1 text-[11px] text-[#891A23] hover:text-[#C6202F] cursor-pointer shrink-0"
                 >
                   {copiedPrompt ? (
                     <>
@@ -2132,17 +2784,24 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
               </div>
               <textarea
                 ref={promptRef}
-                rows={4}
+                rows={isGridMode ? 5 : 4}
                 value={prompt}
                 disabled={busy}
                 onChange={(e) => setPrompt(e.target.value)}
                 placeholder={
                   workflowMode === 'video_reframe'
                     ? 'Optional guidance for outpainted edges...'
-                    : 'Describe motion, camera move, timing, or tag @Image1 / @Element1 / @Video1...'
+                    : isGridMode
+                      ? 'Describe simultaneous motion across Top-Left, Top-Right, Bottom-Left, and Bottom-Right panels...'
+                      : 'Describe motion, camera move, timing, or tag @Image1 / @Element1 / @Video1...'
                 }
                 className="w-full bg-white border border-[#D8D8DF] rounded-xl px-3 py-2 text-xs text-[#111114] placeholder:text-[#8A8A96] focus:outline-none focus:border-[#C6202F] leading-relaxed"
               />
+              {isGridMode && (
+                <div className="text-[10px] text-[#5A5A66] bg-white border border-[#E2E2E6] rounded-lg px-2.5 py-1.5">
+                  On submit, simultaneous 4-quadrant animation &amp; strict locked-border divider instructions are automatically enforced.
+                </div>
+              )}
               <div className="flex flex-wrap gap-1">
                 {CAMERA_TAGS.map((tag) => (
                   <button
@@ -2189,32 +2848,49 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
             {/* Aspect Ratio & Duration */}
             <div className="space-y-3">
               <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
-                  Aspect Ratio
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {availableAspectRatios.map((ar) => {
-                    const meta = ASPECT_ICONS[ar];
-                    const Icon = meta.icon;
-                    const active = aspectRatio === ar;
-                    return (
-                      <button
-                        key={ar}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => setAspectRatio(ar)}
-                        className={`flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] border cursor-pointer ${
-                          active
-                            ? 'bg-[#111114] text-white border-[#111114] font-semibold'
-                            : 'bg-white text-[#5A5A66] border-[#E2E2E6] hover:text-[#111114] hover:border-[#C6202F]'
-                        }`}
-                      >
-                        <Icon className="w-3 h-3" />
-                        <span>{meta.label}</span>
-                      </button>
-                    );
-                  })}
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
+                    Aspect Ratio
+                  </label>
+                  {isGridMode && (
+                    <span className="text-[10px] font-mono text-[#891A23]">
+                      16:9 locked for 2x2 split
+                    </span>
+                  )}
                 </div>
+                {isGridMode ? (
+                  <div className="px-3 py-2 rounded-lg bg-[#111114] text-white text-xs font-semibold flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      16:9 Widescreen (2x2 Grid)
+                    </span>
+                    <Lock className="w-3 h-3 opacity-80" />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {availableAspectRatios.map((ar) => {
+                      const meta = ASPECT_ICONS[ar];
+                      const Icon = meta.icon;
+                      const active = aspectRatio === ar;
+                      return (
+                        <button
+                          key={ar}
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setAspectRatio(ar)}
+                          className={`flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] border cursor-pointer ${
+                            active
+                              ? 'bg-[#111114] text-white border-[#111114] font-semibold'
+                              : 'bg-white text-[#5A5A66] border-[#E2E2E6] hover:text-[#111114] hover:border-[#C6202F]'
+                          }`}
+                        >
+                          <Icon className="w-3 h-3" />
+                          <span>{meta.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {workflowMode !== 'video_reframe' && (
@@ -2269,69 +2945,111 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
 
             {/* Quality Tier + Resolution Selector + Native Audio */}
             <div className="space-y-3">
-              {supportsDraftTier && (
-                <div className="grid grid-cols-2 gap-1.5 p-1 bg-white rounded-xl border border-[#E2E2E6]">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setQualityTier('draft')}
-                    className={`py-2 rounded-lg text-xs cursor-pointer ${
-                      qualityTier === 'draft'
-                        ? 'bg-[#111114] text-white font-semibold'
-                        : 'text-[#5A5A66] hover:text-[#111114]'
-                    }`}
-                  >
-                    Draft ({model.draftResolution})
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setQualityTier('final')}
-                    className={`py-2 rounded-lg text-xs cursor-pointer ${
-                      qualityTier === 'final'
-                        ? 'bg-[#111114] text-white font-semibold'
-                        : 'text-[#5A5A66] hover:text-[#111114]'
-                    }`}
-                  >
-                    Full Quality ({effectiveResolution})
-                  </button>
-                </div>
-              )}
-
-              {model.resolutionSelectable &&
-                (!supportsDraftTier || qualityTier === 'final') && (
-                  <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
-                      Resolution
-                    </label>
-                    <div
-                      className="grid gap-1 p-1 bg-white rounded-xl border border-[#E2E2E6]"
-                      style={{
-                        gridTemplateColumns: `repeat(${availableResolutions.length}, minmax(0, 1fr))`,
-                      }}
-                    >
-                      {availableResolutions.map((res) => (
-                        <button
-                          key={res}
-                          type="button"
-                          disabled={busy}
-                          onClick={() => setResolution(res)}
-                          className={`py-1.5 rounded-lg text-xs font-mono cursor-pointer ${
-                            effectiveResolution === res
-                              ? 'bg-[#111114] text-white font-semibold'
-                              : 'text-[#5A5A66] hover:text-[#111114]'
-                          }`}
-                        >
-                          {RESOLUTION_LABELS[res]}
-                        </button>
-                      ))}
-                    </div>
+              {isGridMode ? (
+                <div className="space-y-2 p-2.5 rounded-xl bg-white border border-[#E2E2E6]">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold uppercase tracking-wider text-[#5A5A66]">
+                      Grid Mode Resolution Lock
+                    </span>
+                    <span className="font-mono font-semibold text-[#C6202F]">
+                      Full Quality ({effectiveResolution})
+                    </span>
                   </div>
-                )}
+                  <div
+                    className="grid gap-1 p-1 bg-[#F6F6F7] rounded-lg border border-[#E2E2E6]"
+                    style={{
+                      gridTemplateColumns: `repeat(${availableResolutions.length}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {availableResolutions.map((res) => (
+                      <button
+                        key={res}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setResolution(res)}
+                        className={`py-1.5 rounded-md text-xs font-mono cursor-pointer ${
+                          effectiveResolution === res
+                            ? 'bg-[#111114] text-white font-semibold'
+                            : 'text-[#5A5A66] hover:text-[#111114]'
+                        }`}
+                      >
+                        {RESOLUTION_LABELS[res]}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[#6E6E7A]">
+                    {availableResolutions.includes('2160p')
+                      ? 'This endpoint supports up to 4K (2160p) so each split shot retains full HD crispness.'
+                      : 'Forced to 1080p full quality so each cropped quadrant can be upscaled cleanly with Topaz.'}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {supportsDraftTier && (
+                    <div className="grid grid-cols-2 gap-1.5 p-1 bg-white rounded-xl border border-[#E2E2E6]">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setQualityTier('draft')}
+                        className={`py-2 rounded-lg text-xs cursor-pointer ${
+                          qualityTier === 'draft'
+                            ? 'bg-[#111114] text-white font-semibold'
+                            : 'text-[#5A5A66] hover:text-[#111114]'
+                        }`}
+                      >
+                        Draft ({model.draftResolution})
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setQualityTier('final')}
+                        className={`py-2 rounded-lg text-xs cursor-pointer ${
+                          qualityTier === 'final'
+                            ? 'bg-[#111114] text-white font-semibold'
+                            : 'text-[#5A5A66] hover:text-[#111114]'
+                        }`}
+                      >
+                        Full Quality ({effectiveResolution})
+                      </button>
+                    </div>
+                  )}
 
-              <p className="text-[10px] text-[#6E6E7A]">
-                Defaults to lowest-cost Draft settings ({effectiveResolution}) — upscale winning takes later with Topaz.
-              </p>
+                  {model.resolutionSelectable &&
+                    (!supportsDraftTier || qualityTier === 'final') && (
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold tracking-wider uppercase text-[#5A5A66] block">
+                          Resolution
+                        </label>
+                        <div
+                          className="grid gap-1 p-1 bg-white rounded-xl border border-[#E2E2E6]"
+                          style={{
+                            gridTemplateColumns: `repeat(${availableResolutions.length}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {availableResolutions.map((res) => (
+                            <button
+                              key={res}
+                              type="button"
+                              disabled={busy}
+                              onClick={() => setResolution(res)}
+                              className={`py-1.5 rounded-lg text-xs font-mono cursor-pointer ${
+                                effectiveResolution === res
+                                  ? 'bg-[#111114] text-white font-semibold'
+                                  : 'text-[#5A5A66] hover:text-[#111114]'
+                              }`}
+                            >
+                              {RESOLUTION_LABELS[res]}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  <p className="text-[10px] text-[#6E6E7A]">
+                    Defaults to lowest-cost Draft settings ({effectiveResolution}) — upscale winning takes later with Topaz.
+                  </p>
+                </>
+              )}
 
               {(model.family === 'seedance' ||
                 model.family === 'flux-3' ||
@@ -2686,6 +3404,7 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                             </div>
                             <div className="text-[10px] font-mono text-[#5A5A66] truncate">
                               {clip.resolution} · {clip.qualityTier} · {clip.duration}s
+                              {clip.isGridMode ? ' · 2x2' : ''}
                             </div>
                           </div>
                         </button>
@@ -2723,6 +3442,20 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                     <ArrowUpRight className="w-3.5 h-3.5" />
                     {activeClipOrigUrl ? 'Upscale with Topaz' : 'Upscale Existing Video'}
                   </button>
+
+                  {activeClipOrigUrl &&
+                    !activeClipIsGrid &&
+                    !showSplitTrayManual && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setShowSplitTrayManual(true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 font-medium text-[#24242B] bg-[#F6F6F7] border border-[#D8D8DF] hover:border-[#C6202F] rounded-lg cursor-pointer"
+                      >
+                        <Scissors className="w-3.5 h-3.5 text-[#C6202F]" />
+                        2x2 Split Tools
+                      </button>
+                    )}
                 </div>
 
                 {activeClipUpscaledUrl && (
@@ -2744,6 +3477,20 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   </div>
                 )}
               </div>
+
+              {/* 2x2 4-Shot Splitter & Topaz Batch Pipeline */}
+              {activeClipOrigUrl &&
+                (activeClipIsGrid || isGridMode || showSplitTrayManual) && (
+                  <GridSplitTray
+                    projectId={project.id}
+                    shotId={shot.id}
+                    clipId={activeClip?.id}
+                    sourceVideoUrl={activeClipOrigUrl}
+                    isGridMode={activeClipIsGrid || isGridMode}
+                    splitClips={activeClipSplitClips}
+                    onProjectUpdated={onProjectUpdated}
+                  />
+                )}
             </div>
 
             {/* Action Bar */}
@@ -2752,7 +3499,14 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                 <button
                   type="button"
                   disabled={
-                    busy || (!prompt.trim() && workflowMode !== 'video_reframe')
+                    busy ||
+                    (!prompt.trim() &&
+                      workflowMode !== 'video_reframe' &&
+                      !(
+                        isGridMode &&
+                        (gridFrames.some(Boolean) ||
+                          gridShotPrompts.some((p) => p.trim().length > 0))
+                      ))
                   }
                   onClick={() => void handleGenerate()}
                   className="w-full py-2.5 px-5 brand-corner-sm font-medium text-xs text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer"
@@ -2760,13 +3514,19 @@ export const VideoStudioModal: React.FC<VideoStudioModalProps> = ({
                   {isGenerating ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Synthesizing Video...</span>
+                      <span>
+                        {isGridMode
+                          ? `Synthesizing 2x2 Grid (${effectiveResolution})...`
+                          : 'Synthesizing Video...'}
+                      </span>
                     </>
                   ) : (
                     <>
                       <Sparkles className="w-3.5 h-3.5" />
                       <span className="font-semibold">
-                        Generate with {model.label}
+                        {isGridMode
+                          ? `Generate 2x2 Grid (${effectiveResolution}) with ${model.label}`
+                          : `Generate with ${model.label}`}
                       </span>
                       <span className="ml-1 text-[11px] font-mono opacity-85">
                         · Est. ${estimatedCost.toFixed(2)}

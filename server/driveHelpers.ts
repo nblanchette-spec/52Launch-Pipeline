@@ -1316,7 +1316,8 @@ export async function uploadPdfBufferToProjectDrive(
 export async function syncProjectAssetsToDrive(
   project: PipelineProject,
   accessToken: string,
-  preferredFolderUrl?: string
+  preferredFolderUrl?: string,
+  options?: { skipPdfGeneration?: boolean }
 ): Promise<{
   backupFolderId: string;
   backupFolderUrl: string;
@@ -1329,11 +1330,10 @@ export async function syncProjectAssetsToDrive(
   );
 
   const slug =
-    `${project.product?.name || project.client || 'project'}`
+    `${project.client || 'client'}-${project.product?.name || 'project'}`
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 32) || 'project';
+      .replace(/^-+|-+$/g, '') || 'project';
 
   const uploadedFiles: string[] = [];
 
@@ -1343,39 +1343,41 @@ export async function syncProjectAssetsToDrive(
     await upsertDriveFile(accessToken, folderId, `${slug}-project.json`, 'application/json', jsonBuffer)
   );
 
-  // 2. Archive ALL Generated Deliverable PDFs in Destination Folder
-  if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
-    const biblePdf = generateBrandBiblePdfBuffer(project);
+  // 2. Fallback server deliverable PDFs only when caller did not opt into client-formatted PDF sync
+  if (!options?.skipPdfGeneration) {
+    if (project.brandBible?.hasGenerated || project.brandBible?.positioning) {
+      const biblePdf = generateBrandBiblePdfBuffer(project);
+      uploadedFiles.push(
+        await upsertDriveFile(accessToken, folderId, `${slug}-brand-bible.pdf`, 'application/pdf', biblePdf)
+      );
+    }
+    if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
+      const briefPdf = generateCreativeBriefPdfBuffer(project);
+      uploadedFiles.push(
+        await upsertDriveFile(accessToken, folderId, `${slug}-creative-brief.pdf`, 'application/pdf', briefPdf)
+      );
+    }
+    const shotlistPdf = generateShotListPdfBuffer(project);
     uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-brand-bible.pdf`, 'application/pdf', biblePdf)
+      await upsertDriveFile(accessToken, folderId, `${slug}-shotlist-storyboard.pdf`, 'application/pdf', shotlistPdf)
+    );
+    if ((project.voScript || []).length > 0) {
+      const voPdf = generateVoScriptPdfBuffer(project);
+      uploadedFiles.push(
+        await upsertDriveFile(accessToken, folderId, `${slug}-vo-script.pdf`, 'application/pdf', voPdf)
+      );
+    }
+    if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
+      const callSheetPdf = generateShootPlanPdfBuffer(project);
+      uploadedFiles.push(
+        await upsertDriveFile(accessToken, folderId, `${slug}-shoot-plan-call-sheet.pdf`, 'application/pdf', callSheetPdf)
+      );
+    }
+    const masterPdf = generateMasterProductionPdfBuffer(project);
+    uploadedFiles.push(
+      await upsertDriveFile(accessToken, folderId, `${slug}-master-production-book.pdf`, 'application/pdf', masterPdf)
     );
   }
-  if (project.creativeBrief?.hasGenerated || project.creativeBrief?.objective) {
-    const briefPdf = generateCreativeBriefPdfBuffer(project);
-    uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-creative-brief.pdf`, 'application/pdf', briefPdf)
-    );
-  }
-  const shotlistPdf = generateShotListPdfBuffer(project);
-  uploadedFiles.push(
-    await upsertDriveFile(accessToken, folderId, `${slug}-shotlist-storyboard.pdf`, 'application/pdf', shotlistPdf)
-  );
-  if ((project.voScript || []).length > 0) {
-    const voPdf = generateVoScriptPdfBuffer(project);
-    uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-vo-script.pdf`, 'application/pdf', voPdf)
-    );
-  }
-  if (project.shootPlan?.hasGenerated && (project.shootPlan.shootDays || []).length > 0) {
-    const callSheetPdf = generateShootPlanPdfBuffer(project);
-    uploadedFiles.push(
-      await upsertDriveFile(accessToken, folderId, `${slug}-call-sheet-shoot-plan.pdf`, 'application/pdf', callSheetPdf)
-    );
-  }
-  const masterPdf = generateMasterProductionPdfBuffer(project);
-  uploadedFiles.push(
-    await upsertDriveFile(accessToken, folderId, `${slug}-master-production-book.pdf`, 'application/pdf', masterPdf)
-  );
 
   // 3. Archive Locked Drive Reference Files + Uploaded Product Photos, Brand Graphics & Style Guide PDFs into Reference Files/
   const selectedRefs = (project.lockedDriveReferences || []).filter((r) => r.selected);

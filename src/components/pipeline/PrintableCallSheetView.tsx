@@ -10,9 +10,12 @@ import {
   Package,
   HelpCircle,
   ShieldAlert,
+  CheckCircle2,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 import { PipelineProject, ShootPlan } from '../../types/pipeline';
-import { downloadCallSheetPdf } from '../../utils/pdfExporter';
+import { downloadCallSheetPdf, DriveSaveResult } from '../../utils/pdfExporter';
 
 interface PrintableCallSheetViewProps {
   project: PipelineProject;
@@ -27,14 +30,17 @@ export const PrintableCallSheetView: React.FC<PrintableCallSheetViewProps> = ({
 }) => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [driveSaveResult, setDriveSaveResult] = useState<DriveSaveResult | null>(null);
 
   const liveHybridShots = project.shots.filter((s) => s.route !== 'ai_video');
 
   const handleDownloadPdf = async () => {
     setDownloadError(null);
+    setDriveSaveResult(null);
     setIsDownloading(true);
     try {
-      await downloadCallSheetPdf(project, plan);
+      const res = await downloadCallSheetPdf(project, plan);
+      setDriveSaveResult(res);
     } catch (err) {
       setDownloadError(
         err instanceof Error ? err.message : 'Could not generate call sheet PDF.'
@@ -89,6 +95,40 @@ export const PrintableCallSheetView: React.FC<PrintableCallSheetViewProps> = ({
       {downloadError && (
         <div className="no-print p-3 rounded-md bg-[#FDF2F3] border border-[#C6202F]/50 text-xs text-[#891A23]">
           {downloadError}
+        </div>
+      )}
+
+      {driveSaveResult && driveSaveResult.attempted && (
+        <div
+          className={`no-print p-3 rounded-md border text-xs flex items-center justify-between gap-3 ${
+            driveSaveResult.success
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : 'bg-amber-50 border-amber-300 text-amber-950'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {driveSaveResult.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            )}
+            <span>
+              {driveSaveResult.success
+                ? 'Saved formatted Call Sheet PDF to Google Drive.'
+                : `PDF downloaded locally, but couldn’t save to Drive: ${driveSaveResult.error || 'Unknown error'}`}
+            </span>
+          </div>
+          {driveSaveResult.success && driveSaveResult.backupFolderUrl && (
+            <a
+              href={driveSaveResult.backupFolderUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-semibold underline hover:no-underline shrink-0"
+            >
+              Open on Drive
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
         </div>
       )}
 

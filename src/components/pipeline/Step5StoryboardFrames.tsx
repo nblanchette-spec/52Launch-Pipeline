@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Wand2,
   Square,
+  Eye,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -43,6 +44,7 @@ interface Step5StoryboardFramesProps {
   onUpdateProject: (updated: PipelineProject) => Promise<void>;
   onGoToFrameSuggestions: () => void;
   onApproveAndGoToVideo: () => Promise<void>;
+  onPreviewPdf?: () => void;
 }
 
 type StudioStage = 'style' | 'assets' | 'storyboard';
@@ -140,6 +142,7 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
   onUpdateProject,
   onGoToFrameSuggestions,
   onApproveAndGoToVideo,
+  onPreviewPdf,
 }) => {
   const studio = useMemo(() => DEFAULT_STUDIO(project), [project]);
 
@@ -569,6 +572,17 @@ export const Step5StoryboardFrames: React.FC<Step5StoryboardFramesProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {onPreviewPdf && project.shots.length > 0 && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview Storyboard PDF
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onGoToFrameSuggestions}

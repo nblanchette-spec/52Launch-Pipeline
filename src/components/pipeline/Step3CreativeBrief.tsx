@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Loader2, CheckCircle2, ArrowRight, Plus, Trash2 } from 'lucide-react';
+import { Sparkles, Loader2, CheckCircle2, ArrowRight, Plus, Trash2, Eye } from 'lucide-react';
 import { CreativeBriefPipeline, PipelineProject } from '../../types/pipeline';
 
 interface Step3CreativeBriefProps {
@@ -8,6 +8,7 @@ interface Step3CreativeBriefProps {
   onGenerateBrief: () => Promise<void>;
   onApproveBrief: () => Promise<void>;
   onGoToShotBoard: () => void;
+  onPreviewPdf?: () => void;
 }
 
 export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
@@ -16,6 +17,7 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
   onGenerateBrief,
   onApproveBrief,
   onGoToShotBoard,
+  onPreviewPdf,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
@@ -96,6 +98,17 @@ export const Step3CreativeBrief: React.FC<Step3CreativeBriefProps> = ({
                 ? 'Re-run Creative Brief'
                 : 'Generate Creative Brief'}
           </button>
+
+          {onPreviewPdf && (brief.hasGenerated || brief.objective.trim()) && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview PDF
+            </button>
+          )}
 
           {project.approvals.briefApproved ? (
             <button

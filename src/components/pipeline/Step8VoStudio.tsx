@@ -16,6 +16,7 @@ import {
   Mic2,
   Wand2,
   VolumeX,
+  Eye,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -45,6 +46,7 @@ interface Step8VoStudioProps {
   onProjectUpdated: (updated: PipelineProject) => void;
   onGenerateVoScript: () => Promise<void>;
   onApproveVo: () => Promise<void>;
+  onPreviewPdf?: () => void;
 }
 
 const TIMELINE_SEGMENT_COLORS = [
@@ -77,6 +79,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
   onProjectUpdated,
   onGenerateVoScript,
   onApproveVo,
+  onPreviewPdf,
 }) => {
   const voSettings: VoStudioSettings = useMemo(
     () => ({
@@ -868,6 +871,17 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               ? 'Generating VO...'
               : `Generate all VO audio (${project.voScript.filter((v) => v.line.trim()).length})`}
           </button>
+
+          {onPreviewPdf && project.voScript.length > 0 && (
+            <button
+              type="button"
+              onClick={onPreviewPdf}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-[#891A23]" />
+              Preview PDF
+            </button>
+          )}
 
           <button
             type="button"

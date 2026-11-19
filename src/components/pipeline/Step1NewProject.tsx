@@ -29,6 +29,7 @@ import {
   ProductPhoto,
 } from '../../types/pipeline';
 import { readAndOptimizeLocalImage } from '../../utils/imageUtils';
+import { syncAllFormattedPdfsToDrive } from '../../utils/pdfExporter';
 import {
   getFirebaseAuthorizedDomainsInfo,
   getGoogleDriveAccessToken,
@@ -1042,7 +1043,8 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
           validUrls,
           activeToken,
           destinationFolderId,
-          destinationFolderUrl
+          destinationFolderUrl,
+          { skipPdfGeneration: true }
         );
 
       let syncRes;
@@ -1070,14 +1072,59 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
         syncRes = await performSync(token);
       }
 
-      setDriveSyncStatus('synced');
+      // Fetch latest project snapshot and upload richly formatted PDFs matching local downloads
+      let projectForPdfs: PipelineProject | null = existingProject || null;
+      try {
+        const projResp = await fetch(`/api/projects/${encodeURIComponent(projectId)}`);
+        if (projResp.ok) {
+          const projData = (await projResp.json()) as { project?: PipelineProject };
+          if (projData?.project) projectForPdfs = projData.project;
+        }
+      } catch {
+        // Use existingProject snapshot fallback
+      }
+
+      let pdfUploaded: string[] = [];
+      let pdfErrors: string[] = [];
+      if (projectForPdfs) {
+        const targetProj: PipelineProject = {
+          ...projectForPdfs,
+          googleDriveDestinationFolderId:
+            destinationFolderId ||
+            syncRes.backupFolderId ||
+            projectForPdfs.googleDriveDestinationFolderId,
+          googleDriveDestinationFolderUrl:
+            destinationFolderUrl ||
+            syncRes.backupFolderUrl ||
+            projectForPdfs.googleDriveDestinationFolderUrl,
+          googleDriveBackupFolderId:
+            syncRes.backupFolderId || projectForPdfs.googleDriveBackupFolderId,
+          googleDriveBackupFolderUrl:
+            syncRes.backupFolderUrl || projectForPdfs.googleDriveBackupFolderUrl,
+        };
+        const pdfSyncRes = await syncAllFormattedPdfsToDrive(targetProj, {
+          accessToken: token,
+          onProgress: (msg) => setDriveStatusNote(msg),
+        });
+        pdfUploaded = pdfSyncRes.uploadedFiles;
+        pdfErrors = pdfSyncRes.errors;
+        if (pdfSyncRes.backupFolderUrl) {
+          setBackupFolderUrl(pdfSyncRes.backupFolderUrl);
+        }
+      }
+
+      const allUploaded = [...(syncRes.uploadedFiles || []), ...pdfUploaded];
+      setDriveSyncStatus(pdfErrors.length > 0 && pdfUploaded.length === 0 ? 'error' : 'synced');
       if (syncRes.backupFolderUrl) {
         setBackupFolderUrl(syncRes.backupFolderUrl);
       }
-      if (syncRes.uploadedFiles?.length) {
+      if (allUploaded.length > 0) {
         setDriveStatusNote(
-          `Saved ${syncRes.uploadedFiles.length} file(s) to Google Drive (${syncRes.uploadedFiles.join(', ')}).`
+          `Saved ${allUploaded.length} file(s) to Google Drive (${allUploaded.join(', ')}).`
         );
+      }
+      if (pdfErrors.length > 0) {
+        setDriveErrorMsg(`Some PDFs failed to upload: ${pdfErrors[0]}`);
       }
     } catch (err) {
       const msg =
@@ -1503,13 +1550,13 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-mono text-[11px] font-semibold text-[#111114]">call-sheet-shoot-plan.pdf</span>
+                  <span className="font-mono text-[11px] font-semibold text-[#111114]">shoot-plan-call-sheet.pdf</span>
                   <span className="text-[10px] text-[#6E6E7A]">(Schedule &amp; crew)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                   <span className="font-mono text-[11px] font-semibold text-[#111114]">master-production-book.pdf</span>
-                  <span className="text-[10px] text-[#6E6E7A]">(Full deck / book)</span>
+                  <span className="text-[10px] text-[#6E6E7A]">(Full book + 16:9 deck)</span>
                 </div>
                 <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E2E6] text-xs text-[#3A3A44]">
                   <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />

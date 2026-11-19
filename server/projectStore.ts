@@ -775,6 +775,35 @@ export async function importProjectBackupBundle(bundle: {
       frameImageUrl: rewriteUrl(s.frameImageUrl),
       videoUrl: rewriteUrl(s.videoUrl),
       upscaledVideoUrl: rewriteUrl(s.upscaledVideoUrl),
+      gridFrameInputs: Array.isArray(s.gridFrameInputs)
+        ? s.gridFrameInputs.map((u) => rewriteUrl(u) || u)
+        : s.gridFrameInputs,
+      gridSplitClips: Array.isArray(s.gridSplitClips)
+        ? s.gridSplitClips.map((c) => ({
+            ...c,
+            videoUrl: rewriteUrl(c.videoUrl) || c.videoUrl,
+            upscaledVideoUrl: rewriteUrl(c.upscaledVideoUrl),
+          }))
+        : s.gridSplitClips,
+      videoHistory: Array.isArray(s.videoHistory)
+        ? s.videoHistory.map((h) => ({
+            ...h,
+            videoUrl: rewriteUrl(h.videoUrl) || h.videoUrl,
+            upscaledVideoUrl: rewriteUrl(h.upscaledVideoUrl),
+            startFrameUrl: rewriteUrl(h.startFrameUrl),
+            endFrameUrl: rewriteUrl(h.endFrameUrl),
+            gridFrameInputs: Array.isArray(h.gridFrameInputs)
+              ? h.gridFrameInputs.map((u) => rewriteUrl(u) || u)
+              : h.gridFrameInputs,
+            gridSplitClips: Array.isArray(h.gridSplitClips)
+              ? h.gridSplitClips.map((c) => ({
+                  ...c,
+                  videoUrl: rewriteUrl(c.videoUrl) || c.videoUrl,
+                  upscaledVideoUrl: rewriteUrl(c.upscaledVideoUrl),
+                }))
+              : h.gridSplitClips,
+          }))
+        : s.videoHistory,
     })),
     externalUpscales: (incoming.externalUpscales || []).map((item) => ({
       ...item,

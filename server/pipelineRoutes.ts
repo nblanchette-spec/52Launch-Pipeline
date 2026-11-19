@@ -21,6 +21,7 @@ import type {
   ExternalUpscaleItem,
   ExtractedStyleGuide,
   FrameCheckResult,
+  GridQuadrantKey,
   PipelineProject,
   PipelineShot,
   ProductPhoto,
@@ -43,6 +44,11 @@ import {
   generateNanoBananaImageViaFal,
   uploadMediaRefToFal,
 } from './falHelpers.ts';
+import { splitGridVideoIntoQuadrants } from './gridSplitter.ts';
+import {
+  appendGridBorderLockDirective,
+  resolveGridModeConfig,
+} from '../src/utils/gridModeUtils.ts';
 import {
   type GeminiTtsModel,
   synthesizeWithGeminiTTS,
@@ -241,8 +247,11 @@ export function createPipelineRouter(): Router {
         project.googleDriveDestinationFolderUrl = String(destinationFolderUrl).trim();
       }
 
-      const cleanB64 = pdfBase64.replace(/^data:[^;]+;base64,/, '');
+      const cleanB64 = pdfBase64.replace(/^data:[^,]*;base64,/, '');
       const pdfBuf = Buffer.from(cleanB64, 'base64');
+      if (pdfBuf.length < 16 || pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') {
+        return res.status(400).json({ error: 'Invalid or corrupted PDF payload.' });
+      }
 
       const uploaded = await uploadPdfBufferToProjectDrive(
         project,
@@ -1720,6 +1729,9 @@ ${shotSpecs.join('\n')}`;
       referenceVideos,
       referenceAudioUrl,
       referenceTask,
+      isGridMode,
+      gridFrameInputs,
+      gridShotPrompts,
     } = req.body as {
       projectId: string;
       shotId: string;
@@ -1744,6 +1756,9 @@ ${shotSpecs.join('\n')}`;
       referenceVideos?: string[];
       referenceAudioUrl?: string | null;
       referenceTask?: StudioReferenceTask;
+      isGridMode?: boolean;
+      gridFrameInputs?: string[];
+      gridShotPrompts?: string[];
     };
 
     const project = await getProject(projectId);
@@ -1765,7 +1780,7 @@ ${shotSpecs.join('\n')}`;
       });
     }
 
-    const effectiveModelId: StudioModelId =
+    const baseModelId: StudioModelId =
       modelId ||
       (shot.model === 'flux3'
         ? 'flux-3'
@@ -1775,7 +1790,30 @@ ${shotSpecs.join('\n')}`;
             ? 'gemini-omni-flash'
             : 'seedance-2.0');
     const effectiveWorkflow: StudioWorkflowMode = workflowMode || 'image_to_video';
-    const effectiveQualityTier: StudioQualityTier = qualityTier || 'draft';
+    const gridActive = Boolean(isGridMode);
+    const gridConfig = gridActive
+      ? resolveGridModeConfig({
+          modelId: baseModelId,
+          workflowMode: effectiveWorkflow,
+          requestedResolution: resolution,
+        })
+      : null;
+
+    const effectiveModelId: StudioModelId = gridConfig
+      ? gridConfig.modelId
+      : baseModelId;
+    const effectiveQualityTier: StudioQualityTier = gridActive
+      ? 'final'
+      : qualityTier || 'draft';
+    const effectiveAspectRatio: StudioAspectRatio = gridActive
+      ? '16:9'
+      : aspectRatio || '16:9';
+    const effectiveResolution: StudioResolution | undefined = gridConfig
+      ? gridConfig.resolvedResolution
+      : resolution;
+    const effectivePrompt = gridActive
+      ? appendGridBorderLockDirective(prompt || '')
+      : prompt || '';
     const effectiveNeg =
       negativePrompt !== undefined ? negativePrompt : shot.negativePrompt || '';
 
@@ -1787,12 +1825,12 @@ ${shotSpecs.join('\n')}`;
         projectId: project.id,
         modelId: effectiveModelId,
         workflowMode: effectiveWorkflow,
-        prompt: prompt || '',
+        prompt: effectivePrompt,
         negativePrompt: effectiveNeg,
-        aspectRatio: aspectRatio || '16:9',
+        aspectRatio: effectiveAspectRatio,
         duration: Number(duration) || shot.durationSec || 5,
         qualityTier: effectiveQualityTier,
-        resolution,
+        resolution: effectiveResolution,
         nativeAudio: nativeAudio !== false,
         safetyTolerance: typeof safetyTolerance === 'number' ? safetyTolerance : 2,
         enableSafetyChecker: enableSafetyChecker ?? false,
@@ -1828,7 +1866,9 @@ ${shotSpecs.join('\n')}`;
       const savedVideo = await saveBinaryAssetFromUrl(
         project.id,
         remoteVideoUrl,
-        `video-${shot.id.toLowerCase()}`,
+        gridActive
+          ? `video-${shot.id.toLowerCase()}-grid2x2`
+          : `video-${shot.id.toLowerCase()}`,
         'mp4'
       );
 
@@ -1859,15 +1899,24 @@ ${shotSpecs.join('\n')}`;
                     ? 'omni'
                     : 'seedance';
 
+      const normalizedGridFrames =
+        gridActive && Array.isArray(gridFrameInputs)
+          ? gridFrameInputs.slice(0, 4)
+          : undefined;
+      const normalizedGridPrompts =
+        gridActive && Array.isArray(gridShotPrompts)
+          ? gridShotPrompts.slice(0, 4)
+          : undefined;
+
       const newClipItem: ShotClipHistoryItem = {
         id: `clip-${Date.now()}`,
         videoUrl: savedVideo.url,
         createdAt: new Date().toISOString(),
         modelId: effectiveModelId,
         workflowMode: effectiveWorkflow,
-        prompt: prompt || '',
+        prompt: effectivePrompt,
         negativePrompt: effectiveNeg,
-        aspectRatio: aspectRatio || '16:9',
+        aspectRatio: effectiveAspectRatio,
         duration: built.clampedDuration,
         qualityTier: effectiveQualityTier,
         resolution: built.resolvedResolution,
@@ -1887,6 +1936,14 @@ ${shotSpecs.join('\n')}`;
         draftCacheUrl,
         upscaledVideoUrl: null,
         upscaledResolution: null,
+        ...(gridActive
+          ? {
+              isGridMode: true,
+              gridFrameInputs: normalizedGridFrames,
+              gridShotPrompts: normalizedGridPrompts,
+              gridSplitClips: undefined,
+            }
+          : {}),
       };
 
       const nextProject: PipelineProject = {
@@ -1895,7 +1952,7 @@ ${shotSpecs.join('\n')}`;
           s.id === shot.id
             ? {
                 ...s,
-                videoPrompt: prompt?.trim() || s.videoPrompt,
+                videoPrompt: effectivePrompt.trim() || s.videoPrompt,
                 negativePrompt: effectiveNeg,
                 durationSec: built.clampedDuration,
                 model: mappedShotModel,
@@ -1903,6 +1960,10 @@ ${shotSpecs.join('\n')}`;
                 videoSeed: finalSeed,
                 videoResolution: built.resolvedResolution,
                 draftCacheUrl,
+                isGridMode: gridActive,
+                gridFrameInputs: gridActive ? normalizedGridFrames : undefined,
+                gridShotPrompts: gridActive ? normalizedGridPrompts : undefined,
+                gridSplitClips: gridActive ? undefined : s.gridSplitClips,
                 videoHistory: appendShotClipHistory(s, newClipItem),
                 status: 'Video Ready',
               }
@@ -1912,13 +1973,13 @@ ${shotSpecs.join('\n')}`;
           {
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
-            step: 'Video Studio',
+            step: gridActive ? 'Video Studio (2x2 Grid)' : 'Video Studio',
             shotId: shot.id,
             model: chosenEndpoint,
-            prompt: prompt?.trim() || effectiveWorkflow,
+            prompt: effectivePrompt.trim() || effectiveWorkflow,
             seed: finalSeed,
             status: 'success',
-            notes: `${built.resolvedResolution} (${effectiveWorkflow})`,
+            notes: `${built.resolvedResolution} (${effectiveWorkflow}${gridActive ? ' · 2x2 Grid Borders Locked' : ''})`,
           },
           ...project.generationLog,
         ],
@@ -1941,10 +2002,10 @@ ${shotSpecs.join('\n')}`;
           {
             id: `log-${Date.now()}`,
             timestamp: new Date().toISOString(),
-            step: 'Video Studio',
+            step: gridActive ? 'Video Studio (2x2 Grid)' : 'Video Studio',
             shotId: shot.id,
             model: chosenEndpoint,
-            prompt: prompt?.trim() || workflowMode,
+            prompt: effectivePrompt.trim() || workflowMode,
             seed: null,
             status: 'error',
             notes: failure.message,
@@ -1953,6 +2014,111 @@ ${shotSpecs.join('\n')}`;
         ],
       });
       res.status(failure.status).json({ error: failure.message });
+    }
+  });
+
+  // STEP 7B-Split: Crop a completed 2x2 Grid Mode video into 4 independent H.264 MP4 clips
+  router.post('/pipeline/studio-split-grid', async (req, res) => {
+    const { projectId, shotId, clipId, videoUrl } = req.body as {
+      projectId: string;
+      shotId: string;
+      clipId?: string | null;
+      videoUrl?: string | null;
+    };
+
+    const project = await getProject(projectId);
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+    const shot = project.shots.find((s) => s.id === shotId);
+    if (!shot) {
+      return res.status(404).json({ error: `Shot ${shotId} not found.` });
+    }
+
+    const matchingClip =
+      (clipId
+        ? shot.videoHistory?.find((c) => c.id === clipId)
+        : undefined) ||
+      (videoUrl
+        ? shot.videoHistory?.find((c) => c.videoUrl === videoUrl)
+        : undefined);
+
+    const targetVideoUrl =
+      videoUrl || matchingClip?.videoUrl || shot.videoUrl;
+
+    if (!targetVideoUrl) {
+      return res
+        .status(400)
+        .json({ error: 'Generate or select a 2x2 Grid video before splitting.' });
+    }
+
+    try {
+      const splitResult = await splitGridVideoIntoQuadrants({
+        projectId: project.id,
+        shotId: shot.id,
+        videoUrl: targetVideoUrl,
+      });
+
+      const targetMatchesShotMain =
+        !shot.videoUrl || targetVideoUrl === shot.videoUrl;
+
+      const nextProject: PipelineProject = {
+        ...project,
+        shots: project.shots.map((s) => {
+          if (s.id !== shot.id) return s;
+          const nextHistory = Array.isArray(s.videoHistory)
+            ? s.videoHistory.map((clip) => {
+                const isTarget = clipId
+                  ? clip.id === clipId
+                  : clip.videoUrl === targetVideoUrl;
+                return isTarget
+                  ? {
+                      ...clip,
+                      isGridMode: true,
+                      gridSplitClips: splitResult.splitClips,
+                    }
+                  : clip;
+              })
+            : s.videoHistory;
+
+          return {
+            ...s,
+            isGridMode: targetMatchesShotMain ? true : s.isGridMode,
+            gridSplitClips: targetMatchesShotMain
+              ? splitResult.splitClips
+              : s.gridSplitClips,
+            videoHistory: nextHistory,
+          };
+        }),
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Split 2x2 Grid Video',
+            shotId: shot.id,
+            model: 'ffmpeg crop (2x2)',
+            prompt: `${splitResult.sourceWidth}x${splitResult.sourceHeight} -> 4x ${splitResult.quadrantWidth}x${splitResult.quadrantHeight} MP4`,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({
+        project: saved,
+        splitClips: splitResult.splitClips,
+        quadrantWidth: splitResult.quadrantWidth,
+        quadrantHeight: splitResult.quadrantHeight,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Could not split 2x2 grid video into 4 clips.',
+      });
     }
   });
 
@@ -2038,6 +2204,8 @@ ${shotSpecs.join('\n')}`;
     const {
       projectId,
       shotId,
+      clipId,
+      quadrant,
       videoUrl,
       label,
       mode = 'precision',
@@ -2047,6 +2215,8 @@ ${shotSpecs.join('\n')}`;
     } = req.body as {
       projectId: string;
       shotId?: string | null;
+      clipId?: string | null;
+      quadrant?: GridQuadrantKey | null;
       videoUrl: string;
       label?: string;
       mode?: TopazUpscaleMode;
@@ -2107,7 +2277,9 @@ ${shotSpecs.join('\n')}`;
 
       const badgeLabel = built.scaleFactor === 4 ? '4K / Upscaled' : '2x / Upscaled';
       const fileSlug = shot
-        ? `video-${shot.id.toLowerCase()}-topaz-${built.scaleFactor}x`
+        ? quadrant
+          ? `video-${shot.id.toLowerCase()}-${quadrant}-topaz-${built.scaleFactor}x`
+          : `video-${shot.id.toLowerCase()}-topaz-${built.scaleFactor}x`
         : `external-topaz-${built.scaleFactor}x`;
 
       const savedVideo = await saveBinaryAssetFromUrl(
@@ -2127,7 +2299,80 @@ ${shotSpecs.join('\n')}`;
       };
 
       let nextProject: PipelineProject;
-      if (shot) {
+      if (shot && quadrant) {
+        nextProject = {
+          ...project,
+          shots: project.shots.map((s) => {
+            if (s.id !== shot.id) return s;
+            const updateSplits = (
+              list: NonNullable<PipelineShot['gridSplitClips']> | undefined
+            ) =>
+              Array.isArray(list)
+                ? list.map((q) =>
+                    q.quadrant === quadrant ||
+                    q.videoUrl === sourceRef ||
+                    q.videoUrl === persistedSourceUrl
+                      ? {
+                          ...q,
+                          upscaledVideoUrl: savedVideo.url,
+                          upscaledResolution: badgeLabel,
+                          upscaleDetails: details,
+                        }
+                      : q
+                  )
+                : list;
+
+            const shouldUpdateShotTop =
+              !clipId ||
+              s.gridSplitClips?.some(
+                (q) =>
+                  q.quadrant === quadrant &&
+                  (q.videoUrl === sourceRef || q.videoUrl === persistedSourceUrl)
+              );
+
+            return {
+              ...s,
+              gridSplitClips: shouldUpdateShotTop
+                ? updateSplits(s.gridSplitClips)
+                : s.gridSplitClips,
+              videoHistory: Array.isArray(s.videoHistory)
+                ? s.videoHistory.map((clip) => {
+                    const isMatchingClip = clipId
+                      ? clip.id === clipId
+                      : Boolean(
+                          clip.gridSplitClips?.some(
+                            (q) =>
+                              q.quadrant === quadrant &&
+                              (q.videoUrl === sourceRef ||
+                                q.videoUrl === persistedSourceUrl)
+                          )
+                        );
+                    return isMatchingClip
+                      ? {
+                          ...clip,
+                          gridSplitClips: updateSplits(clip.gridSplitClips),
+                        }
+                      : clip;
+                  })
+                : s.videoHistory,
+            };
+          }),
+          generationLog: [
+            {
+              id: `log-${Date.now()}`,
+              timestamp: new Date().toISOString(),
+              step: `Topaz Upscale 2x2 ${quadrant.replace('_', '-')} (${badgeLabel})`,
+              shotId: shot.id,
+              model: `${built.endpointId} (${built.resolvedSubModel})`,
+              prompt: label || `${shot.id} ${quadrant}`,
+              seed: shot.videoSeed,
+              status: 'success',
+              notes: `${built.scaleFactor}x H.264 Premiere-Ready · Original FPS locked`,
+            },
+            ...project.generationLog,
+          ],
+        };
+      } else if (shot) {
         nextProject = {
           ...project,
           shots: project.shots.map((s) =>
@@ -3209,6 +3454,7 @@ ${shotsText}`;
         googleDriveFolderUrl,
         destinationFolderId,
         destinationFolderUrl,
+        skipPdfGeneration,
       } = req.body;
       const project = await getProject(projectId);
       if (!project) return res.status(404).json({ error: 'Project not found.' });
@@ -3234,7 +3480,8 @@ ${shotsText}`;
       const syncResult = await syncProjectAssetsToDrive(
         project,
         token,
-        project.googleDriveDestinationFolderUrl || urls[0]
+        project.googleDriveDestinationFolderUrl || urls[0],
+        { skipPdfGeneration: Boolean(skipPdfGeneration) }
       );
 
       project.googleDriveBackupFolderId = syncResult.backupFolderId;

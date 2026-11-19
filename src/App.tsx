@@ -19,6 +19,11 @@ import { Step7VideoStudio } from './components/pipeline/Step7VideoStudio';
 import { Step8VoStudio } from './components/pipeline/Step8VoStudio';
 import { Step9ShootPlan } from './components/pipeline/Step9ShootPlan';
 import { PrintableStoryboardView } from './components/pipeline/PrintableStoryboardView';
+import { PrintableCallSheetView } from './components/pipeline/PrintableCallSheetView';
+import {
+  PrintableDocumentView,
+  PrintableTarget,
+} from './components/pipeline/PrintableDocumentView';
 import { MasterPdfExportModal } from './components/pipeline/MasterPdfExportModal';
 import {
   getGoogleDriveAccessToken,
@@ -30,6 +35,11 @@ import {
 } from './utils/googleDriveSync';
 import { parseJsonResponse } from './utils/safeFetch';
 
+type AppPrintablePreview =
+  | { kind: 'storyboard' }
+  | { kind: 'callSheet' }
+  | { kind: 'document'; target: PrintableTarget; backLabel: string };
+
 export default function App() {
   // --- New Production Pipeline State (Server /data storage) ---
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
@@ -39,7 +49,7 @@ export default function App() {
   const [showLaunchScreen, setShowLaunchScreen] = useState(false);
   const [launchPlayAnimation, setLaunchPlayAnimation] = useState(true);
   const [isNewProjectMode, setIsNewProjectMode] = useState(false);
-  const [isPrintableOpen, setIsPrintableOpen] = useState(false);
+  const [printablePreview, setPrintablePreview] = useState<AppPrintablePreview | null>(null);
   const [isMasterExportOpen, setIsMasterExportOpen] = useState(false);
   const [isLoadingPipeline, setIsLoadingPipeline] = useState(true);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
@@ -84,7 +94,8 @@ export default function App() {
             urls,
             token,
             proj.googleDriveDestinationFolderId,
-            proj.googleDriveDestinationFolderUrl
+            proj.googleDriveDestinationFolderUrl,
+            { skipPdfGeneration: true }
           );
           setActiveProject((curr) =>
             curr && curr.id === proj.id
@@ -189,7 +200,7 @@ export default function App() {
     setActiveProject(proj);
     setShowWelcome(false);
     setIsNewProjectMode(false);
-    setIsPrintableOpen(false);
+    setPrintablePreview(null);
 
     if (requestedStep && isStepUnlockedForProject(proj, requestedStep)) {
       setShowLaunchScreen(false);
@@ -208,7 +219,7 @@ export default function App() {
     setShowWelcome(true);
     setShowLaunchScreen(false);
     setIsNewProjectMode(false);
-    setIsPrintableOpen(false);
+    setPrintablePreview(null);
     void fetchProjectSummariesOnly().catch(() => undefined);
   };
 
@@ -553,12 +564,12 @@ export default function App() {
         isWelcomeOpen={showWelcome}
         isLaunchScreenOpen={showLaunchScreen}
         isNewProjectMode={isNewProjectMode}
-        isPrintableOpen={isPrintableOpen}
+        isPrintableOpen={Boolean(printablePreview)}
         onOpenWelcome={handleOpenWelcome}
         onOpenReadyToLaunch={() => {
           setShowWelcome(false);
           setIsNewProjectMode(false);
-          setIsPrintableOpen(false);
+          setPrintablePreview(null);
           setLaunchPlayAnimation(true);
           setShowLaunchScreen(true);
         }}
@@ -569,18 +580,17 @@ export default function App() {
           setShowWelcome(false);
           setShowLaunchScreen(false);
           setIsNewProjectMode(true);
-          setIsPrintableOpen(false);
+          setPrintablePreview(null);
           setActiveStep(1);
         }}
         onSelectStep={(step) => {
           setShowWelcome(false);
           setShowLaunchScreen(false);
-          setIsPrintableOpen(false);
+          setPrintablePreview(null);
           setActiveStep(step);
         }}
         onTogglePrintable={() => {
-          setShowLaunchScreen(false);
-          setIsPrintableOpen((v) => !v);
+          setPrintablePreview((v) => (v ? null : { kind: 'storyboard' }));
         }}
         onOpenMasterExport={() => setIsMasterExportOpen(true)}
         onDownloadBackup={handleDownloadBackup}
@@ -613,25 +623,42 @@ export default function App() {
               setShowWelcome(false);
               setShowLaunchScreen(false);
               setIsNewProjectMode(true);
-              setIsPrintableOpen(false);
+              setPrintablePreview(null);
               setActiveStep(1);
             }}
             onImportBackup={(f) => void handleImportBackup(f)}
             onDeleteProject={handleDeleteProject}
           />
-        ) : isPrintableOpen && activeProject ? (
-          <PrintableStoryboardView
-            project={activeProject}
-            onBack={() => setIsPrintableOpen(false)}
-          />
+        ) : printablePreview && activeProject ? (
+          printablePreview.kind === 'storyboard' ? (
+            <PrintableStoryboardView
+              project={activeProject}
+              onBack={() => setPrintablePreview(null)}
+            />
+          ) : printablePreview.kind === 'callSheet' ? (
+            <PrintableCallSheetView
+              project={activeProject}
+              plan={activeProject.shootPlan}
+              onBack={() => setPrintablePreview(null)}
+            />
+          ) : (
+            <PrintableDocumentView
+              project={activeProject}
+              initialTarget={printablePreview.target}
+              backLabel={printablePreview.backLabel}
+              onBack={() => setPrintablePreview(null)}
+            />
+          )
         ) : showLaunchScreen && activeProject ? (
           <ReadyToLaunchView
             project={activeProject}
             playAnimationOnMount={launchPlayAnimation}
             onOpenMasterExport={() => setIsMasterExportOpen(true)}
             onOpenPrintableStoryboard={() => {
-              setShowLaunchScreen(false);
-              setIsPrintableOpen(true);
+              setPrintablePreview({ kind: 'storyboard' });
+            }}
+            onOpenPrintableCallSheet={() => {
+              setPrintablePreview({ kind: 'callSheet' });
             }}
             onDownloadBackup={handleDownloadBackup}
             onBackToShootPlan={() => {
@@ -662,6 +689,13 @@ export default function App() {
               setActiveStep(3);
             }}
             onGoToBrief={() => setActiveStep(3)}
+            onPreviewPdf={() =>
+              setPrintablePreview({
+                kind: 'document',
+                target: { kind: 'section', sectionId: 'brandBible' },
+                backLabel: 'Back to Brand Bible',
+              })
+            }
           />
         ) : activeStep === 3 ? (
           <Step3CreativeBrief
@@ -676,6 +710,13 @@ export default function App() {
               setActiveStep(4);
             }}
             onGoToShotBoard={() => setActiveStep(4)}
+            onPreviewPdf={() =>
+              setPrintablePreview({
+                kind: 'document',
+                target: { kind: 'section', sectionId: 'creativeBrief' },
+                backLabel: 'Back to Creative Brief',
+              })
+            }
           />
         ) : activeStep === 4 ? (
           <Step4ShotBoard
@@ -692,13 +733,14 @@ export default function App() {
                 'Shot list approved. Upload your Google Flow storyboard frames next.'
               );
             }}
-            onOpenPrintable={() => setIsPrintableOpen(true)}
+            onOpenPrintable={() => setPrintablePreview({ kind: 'storyboard' })}
           />
         ) : activeStep === 5 ? (
           <Step5StoryboardFrames
             project={activeProject}
             onUpdateProject={handleUpdatePipelineProject}
             onGoToFrameSuggestions={() => setActiveStep(6)}
+            onPreviewPdf={() => setPrintablePreview({ kind: 'storyboard' })}
             onApproveAndGoToVideo={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
@@ -715,6 +757,13 @@ export default function App() {
             project={activeProject}
             onUpdateProject={handleUpdatePipelineProject}
             onRunFrameCheck={handleRunFrameCheck}
+            onPreviewPdf={() =>
+              setPrintablePreview({
+                kind: 'document',
+                target: { kind: 'section', sectionId: 'frameSuggestions' },
+                backLabel: 'Back to Frame Suggestions',
+              })
+            }
             onApproveStoryboard={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
@@ -737,6 +786,13 @@ export default function App() {
             }}
             onGenerateVideoPrompts={handleGenerateVideoPrompts}
             onGenerateSingleVideo={handleGenerateSingleVideo}
+            onPreviewPdf={() =>
+              setPrintablePreview({
+                kind: 'document',
+                target: { kind: 'section', sectionId: 'videoPromptsAndVideo' },
+                backLabel: 'Back to Video Studio',
+              })
+            }
             onApproveVideoStep={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
@@ -757,6 +813,13 @@ export default function App() {
               scheduleDriveAutoSave(updated);
             }}
             onGenerateVoScript={handleGenerateVoScript}
+            onPreviewPdf={() =>
+              setPrintablePreview({
+                kind: 'document',
+                target: { kind: 'section', sectionId: 'voScript' },
+                backLabel: 'Back to VO Studio',
+              })
+            }
             onApproveVo={async () => {
               await handleUpdatePipelineProject({
                 ...activeProject,
