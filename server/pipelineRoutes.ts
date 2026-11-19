@@ -82,7 +82,15 @@ function getGoogleDriveTokenFromRequest(req: {
 }): string {
   const raw = req.headers['x-google-drive-token'];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === 'string' ? value.trim() : '';
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  const authHeader = req.headers['authorization'];
+  const authVal = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (typeof authVal === 'string' && authVal.toLowerCase().startsWith('bearer ')) {
+    return authVal.slice(7).trim();
+  }
+  return '';
 }
 
 async function falSubscribeWithNegativeFallback(

@@ -1014,14 +1014,15 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const triggerDriveAutoSave = async (projectId: string) => {
     const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
     setDriveErrorMsg(null);
-    let token = driveToken || (await getGoogleDriveAccessToken());
+    let token = (await getGoogleDriveAccessToken()) || driveToken;
     if (!token) {
       try {
-        const authRes = await signInWithGoogleDrive();
+        const authRes = await signInWithGoogleDrive(true);
         token = authRes.accessToken;
         setDriveToken(token);
         setDriveUserEmail(authRes.user.email || null);
       } catch (err) {
+        setDriveSyncStatus('error');
         setDriveErrorMsg(
           err instanceof Error ? err.message : 'Sign in with Google to save to Drive.'
         );
@@ -1032,13 +1033,40 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     setIsSyncingDrive(true);
     setDriveSyncStatus('syncing');
     try {
-      const syncRes = await syncProjectToDriveServer(
-        projectId,
-        validUrls,
-        token,
-        destinationFolderId,
-        destinationFolderUrl
-      );
+      const performSync = (activeToken: string) =>
+        syncProjectToDriveServer(
+          projectId,
+          validUrls,
+          activeToken,
+          destinationFolderId,
+          destinationFolderUrl
+        );
+
+      let syncRes;
+      try {
+        syncRes = await performSync(token);
+      } catch (firstErr) {
+        const firstMsg = firstErr instanceof Error ? firstErr.message.toLowerCase() : '';
+        const isAuthFailure =
+          firstMsg.includes('expired') ||
+          firstMsg.includes('not connected') ||
+          firstMsg.includes('reconnect') ||
+          firstMsg.includes('permission') ||
+          firstMsg.includes('sign in');
+
+        if (!isAuthFailure) {
+          throw firstErr;
+        }
+
+        // Token expired or lacked Drive write scopes — clear stale token, prompt fresh OAuth, and retry once
+        setDriveToken(null);
+        const refreshed = await signInWithGoogleDrive(true);
+        token = refreshed.accessToken;
+        setDriveToken(token);
+        setDriveUserEmail(refreshed.user.email || null);
+        syncRes = await performSync(token);
+      }
+
       setDriveSyncStatus('synced');
       if (syncRes.backupFolderUrl) {
         setBackupFolderUrl(syncRes.backupFolderUrl);
@@ -1049,10 +1077,18 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
         );
       }
     } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Could not sync backup to Google Drive.';
+      if (
+        msg.toLowerCase().includes('expired') ||
+        msg.toLowerCase().includes('not connected') ||
+        msg.toLowerCase().includes('permission') ||
+        msg.toLowerCase().includes('sign in')
+      ) {
+        setDriveToken(null);
+      }
       setDriveSyncStatus('error');
-      setDriveErrorMsg(
-        err instanceof Error ? err.message : 'Could not sync backup to Google Drive.'
-      );
+      setDriveErrorMsg(msg);
     } finally {
       setIsSyncingDrive(false);
     }
@@ -1384,13 +1420,27 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
                   <button
                     type="button"
                     disabled={isConnectingDrive}
-                    onClick={() => void handleConnectDrive()}
+                    onClick={() => void handleConnectDrive(true)}
                     className="px-2.5 py-1 text-[11px] font-semibold text-amber-950 bg-white border border-amber-300 hover:bg-amber-100 rounded-md cursor-pointer shrink-0"
                   >
                     {isConnectingDrive ? 'Connecting...' : 'Reconnect Google Drive'}
                   </button>
                 </div>
               )}
+
+            {driveErrorMsg && (
+              <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23] flex flex-wrap items-center justify-between gap-2">
+                <span className="flex-1 min-w-[220px]">{driveErrorMsg}</span>
+                <button
+                  type="button"
+                  disabled={isConnectingDrive}
+                  onClick={() => void handleConnectDrive(true)}
+                  className="px-2.5 py-1 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] disabled:opacity-50 rounded-md cursor-pointer shrink-0"
+                >
+                  {isConnectingDrive ? 'Connecting...' : 'Reconnect Google Drive'}
+                </button>
+              </div>
+            )}
 
             {/* Deliverables Checklist */}
             <div className="pt-3 border-t border-[#EAEAEF]">

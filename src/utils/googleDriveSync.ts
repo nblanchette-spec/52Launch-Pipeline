@@ -12,9 +12,10 @@ import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
 import { parseJsonResponse } from './safeFetch';
 
 export const DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
   'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
 
 export interface DriveUser {
@@ -35,8 +36,29 @@ for (const scope of DRIVE_SCOPES) {
 let isSigningIn = false;
 let cachedAccessToken: string | null = null;
 let cachedUser: DriveUser | null = null;
-let authSuccessCallback: ((user: DriveUser, token: string) => void) | null = null;
-let authFailureCallback: (() => void) | null = null;
+
+type DriveAuthListener = {
+  onSuccess?: (user: DriveUser, token: string) => void;
+  onFailure?: () => void;
+};
+const authListeners = new Set<DriveAuthListener>();
+
+function notifyAuthSuccess(user: DriveUser, token: string): void {
+  for (const listener of authListeners) {
+    listener.onSuccess?.(user, token);
+  }
+}
+
+function notifyAuthFailure(): void {
+  for (const listener of authListeners) {
+    listener.onFailure?.();
+  }
+}
+
+function invalidateCachedDriveSession(): void {
+  cachedAccessToken = null;
+  notifyAuthFailure();
+}
 
 function mapFirebaseUser(user: User): DriveUser {
   return {
@@ -50,25 +72,37 @@ export function initDriveAuth(
   onAuthSuccess?: (user: DriveUser, token: string) => void,
   onAuthFailure?: () => void
 ) {
-  authSuccessCallback = onAuthSuccess || null;
-  authFailureCallback = onAuthFailure || null;
+  const listener: DriveAuthListener = {
+    onSuccess: onAuthSuccess,
+    onFailure: onAuthFailure,
+  };
+  authListeners.add(listener);
 
-  return onAuthStateChanged(auth, (user: User | null) => {
+  if (cachedAccessToken && cachedUser) {
+    onAuthSuccess?.(cachedUser, cachedAccessToken);
+  }
+
+  const unsubFirebase = onAuthStateChanged(auth, (user: User | null) => {
     if (user) {
       const mapped = mapFirebaseUser(user);
       cachedUser = mapped;
       if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(mapped, cachedAccessToken);
+        onAuthSuccess?.(mapped, cachedAccessToken);
       } else if (!isSigningIn) {
         cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
+        onAuthFailure?.();
       }
     } else {
       cachedAccessToken = null;
       cachedUser = null;
-      if (onAuthFailure) onAuthFailure();
+      onAuthFailure?.();
     }
   });
+
+  return () => {
+    authListeners.delete(listener);
+    unsubFirebase();
+  };
 }
 
 export async function getGoogleDriveAccessToken(): Promise<string | null> {
@@ -82,10 +116,24 @@ export function getGoogleDriveUser(): DriveUser | null {
 export function clearGoogleDriveToken(): void {
   cachedAccessToken = null;
   cachedUser = null;
+  notifyAuthFailure();
 }
 
 export function setCachedGoogleDriveAccessToken(token: string | null): void {
   cachedAccessToken = token;
+  if (!token) {
+    notifyAuthFailure();
+  }
+}
+
+function shouldSkipPopupRetry(err: unknown): boolean {
+  const code = (err as { code?: string })?.code || '';
+  return (
+    code === 'auth/popup-closed-by-user' ||
+    code === 'auth/cancelled-popup-request' ||
+    code === 'auth/popup-blocked' ||
+    code === 'auth/unauthorized-domain'
+  );
 }
 
 export async function signInWithGoogleDrive(forceConsent = false): Promise<{
@@ -95,14 +143,21 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   isSigningIn = true;
   try {
     provider.setCustomParameters({
-      prompt: forceConsent ? 'consent' : 'select_account',
+      include_granted_scopes: 'true',
+      prompt: forceConsent ? 'consent select_account' : 'select_account',
     });
 
     let result;
     try {
       result = await signInWithPopup(auth, provider);
-    } catch {
-      provider.setCustomParameters({ prompt: 'consent' });
+    } catch (firstErr) {
+      if (forceConsent || shouldSkipPopupRetry(firstErr)) {
+        throw firstErr;
+      }
+      provider.setCustomParameters({
+        include_granted_scopes: 'true',
+        prompt: 'consent select_account',
+      });
       result = await signInWithPopup(auth, provider);
     }
 
@@ -111,7 +166,10 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
     let accessToken = credential?.accessToken || tokenResponse?.oauthAccessToken;
 
     if (!accessToken) {
-      provider.setCustomParameters({ prompt: 'consent' });
+      provider.setCustomParameters({
+        include_granted_scopes: 'true',
+        prompt: 'consent select_account',
+      });
       const retryResult = await signInWithPopup(auth, provider);
       const retryCredential = GoogleAuthProvider.credentialFromResult(retryResult);
       const retryTokenResponse = (retryResult as unknown as { _tokenResponse?: { oauthAccessToken?: string } })._tokenResponse;
@@ -131,9 +189,7 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
     cachedAccessToken = accessToken;
     cachedUser = userInfo;
 
-    if (authSuccessCallback) {
-      authSuccessCallback(userInfo, accessToken);
-    }
+    notifyAuthSuccess(userInfo, accessToken);
 
     return { user: userInfo, accessToken };
   } finally {
@@ -149,9 +205,7 @@ export async function logoutGoogleDrive(): Promise<void> {
   } catch {
     // ignore signOut errors
   }
-  if (authFailureCallback) {
-    authFailureCallback();
-  }
+  notifyAuthFailure();
 }
 
 export function extractDriveFolderId(urlOrId?: string): string | null {
@@ -566,6 +620,7 @@ export async function syncProjectToDriveServer(
   };
   if (token) {
     headers['X-Google-Drive-Token'] = token;
+    headers['Authorization'] = `Bearer ${token}`;
   }
 
   const resp = await fetch('/api/pipeline/drive-sync', {
@@ -579,7 +634,7 @@ export async function syncProjectToDriveServer(
     }),
   });
   if (resp.status === 401) {
-    cachedAccessToken = null;
+    invalidateCachedDriveSession();
   }
   const data = await parseJsonResponse<{
     syncedAt?: string;
@@ -644,6 +699,7 @@ export async function uploadPdfToDriveServer(params: {
     headers: {
       'Content-Type': 'application/json',
       'X-Google-Drive-Token': token,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       projectId: params.projectId,
@@ -654,7 +710,7 @@ export async function uploadPdfToDriveServer(params: {
     }),
   });
   if (resp.status === 401) {
-    cachedAccessToken = null;
+    invalidateCachedDriveSession();
   }
 
   return parseJsonResponse<{
@@ -745,6 +801,7 @@ export async function parseGoogleDriveFolder(
     headers: {
       'Content-Type': 'application/json',
       'X-Google-Drive-Token': accessToken,
+      Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
       projectId,
@@ -753,7 +810,7 @@ export async function parseGoogleDriveFolder(
     }),
   });
   if (resp.status === 401) {
-    cachedAccessToken = null;
+    invalidateCachedDriveSession();
   }
   return parseJsonResponse<ParsedDriveIntakeResult>(resp, 'Drive parse failed.');
 }
@@ -787,6 +844,7 @@ export async function importDriveFilesToProject(params: {
     headers: {
       'Content-Type': 'application/json',
       'X-Google-Drive-Token': params.accessToken,
+      Authorization: `Bearer ${params.accessToken}`,
     },
     body: JSON.stringify({
       projectId: params.projectId,
@@ -796,7 +854,7 @@ export async function importDriveFilesToProject(params: {
     }),
   });
   if (resp.status === 401) {
-    cachedAccessToken = null;
+    invalidateCachedDriveSession();
   }
   const data = await parseJsonResponse<{
     assets?: ImportedDriveAsset[];
