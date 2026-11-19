@@ -181,11 +181,24 @@ async function fetchLiveAuthorizedDomains(): Promise<string[]> {
   }
 }
 
+export function getFirebaseAuthorizedDomainsInfo(): {
+  hostname: string;
+  projectId: string;
+  consoleUrl: string;
+} {
+  const hostname =
+    typeof window !== 'undefined' ? window.location.hostname : '';
+  const projectId = firebaseConfig.projectId || '';
+  return {
+    hostname,
+    projectId,
+    consoleUrl: `https://console.firebase.google.com/project/${encodeURIComponent(projectId)}/authentication/settings`,
+  };
+}
+
 async function formatUnauthorizedDomainError(): Promise<Error> {
   const currentHost =
     typeof window !== 'undefined' ? window.location.hostname : 'unknown-host';
-  const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : 'unknown-origin';
   const authorizedDomains = await fetchLiveAuthorizedDomains();
   const hostAlreadyAuthorized = authorizedDomains.some((d) =>
     doesHostnameMatchDomain(currentHost, d)
@@ -193,14 +206,12 @@ async function formatUnauthorizedDomainError(): Promise<Error> {
 
   if (hostAlreadyAuthorized) {
     return new Error(
-      `Google Drive sign-in was blocked by a stale browser session on "${currentHost}". Please hard-reload this page (Cmd/Ctrl+Shift+R) and try signing in again.`
+      `Google Drive sign-in hit a stale browser session on "${currentHost}". Please hard-reload this page (Cmd/Ctrl+Shift+R) and try again.`
     );
   }
 
-  const authorizedList =
-    authorizedDomains.length > 0 ? authorizedDomains.join(', ') : 'none returned';
   return new Error(
-    `Firebase Auth blocked sign-in from "${currentOrigin}" (auth/unauthorized-domain). Add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized domains for project "${firebaseConfig.projectId}" (currently authorized: ${authorizedList}).`
+    `This preview domain "${currentHost}" is not in Firebase's Authorized Domains for project "${firebaseConfig.projectId}" (auth/unauthorized-domain). Add "${currentHost}" under Authentication → Settings → Authorized domains, then click Retry.`
   );
 }
 

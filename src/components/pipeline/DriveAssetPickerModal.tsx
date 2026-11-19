@@ -23,6 +23,7 @@ import {
   HardDrive,
   Users,
   Building2,
+  Copy,
 } from 'lucide-react';
 import {
   DriveExplorerItem,
@@ -33,6 +34,7 @@ import {
   extractDriveFileId,
   extractDriveFolderId,
   getDriveFileMetadata,
+  getFirebaseAuthorizedDomainsInfo,
   getGoogleDriveAccessToken,
   getGoogleDriveUser,
   importDriveFilesToProject,
@@ -775,19 +777,49 @@ export const DriveAssetPickerModal: React.FC<DriveAssetPickerModalProps> = ({
 
         {/* Main Explorer View */}
         <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-white">
-          {errorMsg && (
-            <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23] flex flex-wrap items-center justify-between gap-2">
-              <span>{errorMsg}</span>
-              <button
-                type="button"
-                disabled={isConnecting}
-                onClick={() => void handleConnect(true)}
-                className="px-2.5 py-1 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded cursor-pointer shrink-0"
-              >
-                {isConnecting ? 'Reconnecting...' : 'Grant Drive Read Access'}
-              </button>
-            </div>
-          )}
+          {errorMsg && (() => {
+            const isUnauthorizedDomain = errorMsg.includes('auth/unauthorized-domain');
+            const authInfo = isUnauthorizedDomain ? getFirebaseAuthorizedDomainsInfo() : null;
+            return (
+              <div className="p-3 rounded-lg bg-rose-50 border border-rose-300 text-xs text-[#891A23] flex flex-wrap items-center justify-between gap-2">
+                <span className="flex-1 min-w-[220px]">{errorMsg}</span>
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  {authInfo?.hostname && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(authInfo.hostname);
+                          setStatusNote(`Copied "${authInfo.hostname}" to clipboard.`);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-[#891A23] bg-white border border-rose-300 hover:bg-rose-100 rounded cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        Copy Domain
+                      </button>
+                      <a
+                        href={authInfo.consoleUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-[#891A23] bg-white border border-rose-300 hover:bg-rose-100 rounded"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        Open Firebase Auth Settings
+                      </a>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    disabled={isConnecting}
+                    onClick={() => void handleConnect(true)}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded cursor-pointer shrink-0"
+                  >
+                    {isConnecting ? 'Reconnecting...' : isUnauthorizedDomain ? 'Retry Sign In' : 'Grant Drive Read Access'}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
 
           {statusNote && (
             <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-xs text-emerald-900">
