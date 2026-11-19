@@ -21,6 +21,8 @@ import {
   Clock,
   RotateCcw,
   Rocket,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -297,6 +299,99 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
         return {
           ...d,
           scheduleBreakdown: defaultScheduleBreakdown(d),
+        };
+      }),
+    });
+  };
+
+  const moveDay = (index: number, direction: -1 | 1) => {
+    const days = [...plan.shootDays];
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= days.length) return;
+    const [removed] = days.splice(index, 1);
+    days.splice(targetIndex, 0, removed);
+    updatePlan({ shootDays: days });
+  };
+
+  const moveScheduleBlock = (dayId: string, blockIndex: number, direction: -1 | 1) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const blocks = [...(d.scheduleBreakdown?.length ? d.scheduleBreakdown : defaultScheduleBreakdown(d))];
+        const targetIndex = blockIndex + direction;
+        if (targetIndex < 0 || targetIndex >= blocks.length) return d;
+        const [removed] = blocks.splice(blockIndex, 1);
+        blocks.splice(targetIndex, 0, removed);
+        return { ...d, scheduleBreakdown: blocks };
+      }),
+    });
+  };
+
+  const moveSetup = (dayId: string, setupIndex: number, direction: -1 | 1) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        const setups = [...d.setups];
+        const targetIndex = setupIndex + direction;
+        if (targetIndex < 0 || targetIndex >= setups.length) return d;
+        const [removed] = setups.splice(setupIndex, 1);
+        setups.splice(targetIndex, 0, removed);
+        return { ...d, setups };
+      }),
+    });
+  };
+
+  const parseTimeToMinutes = (timeStr: string): number => {
+    if (!timeStr) return 420;
+    const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+    if (!match) return 420;
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const ampm = (match[3] || '').toUpperCase();
+    if (ampm === 'PM' && hours < 12) hours += 12;
+    if (ampm === 'AM' && hours === 12) hours = 0;
+    return hours * 60 + minutes;
+  };
+
+  const formatMinutesToTime = (totalMins: number): string => {
+    const normalized = ((totalMins % 1440) + 1440) % 1440;
+    let hours = Math.floor(normalized / 60);
+    const minutes = normalized % 60;
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    if (hours === 0) hours = 12;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')} ${ampm}`;
+  };
+
+  const autoScheduleDay = (dayId: string) => {
+    updatePlan({
+      shootDays: plan.shootDays.map((d) => {
+        if (d.id !== dayId) return d;
+        let currentMins = parseTimeToMinutes(d.callTime || '07:00 AM');
+        const blocks = d.scheduleBreakdown?.length ? [...d.scheduleBreakdown] : defaultScheduleBreakdown(d);
+        
+        const updatedBlocks = blocks.map((b) => {
+          let duration = b.estimatedMinutes || 45;
+          if (b.category === 'call') duration = 45;
+          else if (b.category === 'meal') duration = 60;
+          else if (b.category === 'wrap') duration = 30;
+          else if (b.category === 'setup') duration = b.estimatedMinutes || 60;
+
+          const startMins = currentMins;
+          const endMins = currentMins + duration;
+          const timeSlot = `${formatMinutesToTime(startMins)} - ${formatMinutesToTime(endMins)}`;
+          currentMins = endMins;
+
+          return {
+            ...b,
+            timeSlot,
+            estimatedMinutes: duration,
+          };
+        });
+
+        return {
+          ...d,
+          scheduleBreakdown: updatedBlocks,
         };
       }),
     });
@@ -708,7 +803,7 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {plan.shootDays.map((day) => (
+                  {plan.shootDays.map((day, dIdx) => (
                     <div
                       key={day.id}
                       className="bg-white border border-[#E2E2E6] rounded-xl overflow-hidden"
@@ -796,14 +891,34 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#111114] focus:outline-none focus:border-[#C6202F]"
                           />
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveDay(day.id)}
-                          className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
-                          aria-label="Delete shoot day"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={dIdx === 0}
+                            onClick={() => moveDay(dIdx, -1)}
+                            className="p-1.5 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                            title="Move day up"
+                          >
+                            <ChevronUp className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={dIdx === plan.shootDays.length - 1}
+                            onClick={() => moveDay(dIdx, 1)}
+                            className="p-1.5 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                            title="Move day down"
+                          >
+                            <ChevronDown className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveDay(day.id)}
+                            className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                            aria-label="Delete shoot day"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
 
                       <div className="p-5 space-y-6">
@@ -821,6 +936,15 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => autoScheduleDay(day.id)}
+                                title="Automatically calculate and adjust all block times from call time"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#111114] bg-white border border-[#D5D5DC] hover:border-[#C6202F] rounded-lg cursor-pointer transition-colors shadow-sm"
+                              >
+                                <Clock className="w-3 h-3 text-[#C6202F]" />
+                                Auto-Schedule Times
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleAddLunchBreak(day.id)}
@@ -870,119 +994,141 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
 
                           {/* Timeline Table */}
                           <div className="space-y-1.5 pt-1">
-                            {(day.scheduleBreakdown?.length
-                              ? day.scheduleBreakdown
-                              : defaultScheduleBreakdown(day)
-                            ).map((block) => {
-                              const isMeal = block.category === 'meal';
-                              return (
-                                <div
-                                  key={block.id}
-                                  className={`p-2.5 rounded-lg border grid grid-cols-1 md:grid-cols-[130px_100px_1fr_130px_1fr_auto] gap-2 items-center text-xs ${
-                                    isMeal
-                                      ? 'bg-[#FDF4F5] border-[#EABAC0]'
-                                      : 'bg-white border-[#E2E2E6]'
-                                  }`}
-                                >
-                                  <div>
-                                    <input
-                                      type="text"
-                                      value={block.timeSlot}
-                                      onChange={(e) =>
-                                        updateScheduleBlock(day.id, block.id, {
-                                          timeSlot: e.target.value,
-                                        })
-                                      }
-                                      placeholder="00:00 - 00:00"
-                                      className={`w-full font-mono text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
-                                        isMeal
-                                          ? 'bg-white border-[#EABAC0] font-bold text-[#891A23]'
-                                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#111114]'
-                                      }`}
-                                    />
-                                  </div>
-
-                                  <div>
-                                    <select
-                                      value={block.category}
-                                      onChange={(e) =>
-                                        updateScheduleBlock(day.id, block.id, {
-                                          category: e.target.value as any,
-                                        })
-                                      }
-                                      className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#111114] focus:outline-none focus:border-[#C6202F]"
-                                    >
-                                      <option value="call">Call</option>
-                                      <option value="setup">Setup</option>
-                                      <option value="meal">Meal Break</option>
-                                      <option value="move">Move</option>
-                                      <option value="wrap">Wrap</option>
-                                      <option value="general">General</option>
-                                    </select>
-                                  </div>
-
-                                  <div>
-                                    <div className="relative">
+                            {(() => {
+                              const blocks = day.scheduleBreakdown?.length
+                                ? day.scheduleBreakdown
+                                : defaultScheduleBreakdown(day);
+                              return blocks.map((block, bIdx) => {
+                                const isMeal = block.category === 'meal';
+                                return (
+                                  <div
+                                    key={block.id}
+                                    className={`p-2.5 rounded-lg border grid grid-cols-1 md:grid-cols-[130px_100px_1fr_130px_1fr_auto] gap-2 items-center text-xs ${
+                                      isMeal
+                                        ? 'bg-[#FDF4F5] border-[#EABAC0]'
+                                        : 'bg-white border-[#E2E2E6]'
+                                    }`}
+                                  >
+                                    <div>
                                       <input
                                         type="text"
-                                        value={block.activity}
+                                        value={block.timeSlot}
                                         onChange={(e) =>
                                           updateScheduleBlock(day.id, block.id, {
-                                            activity: e.target.value,
+                                            timeSlot: e.target.value,
                                           })
                                         }
-                                        placeholder="Activity / Milestone description"
-                                        className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
+                                        placeholder="00:00 - 00:00"
+                                        className={`w-full font-mono text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
                                           isMeal
                                             ? 'bg-white border-[#EABAC0] font-bold text-[#891A23]'
                                             : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#111114]'
                                         }`}
                                       />
                                     </div>
-                                  </div>
 
-                                  <div>
-                                    <input
-                                      type="text"
-                                      value={(block.shotIds || []).join(', ')}
-                                      onChange={(e) =>
-                                        updateScheduleBlock(day.id, block.id, {
-                                          shotIds: e.target.value
-                                            .split(',')
-                                            .map((x) => x.trim())
-                                            .filter(Boolean),
-                                        })
-                                      }
-                                      placeholder="Shots (optional)"
-                                      className="w-full font-mono text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#891A23] focus:outline-none focus:border-[#C6202F]"
-                                    />
-                                  </div>
+                                    <div>
+                                      <select
+                                        value={block.category}
+                                        onChange={(e) =>
+                                          updateScheduleBlock(day.id, block.id, {
+                                            category: e.target.value as any,
+                                          })
+                                        }
+                                        className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#111114] focus:outline-none focus:border-[#C6202F]"
+                                      >
+                                        <option value="call">Call</option>
+                                        <option value="setup">Setup</option>
+                                        <option value="meal">Meal Break</option>
+                                        <option value="move">Move</option>
+                                        <option value="wrap">Wrap</option>
+                                        <option value="general">General</option>
+                                      </select>
+                                    </div>
 
-                                  <div>
-                                    <input
-                                      type="text"
-                                      value={block.notes || ''}
-                                      onChange={(e) =>
-                                        updateScheduleBlock(day.id, block.id, {
-                                          notes: e.target.value,
-                                        })
-                                      }
-                                      placeholder="Notes (e.g. Catering provided, load-in)"
-                                      className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#5A5A66] focus:outline-none focus:border-[#C6202F]"
-                                    />
-                                  </div>
+                                    <div>
+                                      <div className="relative">
+                                        <input
+                                          type="text"
+                                          value={block.activity}
+                                          onChange={(e) =>
+                                            updateScheduleBlock(day.id, block.id, {
+                                              activity: e.target.value,
+                                            })
+                                          }
+                                          placeholder="Activity / Milestone description"
+                                          className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#C6202F] ${
+                                            isMeal
+                                              ? 'bg-white border-[#EABAC0] font-bold text-[#891A23]'
+                                              : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#111114]'
+                                          }`}
+                                        />
+                                      </div>
+                                    </div>
 
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRemoveScheduleBlock(day.id, block.id)}
-                                    className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
-                                    title="Delete schedule row"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              );
-                            })}
+                                    <div>
+                                      <input
+                                        type="text"
+                                        value={(block.shotIds || []).join(', ')}
+                                        onChange={(e) =>
+                                          updateScheduleBlock(day.id, block.id, {
+                                            shotIds: e.target.value
+                                              .split(',')
+                                              .map((x) => x.trim())
+                                              .filter(Boolean),
+                                          })
+                                        }
+                                        placeholder="Shots (optional)"
+                                        className="w-full font-mono text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#891A23] focus:outline-none focus:border-[#C6202F]"
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <input
+                                        type="text"
+                                        value={block.notes || ''}
+                                        onChange={(e) =>
+                                          updateScheduleBlock(day.id, block.id, {
+                                            notes: e.target.value,
+                                          })
+                                        }
+                                        placeholder="Notes (e.g. Catering provided, load-in)"
+                                        className="w-full text-xs px-2 py-1 rounded bg-[#F6F6F7] border border-[#E2E2E6] text-[#5A5A66] focus:outline-none focus:border-[#C6202F]"
+                                      />
+                                    </div>
+
+                                    <div className="flex items-center gap-0.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        disabled={bIdx === 0}
+                                        onClick={() => moveScheduleBlock(day.id, bIdx, -1)}
+                                        className="p-1 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                                        title="Move block up"
+                                      >
+                                        <ChevronUp className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={bIdx === blocks.length - 1}
+                                        onClick={() => moveScheduleBlock(day.id, bIdx, 1)}
+                                        className="p-1 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                                        title="Move block down"
+                                      >
+                                        <ChevronDown className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveScheduleBlock(day.id, block.id)}
+                                        className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                                        title="Delete schedule row"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              });
+                            })()}
                           </div>
                         </div>
 
@@ -1059,14 +1205,34 @@ export const Step9ShootPlan: React.FC<Step9ShootPlanProps> = ({
                                 />
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveSetup(day.id, sIdx)}
-                                className="p-2 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
-                                aria-label="Delete setup"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={sIdx === 0}
+                                  onClick={() => moveSetup(day.id, sIdx, -1)}
+                                  className="p-1 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                                  title="Move setup up"
+                                >
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={sIdx === day.setups.length - 1}
+                                  onClick={() => moveSetup(day.id, sIdx, 1)}
+                                  className="p-1 text-[#6E6E7A] hover:text-[#111114] disabled:opacity-30 cursor-pointer"
+                                  title="Move setup down"
+                                >
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveSetup(day.id, sIdx)}
+                                  className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                                  title="Delete setup"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
 
                             <div>

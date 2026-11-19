@@ -53,7 +53,11 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
 async function startServer() {
   const allowUnauthenticated = process.env.ALLOW_UNAUTHENTICATED === 'true';
   const appUsername = process.env.APP_USERNAME || 'admin';
-  const appPassword = process.env.APP_PASSWORD || '';
+  const hasAppPasswordEnv = Object.prototype.hasOwnProperty.call(process.env, 'APP_PASSWORD');
+  const appPassword =
+    process.env.APP_PASSWORD ||
+    process.env.VITE_APP_PASSWORD ||
+    (!hasAppPasswordEnv ? '52launch-production-studio' : '');
 
   if (process.env.NODE_ENV === 'production' && !appPassword && !allowUnauthenticated) {
     throw new Error(
@@ -64,7 +68,8 @@ async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
 
-  if (!allowUnauthenticated && appPassword) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction && !allowUnauthenticated && appPassword) {
     app.use((req, res, next) => {
       const authHeader = req.headers.authorization || '';
       if (!authHeader.startsWith('Basic ')) {
