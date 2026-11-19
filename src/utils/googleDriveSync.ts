@@ -136,29 +136,130 @@ function shouldSkipPopupRetry(err: unknown): boolean {
   );
 }
 
+function clearFirebaseOriginValidationCache(): void {
+  try {
+    const authInternal = auth as unknown as {
+      _popupRedirectResolver?: {
+        originValidationPromises?: Record<string, unknown>;
+      };
+    };
+    const cache = authInternal?._popupRedirectResolver?.originValidationPromises;
+    if (cache && typeof cache === 'object') {
+      for (const key of Object.keys(cache)) {
+        delete cache[key];
+      }
+    }
+  } catch {
+    // ignore internal SDK cache inspection errors
+  }
+}
+
+function doesHostnameMatchDomain(hostname: string, expectedDomain: string): boolean {
+  const cleanHost = hostname.toLowerCase();
+  const cleanExpected = expectedDomain.trim().toLowerCase();
+  if (!cleanHost || !cleanExpected) return false;
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(cleanExpected)) {
+    return cleanHost === cleanExpected;
+  }
+  const escaped = cleanExpected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^(.+\\.${escaped}|${escaped})$`, 'i');
+  return re.test(cleanHost);
+}
+
+async function fetchLiveAuthorizedDomains(): Promise<string[]> {
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects?key=${encodeURIComponent(firebaseConfig.apiKey)}`
+    );
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as { authorizedDomains?: unknown };
+    return Array.isArray(data.authorizedDomains)
+      ? data.authorizedDomains.map((d) => String(d))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function formatUnauthorizedDomainError(): Promise<Error> {
+  const currentHost =
+    typeof window !== 'undefined' ? window.location.hostname : 'unknown-host';
+  const currentOrigin =
+    typeof window !== 'undefined' ? window.location.origin : 'unknown-origin';
+  const authorizedDomains = await fetchLiveAuthorizedDomains();
+  const hostAlreadyAuthorized = authorizedDomains.some((d) =>
+    doesHostnameMatchDomain(currentHost, d)
+  );
+
+  if (hostAlreadyAuthorized) {
+    return new Error(
+      `Google Drive sign-in was blocked by a stale browser session on "${currentHost}". Please hard-reload this page (Cmd/Ctrl+Shift+R) and try signing in again.`
+    );
+  }
+
+  const authorizedList =
+    authorizedDomains.length > 0 ? authorizedDomains.join(', ') : 'none returned';
+  return new Error(
+    `Firebase Auth blocked sign-in from "${currentOrigin}" (auth/unauthorized-domain). Add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized domains for project "${firebaseConfig.projectId}" (currently authorized: ${authorizedList}).`
+  );
+}
+
 export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   user: DriveUser;
   accessToken: string;
 }> {
   isSigningIn = true;
   try {
+    clearFirebaseOriginValidationCache();
+
     provider.setCustomParameters({
       include_granted_scopes: 'true',
       prompt: forceConsent ? 'consent select_account' : 'select_account',
     });
 
+    const runPopup = async () => {
+      try {
+        return await signInWithPopup(auth, provider);
+      } catch (err) {
+        const code = (err as { code?: string })?.code || '';
+        if (code === 'auth/unauthorized-domain') {
+          clearFirebaseOriginValidationCache();
+          const currentHost =
+            typeof window !== 'undefined' ? window.location.hostname : '';
+          const authorizedDomains = await fetchLiveAuthorizedDomains();
+          const hostIsAuthorized = authorizedDomains.some((d) =>
+            doesHostnameMatchDomain(currentHost, d)
+          );
+          if (hostIsAuthorized) {
+            try {
+              return await signInWithPopup(auth, provider);
+            } catch (retryErr) {
+              const retryCode = (retryErr as { code?: string })?.code || '';
+              if (retryCode === 'auth/unauthorized-domain') {
+                clearFirebaseOriginValidationCache();
+                throw await formatUnauthorizedDomainError();
+              }
+              throw retryErr;
+            }
+          }
+          throw await formatUnauthorizedDomainError();
+        }
+        throw err;
+      }
+    };
+
     let result;
     try {
-      result = await signInWithPopup(auth, provider);
+      result = await runPopup();
     } catch (firstErr) {
-      if (forceConsent || shouldSkipPopupRetry(firstErr)) {
+      if (forceConsent || shouldSkipPopupRetry(firstErr) || (firstErr instanceof Error && firstErr.message.includes('auth/unauthorized-domain'))) {
         throw firstErr;
       }
       provider.setCustomParameters({
         include_granted_scopes: 'true',
         prompt: 'consent select_account',
       });
-      result = await signInWithPopup(auth, provider);
+      result = await runPopup();
     }
 
     const credential = GoogleAuthProvider.credentialFromResult(result);
@@ -170,7 +271,7 @@ export async function signInWithGoogleDrive(forceConsent = false): Promise<{
         include_granted_scopes: 'true',
         prompt: 'consent select_account',
       });
-      const retryResult = await signInWithPopup(auth, provider);
+      const retryResult = await runPopup();
       const retryCredential = GoogleAuthProvider.credentialFromResult(retryResult);
       const retryTokenResponse = (retryResult as unknown as { _tokenResponse?: { oauthAccessToken?: string } })._tokenResponse;
       accessToken = retryCredential?.accessToken || retryTokenResponse?.oauthAccessToken || undefined;

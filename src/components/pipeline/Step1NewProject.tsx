@@ -604,16 +604,15 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
     setLockedFileIds(nextLocked);
 
     // Immediately lock & parse selected files and populate intake
-    let token = driveToken;
-    if (!token) {
-      const res = await signInWithGoogleDrive(true);
-      token = res.accessToken;
-      setDriveToken(token);
-      setDriveUserEmail(res.user.email || null);
-    }
-
     setIsParsingDrive(true);
     try {
+      let token = driveToken;
+      if (!token) {
+        const res = await signInWithGoogleDrive(true);
+        token = res.accessToken;
+        setDriveToken(token);
+        setDriveUserEmail(res.user.email || null);
+      }
       const validUrls = googleDriveFolderUrls.map((u) => u.trim()).filter(Boolean);
       const selectedFiles = mergedFiles.filter((f) => Boolean(nextLocked[f.id]));
       const result = await parseGoogleDriveFolder(
@@ -975,7 +974,9 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
         setDriveToken(token);
         setDriveUserEmail(res.user.email || null);
       } catch (err) {
-        setDriveErrorMsg('Sign in with Google to create your Drive folder.');
+        setDriveErrorMsg(
+          err instanceof Error ? err.message : 'Sign in with Google to create your Drive folder.'
+        );
         return;
       }
     }
